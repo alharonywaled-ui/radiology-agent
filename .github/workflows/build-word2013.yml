@@ -64,6 +64,9 @@ jobs:
             $regasm="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\RegAsm.exe"
             & $regasm "word2013/bin/RadiologyAgent.WordAddin.dll" /regfile:"word2013/expected-com.reg" /nologo
             if(Test-Path word2013/expected-com.reg){ Get-Content word2013/expected-com.reg | Select-Object -First 100 }
+            Write-Host 'DIAGNOSTIC: Test direct managed instance on x86 .NET'
+            & "$env:WINDIR\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; Write-Host "MSCOREE_PRESENT=$(Test-Path \"$env:WINDIR\SysWOW64\mscoree.dll\")"; [Reflection.Assembly]::LoadFrom((Join-Path $env:LOCALAPPDATA "RadiologyAgent\Word2013\RadiologyAgent.WordAddin.dll")); $obj=New-Object RadiologyAgent.WordAddin; Write-Host "DIRECT_DOTNET_OK"'
+            Write-Host "DIRECT_DOTNET_EXIT=$LASTEXITCODE"
             Write-Host 'DIAGNOSTIC: Running RegAsm /codebase on Windows runner'
             & $regasm "word2013/bin/RadiologyAgent.WordAddin.dll" /codebase /nologo
             Write-Host "REGASM_EXIT=$LASTEXITCODE"
