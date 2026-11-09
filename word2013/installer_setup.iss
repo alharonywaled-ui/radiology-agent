@@ -57,10 +57,10 @@ begin
       SW_HIDE, ewWaitUntilTerminated, CheckExitCode) then
       NeedsKey := CheckExitCode <> 0;
   end;
-  KeyPage := CreateInputQueryPage(wpSelectDir, 'Gemini API Key',
-     'One-time Google Gemini API Key',
-     'Enter the Gemini API Key once. It will be encrypted with Windows DPAPI and reused automatically on later installs.');
-  KeyPage.Add('Gemini API Key:', True);
+  KeyPage := CreateInputQueryPage(wpSelectDir, 'Haronex API Key',
+     'One-time Haronex API Key',
+     'Enter your Haronex API Key once. It will be encrypted for your Windows account and reused automatically on later installs.');
+  KeyPage.Add('Haronex API Key:', True);
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -74,7 +74,7 @@ begin
   if CurPageID = KeyPage.ID then begin
     ApiKey := Trim(KeyPage.Values[0]);
     if (Length(ApiKey) < 30) or ((Copy(ApiKey,1,4) <> 'AIza') and (Copy(ApiKey,1,3) <> 'AQ.')) or (Pos(' ',ApiKey) > 0) then begin
-      MsgBox('Enter a Gemini API Key issued by Google AI Studio (AQ. or AIza format).', mbError, MB_OK);
+      MsgBox('Enter a valid Haronex API Key (AQ. or AIza format).', mbError, MB_OK);
       Result := False;
     end;
   end;
@@ -96,7 +96,7 @@ begin
         ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
         RaiseException('Failed to launch key encryption helper.');
       if ExitCode <> 0 then
-        RaiseException('Unable to encrypt Gemini API Key. Exit: ' + IntToStr(ExitCode));
+        RaiseException('Unable to encrypt Haronex API Key. Exit: ' + IntToStr(ExitCode));
     end;
     ApiKey := '';
   end;
