@@ -1,3 +1,11 @@
+# ⚠️ Word 2013 native add-in: deployment blocked after a real Word crash
+
+**9 Nov 2026:** The Windows CI COM activation test passed, but the add-in caused Microsoft Word 2013 (32-bit) to report serious Data Execution Prevention compatibility failures for `radiologyagent.wordaddin` and `radiology agent`. **Do not install or re-enable the current native EXE while the incident is unresolved.** CI does not run Word 2013 and therefore cannot certify Office compatibility.
+
+To recover Word safely, close Word and use [Recover-RadiologyAgent.ps1](word2013/Recover-RadiologyAgent.ps1). This disables Radiology Agent Word startup without disabling DEP, touching other add-ins, or deleting the Gemini key. Next engineering step: debug against a real Word 2013 x86 test environment with crash dumps and Office event logs, then certify an isolated new COM registration before release.
+
+---
+
 # Radiology Agent for Microsoft Word 2013 (32-bit)
 
 **Current installer:** [Native COM x86 Windows build](https://github.com/alharonywaled-ui/radiology-agent/actions/runs/42646949868) → **Artifacts** → `RadiologyAgent_Word2013_x86_TestedSetup`.
