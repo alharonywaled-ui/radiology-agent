@@ -60,8 +60,16 @@ begin
 end;
 
 procedure InitializeWizard;
+var
+  CheckExitCode: Integer;
 begin
-  NeedsKey := not FileExists(ExpandConstant('{localappdata}\RadiologyAgent\key.dpapi'));
+  NeedsKey := True;
+  if FileExists(ExpandConstant('{localappdata}\RadiologyAgent\key.dpapi')) and
+     FileExists(ExpandConstant('{localappdata}\RadiologyAgent\Word2013\RadiologyAgent.KeySetup.exe')) then begin
+    if Exec(ExpandConstant('{localappdata}\RadiologyAgent\Word2013\RadiologyAgent.KeySetup.exe'),
+      '--check', '', SW_HIDE, ewWaitUntilTerminated, CheckExitCode) then
+      NeedsKey := CheckExitCode <> 0;
+  end;
   KeyPage := CreateInputQueryPage(wpSelectDir,'Gemini API Key',
      'Only required on first installation',
      'Enter the key once. It is encrypted for your Windows account using DPAPI. Reinstalls reuse the saved key.');
@@ -78,7 +86,7 @@ begin
   Result := True;
   if CurPageID = KeyPage.ID then begin
     ApiKey := Trim(KeyPage.Values[0]);
-    if (Length(ApiKey) < 12) or (Pos(' ', ApiKey) > 0) then begin
+    if (Length(ApiKey) < 30) or (Copy(ApiKey, 1, 4) <> 'AIza') or (Pos(' ', ApiKey) > 0) then begin
       MsgBox('Enter a valid Gemini API Key.', mbError, MB_OK);
       Result := False;
     end;
@@ -90,6 +98,10 @@ begin
   Result := True;
   if not RegKeyExists(HKLM, 'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full') then begin
     MsgBox('Microsoft .NET Framework 4.5 or newer is required. Install it before this add-in.', mbError, MB_OK);
+    Result := False;
+  end;
+  if Result and not FileExists(ExpandConstant('{sys}\mscoree.dll')) then begin
+    MsgBox('The 32-bit .NET Framework COM runtime (mscoree.dll) is missing. Repair or enable .NET Framework 4.8 before installing. Installation has been cancelled to prevent an unloaded Word add-in.', mbError, MB_OK);
     Result := False;
   end;
 end;
