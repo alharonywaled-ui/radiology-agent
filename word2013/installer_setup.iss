@@ -1,8 +1,5 @@
 #define AppName "Radiology Agent for Word 2013"
-#define AppVersion "2.0.0"
-#define Clsid "{{D1FBEFD5-3B43-4516-9B7B-CDEB47AB0FA1}"
-#define ProgId "RadiologyAgent.WordAddin"
-
+#define AppVersion "2.1.0"
 [Setup]
 AppId={{30BC199A-18A5-4B07-8184-2899E30E2CD3}
 AppName={#AppName}
@@ -16,33 +13,15 @@ SolidCompression=yes
 PrivilegesRequired=lowest
 WizardStyle=modern
 CloseApplications=yes
+DisableProgramGroupPage=yes
 UninstallDisplayName=Radiology Agent (Word 2013 x86)
-; This per-user add-in is for 32-bit Word only and needs a properly licensed Word installation.
 
 [Files]
-Source: "bin\RadiologyAgent.WordAddin.dll"; DestDir: "{app}"; Flags: ignoreversion
+; Native 32-bit COM DLL: does not use managed COM activation through mscoree.dll.
+Source: "bin\RadiologyAgent.NativeShim.dll"; DestDir: "{app}"; Flags: ignoreversion regserver
+Source: "bin\RadiologyAgent.ReviewHost.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\RadiologyAgent.KeySetup.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\RadiologyAgent.KeySetup.exe"; DestDir: "{tmp}"; DestName: "KeyCheck.exe"; Flags: dontcopy
-
-[Registry]
-; Per-user .NET COM class activation: 32-bit Word reads the 32-bit registry view.
-Root: HKCU; Subkey: "Software\Classes\{#ProgId}"; ValueType: string; ValueName: ""; ValueData: "Radiology Agent Word Add-in"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\{#ProgId}\CLSID"; ValueType: string; ValueName: ""; ValueData: "{#Clsid}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\CLSID\{#Clsid}"; ValueType: string; ValueName: ""; ValueData: "RadiologyAgent.WordAddin"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\CLSID\{#Clsid}\InprocServer32"; ValueType: string; ValueName: ""; ValueData: "mscoree.dll"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\CLSID\{#Clsid}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Both"
-Root: HKCU; Subkey: "Software\Classes\CLSID\{#Clsid}\InprocServer32"; ValueType: string; ValueName: "Class"; ValueData: "RadiologyAgent.WordAddin"
-Root: HKCU; Subkey: "Software\Classes\CLSID\{#Clsid}\InprocServer32"; ValueType: string; ValueName: "Assembly"; ValueData: "RadiologyAgent.WordAddin, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
-Root: HKCU; Subkey: "Software\Classes\CLSID\{#Clsid}\InprocServer32"; ValueType: string; ValueName: "RuntimeVersion"; ValueData: "v4.0.30319"
-Root: HKCU; Subkey: "Software\Classes\CLSID\{#Clsid}\InprocServer32"; ValueType: string; ValueName: "CodeBase"; ValueData: "{code:ManagedCodeBase}"
-Root: HKCU; Subkey: "Software\Classes\CLSID\{#Clsid}\InprocServer32\0.0.0.0"; ValueType: string; ValueName: "Class"; ValueData: "RadiologyAgent.WordAddin"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\CLSID\{#Clsid}\InprocServer32\0.0.0.0"; ValueType: string; ValueName: "Assembly"; ValueData: "RadiologyAgent.WordAddin, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null"
-Root: HKCU; Subkey: "Software\Classes\CLSID\{#Clsid}\InprocServer32\0.0.0.0"; ValueType: string; ValueName: "RuntimeVersion"; ValueData: "v4.0.30319"
-Root: HKCU; Subkey: "Software\Classes\CLSID\{#Clsid}\InprocServer32\0.0.0.0"; ValueType: string; ValueName: "CodeBase"; ValueData: "{code:ManagedCodeBase}"
-Root: HKCU; Subkey: "Software\Classes\CLSID\{#Clsid}\ProgId"; ValueType: string; ValueName: ""; ValueData: "{#ProgId}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Microsoft\Office\Word\Addins\{#ProgId}"; ValueType: string; ValueName: "FriendlyName"; ValueData: "Radiology Agent"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Microsoft\Office\Word\Addins\{#ProgId}"; ValueType: string; ValueName: "Description"; ValueData: "AI radiology proofreading — verify all suggestions"
-Root: HKCU; Subkey: "Software\Microsoft\Office\Word\Addins\{#ProgId}"; ValueType: dword; ValueName: "LoadBehavior"; ValueData: "3"
 
 [Code]
 var
@@ -50,14 +29,14 @@ var
   NeedsKey: Boolean;
   ApiKey: String;
 
-function ManagedCodeBase(Param: String): String;
+function InitializeSetup: Boolean;
 var
-  P: String;
+  ReleaseNumber: Cardinal;
 begin
-  P := ExpandConstant('{app}\RadiologyAgent.WordAddin.dll');
-  StringChangeEx(P, '\', '/', True);
-  StringChangeEx(P, ' ', '%20', True);
-  Result := 'file:///' + P;
+  Result := RegQueryDWordValue(HKLM32, 'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full', 'Release', ReleaseNumber)
+    and (ReleaseNumber >= 528040);
+  if not Result then
+    MsgBox('Radiology Agent requires Microsoft .NET Framework 4.8 or newer. Install it before running this setup.', mbError, MB_OK);
 end;
 
 procedure InitializeWizard;
@@ -71,9 +50,9 @@ begin
       SW_HIDE, ewWaitUntilTerminated, CheckExitCode) then
       NeedsKey := CheckExitCode <> 0;
   end;
-  KeyPage := CreateInputQueryPage(wpSelectDir,'Gemini API Key',
-     'Only required on first installation',
-     'Enter the key once. It is encrypted for your Windows account using DPAPI. Reinstalls reuse the saved key.');
+  KeyPage := CreateInputQueryPage(wpSelectDir, 'Gemini API Key',
+     'One-time Google Gemini API Key',
+     'Enter the Gemini API Key once. It will be encrypted with Windows DPAPI and reused automatically on later installs.');
   KeyPage.Add('Gemini API Key:', True);
 end;
 
@@ -87,23 +66,10 @@ begin
   Result := True;
   if CurPageID = KeyPage.ID then begin
     ApiKey := Trim(KeyPage.Values[0]);
-    if (Length(ApiKey) < 30) or (Copy(ApiKey, 1, 4) <> 'AIza') or (Pos(' ', ApiKey) > 0) then begin
-      MsgBox('Enter a valid Gemini API Key.', mbError, MB_OK);
+    if (Length(ApiKey) < 30) or (Copy(ApiKey,1,4) <> 'AIza') or (Pos(' ',ApiKey) > 0) then begin
+      MsgBox('Enter a Gemini API Key beginning with AIza. Get a key from Google AI Studio.', mbError, MB_OK);
       Result := False;
     end;
-  end;
-end;
-
-function InitializeSetup: Boolean;
-begin
-  Result := True;
-  if not RegKeyExists(HKLM, 'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full') then begin
-    MsgBox('Microsoft .NET Framework 4.5 or newer is required. Install it before this add-in.', mbError, MB_OK);
-    Result := False;
-  end;
-  if Result and not FileExists(ExpandConstant('{sys}\mscoree.dll')) then begin
-    MsgBox('The 32-bit .NET Framework COM runtime (mscoree.dll) is missing. Repair or enable .NET Framework 4.8 before installing. Installation has been cancelled to prevent an unloaded Word add-in.', mbError, MB_OK);
-    Result := False;
   end;
 end;
 
@@ -118,11 +84,12 @@ begin
     if NeedsKey then begin
       TempPath := DirectoryName + '\pending.key';
       if not SaveStringToFile(TempPath, ApiKey, False) then
-        RaiseException('Cannot write temporary API key');
-      if not Exec(ExpandConstant('{app}\RadiologyAgent.KeySetup.exe'),
-          '', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
-        RaiseException('Failed to launch secure credential setup');
-      if ExitCode <> 0 then RaiseException('Could not encrypt API key (exit ' + IntToStr(ExitCode) + ')');
+        RaiseException('Failed to create temporary key file.');
+      if not Exec(ExpandConstant('{app}\RadiologyAgent.KeySetup.exe'), '',
+        ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+        RaiseException('Failed to launch key encryption helper.');
+      if ExitCode <> 0 then
+        RaiseException('Unable to encrypt Gemini API Key. Exit: ' + IntToStr(ExitCode));
     end;
     ApiKey := '';
   end;
