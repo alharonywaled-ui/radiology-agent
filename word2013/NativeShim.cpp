@@ -7,9 +7,9 @@
 #include <new>
 #include <cwchar>
 
-static const wchar_t* PROGID = L"RadiologyAgent.WordAddin";
-static const wchar_t* CLSID_TEXT = L"{D1FBEFD5-3B43-4516-9B7B-CDEB47AB0FA1}";
-static const GUID CLSID_RA = {0xD1FBEFD5,0x3B43,0x4516,{0x9B,0x7B,0xCD,0xEB,0x47,0xAB,0x0F,0xA1}};
+static const wchar_t* PROGID = L"RadiologyAgent.Word2013.Safe";
+static const wchar_t* CLSID_TEXT = L"{7B918AD1-1C42-4B73-A4BB-9FC83743DD6E}";
+static const GUID CLSID_RA = {0x7B918AD1,0x1C42,0x4B73,{0xA4,0xBB,0x9F,0xC8,0x37,0x43,0xDD,0x6E}};
 static const GUID IID_EXT = {0xB65AD801,0xABAF,0x11D0,{0xBB,0x8B,0x00,0xA0,0xC9,0x0F,0x27,0x44}};
 static const GUID IID_RIBBON = {0x000C0396,0x0000,0x0000,{0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
 static HMODULE g_instance = nullptr;
@@ -23,7 +23,7 @@ struct IExtensibility2 : IDispatch {
   virtual HRESULT STDMETHODCALLTYPE OnStartupComplete(SAFEARRAY**) = 0;
   virtual HRESULT STDMETHODCALLTYPE OnBeginShutdown(SAFEARRAY**) = 0;
 };
-struct IRibbonExtensibilityNative : IUnknown {
+struct IRibbonExtensibilityNative : IDispatch {
   virtual HRESULT STDMETHODCALLTYPE GetCustomUI(BSTR, BSTR*) = 0;
 };
 
