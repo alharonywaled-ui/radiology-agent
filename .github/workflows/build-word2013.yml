@@ -64,7 +64,11 @@ jobs:
             $regasm="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\RegAsm.exe"
             & $regasm "word2013/bin/RadiologyAgent.WordAddin.dll" /regfile:"word2013/expected-com.reg" /nologo
             if(Test-Path word2013/expected-com.reg){ Get-Content word2013/expected-com.reg | Select-Object -First 100 }
-            throw '32-bit COM activation failed'
+            Write-Host 'DIAGNOSTIC: Running RegAsm /codebase on Windows runner'
+            & $regasm "word2013/bin/RadiologyAgent.WordAddin.dll" /codebase /nologo
+            Write-Host "REGASM_EXIT=$LASTEXITCODE"
+            & "$env:WINDIR\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; $o=New-Object -ComObject RadiologyAgent.WordAddin; Write-Output "REGASM_COM_ACTIVATION_OK"'
+            if ($LASTEXITCODE -ne 0) { throw '32-bit COM activation failed even after RegAsm' }
           }
       - name: Upload EXE
         uses: actions/upload-artifact@v4
