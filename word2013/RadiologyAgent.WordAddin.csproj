@@ -7,7 +7,7 @@
     <OutputType>Library</OutputType>
     <RootNamespace>RadiologyAgent</RootNamespace>
     <AssemblyName>RadiologyAgent.WordAddin</AssemblyName>
-    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <PlatformTarget>x86</PlatformTarget>
     <FileAlignment>512</FileAlignment>
     <SignAssembly>false</SignAssembly>
