@@ -1,4 +1,4 @@
-name: Build Word 2013 x86 COM Installer
+name: Build Word 2013 x86 Native COM Installer
 on:
   push:
     branches: [main]
@@ -9,73 +9,78 @@ on:
 permissions:
   contents: read
 jobs:
-  compile:
+  build:
     runs-on: windows-2022
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
-      - name: Compile x86 .NET Framework add-in
+      - name: Compile x86 review application and DPAPI helper
         shell: pwsh
         run: |
-          msbuild word2013/RadiologyAgent.WordAddin.csproj /t:Rebuild /p:Configuration=Release /p:Platform=x86 /verbosity:minimal
-          if ($LASTEXITCODE -ne 0) { throw "COM add-in build failed" }
+          msbuild word2013/RadiologyAgent.ReviewHost.csproj /t:Rebuild /p:Configuration=Release /p:Platform=x86 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw "ReviewHost compile failed" }
           msbuild word2013/RadiologyAgent.KeySetup.csproj /t:Rebuild /p:Configuration=Release /p:Platform=x86 /verbosity:minimal
-          if ($LASTEXITCODE -ne 0) { throw "Key setup build failed" }
+          if ($LASTEXITCODE -ne 0) { throw "Key helper compile failed" }
           New-Item -ItemType Directory word2013/bin -Force | Out-Null
-          Copy-Item word2013/bin/Release/RadiologyAgent.WordAddin.dll word2013/bin/
+          Copy-Item word2013/bin/Release/RadiologyAgent.ReviewHost.exe word2013/bin/
           Copy-Item word2013/bin/Release/RadiologyAgent.KeySetup.exe word2013/bin/
-          $dll = [Reflection.AssemblyName]::GetAssemblyName((Resolve-Path word2013/bin/RadiologyAgent.WordAddin.dll))
-          Write-Host "Compiled assembly: $($dll.FullName)"
-          Write-Host 'MSBuild PlatformTarget=x86 was explicitly set for both projects.'
+      - name: Compile native 32-bit COM Ribbon add-in and smoke-test binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $vswhere=Join-Path $env:SystemDrive 'Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=(& $vswhere -latest -products '*' -property installationPath | Select-Object -First 1)
+          if (!$vs) { throw 'Visual Studio Build Tools missing' }
+          $root=$PWD.Path
+          $cmdPath=Join-Path $env:TEMP 'radiology-native-build.cmd'
+          @"
+          @echo off
+          call "$vs\Common7\Tools\VsDevCmd.bat" -arch=x86 -host_arch=x64
+          if errorlevel 1 exit /b 12
+          cl /nologo /LD /std:c++17 /EHsc /W3 /DUNICODE /D_UNICODE /Fe:"$root\word2013\bin\RadiologyAgent.NativeShim.dll" "$root\word2013\NativeShim.cpp" /link /DEF:"$root\word2013\NativeShim.def" ole32.lib oleaut32.lib shell32.lib
+          if errorlevel 1 exit /b 13
+          cl /nologo /std:c++17 /EHsc /W3 /DUNICODE /D_UNICODE /Fe:"$root\word2013\bin\NativeSmoke.exe" "$root\word2013\NativeSmoke.cpp" ole32.lib oleaut32.lib
+          if errorlevel 1 exit /b 14
+          "@ | Set-Content -LiteralPath $cmdPath -Encoding ASCII
+          & cmd.exe /c $cmdPath
+          if ($LASTEXITCODE -ne 0) { throw "Native x86 compilation failed: $LASTEXITCODE" }
       - name: Install Inno Setup
         shell: pwsh
         run: |
           choco install innosetup --yes --no-progress
-          if (!(Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { throw "Missing Inno Setup" }
-      - name: Compile setup EXE
+          $compiler=Join-Path $env:SystemDrive 'Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (!(Test-Path $compiler)) { throw "Missing Inno Setup" }
+      - name: Build one-file installer EXE
         shell: pwsh
         run: |
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" word2013/installer_setup.iss
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
-          if (!(Test-Path word2013/output/RadiologyAgent_Word2013_x86_Setup.exe)) { throw "Missing setup EXE" }
-          Get-FileHash word2013/output/RadiologyAgent_Word2013_x86_Setup.exe -Algorithm SHA256
-      - name: Smoke-test per-user installer and COM activation
+          $compiler=Join-Path $env:SystemDrive 'Program Files (x86)\Inno Setup 6\ISCC.exe'
+          & $compiler word2013/installer_setup.iss
+          if ($LASTEXITCODE -ne 0) { throw "Installer compile failed" }
+          if (!(Test-Path word2013/output/RadiologyAgent_Word2013_x86_Setup.exe)) { throw "Setup missing" }
+      - name: Test one-time key, silent install and native COM Ribbon
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $env:LOCALAPPDATA 'RadiologyAgent'
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:LOCALAPPDATA 'RadiologyAgent'
           New-Item -ItemType Directory -Path $root -Force | Out-Null
           Set-Content -LiteralPath (Join-Path $root 'pending.key') -Value 'AIza00000000000000000000000000000000000' -Encoding utf8 -NoNewline
           & word2013/bin/RadiologyAgent.KeySetup.exe
-          if ($LASTEXITCODE -ne 0) { throw 'Key DPAPI setup failed' }
-          if (!(Test-Path (Join-Path $root 'key.dpapi'))) { throw 'Encrypted key missing' }
-          $installer=(Resolve-Path 'word2013/output/RadiologyAgent_Word2013_x86_Setup.exe').Path
+          if ($LASTEXITCODE -ne 0) { throw 'DPAPI write failed' }
+          & word2013/bin/RadiologyAgent.KeySetup.exe --check
+          if ($LASTEXITCODE -ne 0) { throw 'DPAPI read/validation failed' }
+          $installer=(Resolve-Path word2013/output/RadiologyAgent_Word2013_x86_Setup.exe).Path
           $p=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "Silent install failed: $($p.ExitCode)" }
-          $reg='HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.WordAddin'
-          if (!(Test-Path $reg)) { throw 'Word COM add-in registry entry missing' }
-          if ((Get-ItemProperty $reg).LoadBehavior -ne 3) { throw 'COM add-in not configured for autoload' }
-          $script = '$ErrorActionPreference="Stop"; $key="Registry::HKEY_CURRENT_USER\Software\Classes\CLSID\{D1FBEFD5-3B43-4516-9B7B-CDEB47AB0FA1}\InprocServer32"; $v=Get-ItemProperty -LiteralPath $key; Write-Host "REGISTERED_CODEBASE=$($v.CodeBase)"; Write-Host "DLL_EXISTS=$(Test-Path ([uri]$v.CodeBase).LocalPath)"; Write-Host "COM_VERSION=$($v.Assembly)"; $o=New-Object -ComObject RadiologyAgent.WordAddin; if($null -eq $o){throw "COM returned null"}; Write-Output "COM_ACTIVATION_OK"'
-          & "$env:WINDIR\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command $script
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "DIAGNOSTIC: Comparing with RegAsm generated registry"
-            $regasm="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\RegAsm.exe"
-            & $regasm "word2013/bin/RadiologyAgent.WordAddin.dll" /regfile:"word2013/expected-com.reg" /nologo
-            if(Test-Path word2013/expected-com.reg){ Get-Content word2013/expected-com.reg | Select-Object -First 100 }
-            Write-Host 'DIAGNOSTIC: Test direct managed instance on x86 .NET'
-            & "$env:WINDIR\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; Write-Host "MSCOREE_PRESENT=$(Test-Path \"$env:WINDIR\SysWOW64\mscoree.dll\")"; [Reflection.Assembly]::LoadFrom((Join-Path $env:LOCALAPPDATA "RadiologyAgent\Word2013\RadiologyAgent.WordAddin.dll")); $obj=New-Object RadiologyAgent.WordAddin; Write-Host "DIRECT_DOTNET_OK"'
-            Write-Host "DIRECT_DOTNET_EXIT=$LASTEXITCODE"
-            Write-Host 'DIAGNOSTIC: Running RegAsm /codebase on Windows runner'
-            & $regasm "word2013/bin/RadiologyAgent.WordAddin.dll" /codebase /nologo
-            Write-Host "REGASM_EXIT=$LASTEXITCODE"
-            & "$env:WINDIR\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; $o=New-Object -ComObject RadiologyAgent.WordAddin; Write-Output "REGASM_COM_ACTIVATION_OK"'
-            if ($LASTEXITCODE -ne 0) { throw '32-bit COM activation failed even after RegAsm' }
-          }
-      - name: Upload EXE
+          if($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
+          $reg=Get-ItemProperty 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.WordAddin'
+          if ($reg.LoadBehavior -ne 3) { throw 'Autoload registration incorrect' }
+          & word2013/bin/NativeSmoke.exe
+          if ($LASTEXITCODE -ne 0) { throw "Native 32-bit COM or Ribbon activation failed: $LASTEXITCODE" }
+          Write-Host 'SMOKE_TEST_PASSED'
+      - name: Upload tested Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: RadiologyAgent_Word2013_x86_Setup
+          name: RadiologyAgent_Word2013_x86_TestedSetup
           path: word2013/output/RadiologyAgent_Word2013_x86_Setup.exe
           if-no-files-found: error
