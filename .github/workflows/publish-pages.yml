@@ -1,0 +1,41 @@
+name: Publish Radiology Agent Web
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'taskpane.html'
+      - 'taskpane.js'
+      - 'taskpane.css'
+      - 'icon*.png'
+      - '.github/workflows/publish-pages.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - name: Prepare public folder
+        shell: bash
+        run: |
+          mkdir -p public
+          cp taskpane.html taskpane.css taskpane.js icon16.png icon32.png icon80.png public/
+          echo 'Radiology Agent static Word taskpane (no secrets stored)' > public/README.txt
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
