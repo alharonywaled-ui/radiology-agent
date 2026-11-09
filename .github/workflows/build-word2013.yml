@@ -58,7 +58,7 @@ jobs:
           $compiler=Join-Path $env:SystemDrive 'Program Files (x86)\Inno Setup 6\ISCC.exe'
           & $compiler word2013/installer_setup.iss
           if ($LASTEXITCODE -ne 0) { throw "Installer compile failed" }
-          if (!(Test-Path word2013/output/RadiologyAgent_Word2013_x86_Setup.exe)) { throw "Setup missing" }
+          if (!(Test-Path word2013/output/RadiologyAgent_Word2013_x86_Safe_Setup.exe)) { throw "Setup missing" }
       - name: Test one-time key, silent install and native COM Ribbon
         shell: pwsh
         run: |
@@ -70,17 +70,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'DPAPI write failed' }
           & word2013/bin/RadiologyAgent.KeySetup.exe --check
           if ($LASTEXITCODE -ne 0) { throw 'DPAPI read/validation failed' }
-          $installer=(Resolve-Path word2013/output/RadiologyAgent_Word2013_x86_Setup.exe).Path
+          $installer=(Resolve-Path word2013/output/RadiologyAgent_Word2013_x86_Safe_Setup.exe).Path
           $p=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
           if($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
-          $reg=Get-ItemProperty 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.WordAddin'
+          $reg=Get-ItemProperty 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word2013.Safe'
           if ($reg.LoadBehavior -ne 3) { throw 'Autoload registration incorrect' }
+          if (Test-Path 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.WordAddin') { throw 'Legacy WordAddin registry entry was not removed' }
           & word2013/bin/NativeSmoke.exe
           if ($LASTEXITCODE -ne 0) { throw "Native 32-bit COM or Ribbon activation failed: $LASTEXITCODE" }
           Write-Host 'SMOKE_TEST_PASSED'
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: RadiologyAgent_Word2013_x86_TestedSetup
-          path: word2013/output/RadiologyAgent_Word2013_x86_Setup.exe
+          name: RadiologyAgent_Word2013_x86_ABI_Fixed
+          path: word2013/output/RadiologyAgent_Word2013_x86_Safe_Setup.exe
           if-no-files-found: error
