@@ -147,17 +147,61 @@ namespace RadiologyAgent {
   internal sealed class ReviewForm : Form {
     private readonly object application;
     private readonly Button review;
+    private readonly Button test;
+    private readonly Button changeKey;
     private readonly Label status;
     public ReviewForm(object app) {
       application=app;
-      Text="Radiology Agent — Word 2013";Width=530;Height=300;
+      Text="Radiology Agent — Word 2013";Width=530;Height=340;
       StartPosition=FormStartPosition.CenterScreen;FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;MinimizeBox=false;
       var title=new Label{Text="Radiology Agent",Font=new Font("Segoe UI",17,FontStyle.Bold),Location=new Point(20,18),Size=new Size(470,42)};
       var sub=new Label{Text="Review selected text or entire document. AI suggestions require clinical verification.",Location=new Point(20,65),Size=new Size(470,45)};
       review=new Button{Text="Review By Agent",Location=new Point(20,120),Size=new Size(470,43),BackColor=Color.FromArgb(20,96,208),ForeColor=Color.White,FlatStyle=FlatStyle.Flat,Font=new Font("Segoe UI",10,FontStyle.Bold)};
-      status=new Label{Text="Ready",Location=new Point(20,177),Size=new Size(470,65)};
-      Controls.Add(title);Controls.Add(sub);Controls.Add(review);Controls.Add(status);
+      test=new Button{Text="Test Connection (synthetic text only)",Location=new Point(20,175),Size=new Size(300,35)};
+      changeKey=new Button{Text="Change API Key",Location=new Point(330,175),Size=new Size(160,35)};
+      status=new Label{Text="Ready. Do not send identifiable patient data without organizational approval.",Location=new Point(20,220),Size=new Size(470,70)};
+      Controls.Add(title);Controls.Add(sub);Controls.Add(review);Controls.Add(test);Controls.Add(changeKey);Controls.Add(status);
       review.Click+=async (sender,args)=>await RunReview();
+      test.Click+=async (sender,args)=>await RunTest();
+      changeKey.Click+=(sender,args)=>ChangeKey();
+    }
+    private async Task RunTest() {
+      test.Enabled=false;
+      status.Text="Testing API with synthetic text only…";
+      try {
+        await Task.Run(()=>Gemini.Review("The lungs are clear. No pleural effusion is seen."));
+        status.Text="Gemini connection succeeded. No patient report was sent.";
+      } catch(Exception ex) {status.Text="Connection test: "+ex.Message;}
+      finally {test.Enabled=true;}
+    }
+    private void ChangeKey() {
+      using(var dialog=new Form()){
+        dialog.Text="Replace Gemini API Key";dialog.Width=470;dialog.Height=190;
+        dialog.StartPosition=FormStartPosition.CenterParent;
+        dialog.FormBorderStyle=FormBorderStyle.FixedDialog;
+        dialog.MaximizeBox=false;dialog.MinimizeBox=false;
+        var instruction=new Label{Text="Enter a NEW Google AI Studio key. The old key will be replaced using Windows DPAPI.",Location=new Point(15,12),Size=new Size(430,38)};
+        var field=new TextBox{Location=new Point(15,58),Width=425,UseSystemPasswordChar=true};
+        var save=new Button{Text="Save new key",Location=new Point(280,95),Width=160,DialogResult=DialogResult.OK};
+        dialog.Controls.Add(instruction);dialog.Controls.Add(field);dialog.Controls.Add(save);
+        dialog.AcceptButton=save;
+        if(dialog.ShowDialog(this)!=DialogResult.OK)return;
+        string key=field.Text.Trim();
+        if(key.Length<30||!(key.StartsWith("AQ.",StringComparison.Ordinal)||key.StartsWith("AIza",StringComparison.Ordinal))){
+          status.Text="Key not saved: unrecognized key format.";return;
+        }
+        foreach(char character in key)
+          if(!(Char.IsLetterOrDigit(character)||character=='_'||character=='-'||character=='.')){
+            status.Text="Key not saved: invalid characters.";return;
+          }
+        string dir=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"RadiologyAgent");
+        Directory.CreateDirectory(dir);
+        string target=Path.Combine(dir,"key.dpapi");
+        byte[] protectedKey=ProtectedData.Protect(Encoding.UTF8.GetBytes(key),null,DataProtectionScope.CurrentUser);
+        File.WriteAllText(target,Convert.ToBase64String(protectedKey),Encoding.ASCII);
+        field.Clear();key=null;
+        status.Text="New key saved securely. Run Test Connection before reviewing documents.";
+      }
     }
     private async Task RunReview() {
       review.Enabled=false;
