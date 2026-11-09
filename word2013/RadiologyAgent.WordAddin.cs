@@ -71,10 +71,49 @@ namespace RadiologyAgent {
       var request=(HttpWebRequest)WebRequest.Create("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent");
       request.Method="POST";request.ContentType="application/json; charset=utf-8";request.Timeout=85000;request.ReadWriteTimeout=85000;request.Headers["x-goog-api-key"]=key;
       byte[] bytes=Encoding.UTF8.GetBytes(serializer.Serialize(payload));
-      using(var s=request.GetRequestStream()) s.Write(bytes,0,bytes.Length);
       string response;
-      try {using(var result=(HttpWebResponse)request.GetResponse())using(var reader=new StreamReader(result.GetResponseStream())) response=reader.ReadToEnd();}
-      catch(WebException ex) { throw new Exception("Gemini request failed. Check the API key, internet and quota. "+ex.Status); }
+      try {
+        using(var stream=request.GetRequestStream()) stream.Write(bytes,0,bytes.Length);
+        using(var result=(HttpWebResponse)request.GetResponse())
+        using(var reader=new StreamReader(result.GetResponseStream())) response=reader.ReadToEnd();
+      }
+      catch(WebException ex) {
+        var http=ex.Response as HttpWebResponse;
+        if(http==null)throw new Exception("Gemini connection failed ("+ex.Status+"). Check TLS, proxy, firewall and internet access.");
+        string status="HTTP "+(int)http.StatusCode;
+        string googleStatus="";
+        string reason="";
+        try {
+          using(var reader=new StreamReader(http.GetResponseStream())) {
+            string body=reader.ReadToEnd();
+            var envelope=serializer.DeserializeObject(body) as Dictionary<string,object>;
+            if(envelope!=null&&envelope.ContainsKey("error")){
+              var error=envelope["error"] as Dictionary<string,object>;
+              if(error!=null&&error.ContainsKey("status"))googleStatus=Convert.ToString(error["status"]);
+              if(error!=null&&error.ContainsKey("details")){
+                var details=error["details"] as object[];
+                if(details!=null)foreach(var entry in details){
+                  var d=entry as Dictionary<string,object>;
+                  if(d!=null&&d.ContainsKey("reason")){reason=Convert.ToString(d["reason"]);break;}
+                }
+              }
+            }
+          }
+        } catch { /* Do not expose remote error bodies, patient data, or credentials. */ }
+        string detail=(googleStatus.Length>0?" "+googleStatus:"")+(reason.Length>0?" ["+reason+"]":"");
+        string advice;
+        switch((int)http.StatusCode) {
+          case 400: advice="Request or key rejected. Review API configuration.";break;
+          case 401: advice="Authentication rejected. Rotate the exposed key and enter a new Google AI Studio key.";break;
+          case 402: advice="Billing credit exhausted. Check your Google AI Studio billing.";break;
+          case 403: advice="Project/key lacks permission or billing/region prerequisites.";break;
+          case 404: advice="Model unavailable for this key/API version. Check available models.";break;
+          case 429: advice="Quota or rate limit reached. Check your Gemini usage limits.";break;
+          case 500: case 502: case 503: case 504: advice="Google service issue or timeout. Try again later.";break;
+          default: advice="Request failed. Verify key, model and network access.";break;
+        }
+        throw new Exception("Gemini "+status+detail+". "+advice);
+      }
       var root=serializer.DeserializeObject(response) as Dictionary<string,object>;
       var candidates=(object[])root["candidates"];
       var candidate=(Dictionary<string,object>)candidates[0];
@@ -111,12 +150,12 @@ namespace RadiologyAgent {
     private readonly Label status;
     public ReviewForm(object app) {
       application=app;
-      Text="Radiology Agent — Word 2013";Width=430;Height=260;
+      Text="Radiology Agent — Word 2013";Width=530;Height=300;
       StartPosition=FormStartPosition.CenterScreen;FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;MinimizeBox=false;
-      var title=new Label{Text="Radiology Agent",Font=new Font("Segoe UI",17,FontStyle.Bold),Location=new Point(20,18),Size=new Size(370,42)};
-      var sub=new Label{Text="Review selected text or entire document. AI suggestions require clinical verification.",Location=new Point(20,65),Size=new Size(365,45)};
-      review=new Button{Text="Review By Agent",Location=new Point(20,120),Size=new Size(370,43),BackColor=Color.FromArgb(20,96,208),ForeColor=Color.White,FlatStyle=FlatStyle.Flat,Font=new Font("Segoe UI",10,FontStyle.Bold)};
-      status=new Label{Text="Ready",Location=new Point(20,177),Size=new Size(370,40)};
+      var title=new Label{Text="Radiology Agent",Font=new Font("Segoe UI",17,FontStyle.Bold),Location=new Point(20,18),Size=new Size(470,42)};
+      var sub=new Label{Text="Review selected text or entire document. AI suggestions require clinical verification.",Location=new Point(20,65),Size=new Size(470,45)};
+      review=new Button{Text="Review By Agent",Location=new Point(20,120),Size=new Size(470,43),BackColor=Color.FromArgb(20,96,208),ForeColor=Color.White,FlatStyle=FlatStyle.Flat,Font=new Font("Segoe UI",10,FontStyle.Bold)};
+      status=new Label{Text="Ready",Location=new Point(20,177),Size=new Size(470,65)};
       Controls.Add(title);Controls.Add(sub);Controls.Add(review);Controls.Add(status);
       review.Click+=async (sender,args)=>await RunReview();
     }
