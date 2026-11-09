@@ -148,10 +148,10 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE h,DWORD reason,LPVOID) {
   if(reason==DLL_PROCESS_ATTACH){g_instance=h;DisableThreadLibraryCalls(h);}
   return TRUE;
 }
-extern "C" __declspec(dllexport) HRESULT STDAPICALLTYPE DllCanUnloadNow() {
+extern "C" __declspec(dllexport) HRESULT STDAPICALLTYPE RADllCanUnloadNow() {
   return (g_objects==0&&g_locks==0)?S_OK:S_FALSE;
 }
-extern "C" __declspec(dllexport) HRESULT STDAPICALLTYPE DllGetClassObject(REFCLSID clsid,REFIID iid,void** out) {
+extern "C" __declspec(dllexport) HRESULT STDAPICALLTYPE RADllGetClassObject(REFCLSID clsid,REFIID iid,void** out) {
   if(!IsEqualGUID(clsid,CLSID_RA))return CLASS_E_CLASSNOTAVAILABLE;
   Factory* factory=new(std::nothrow) Factory();
   if(!factory)return E_OUTOFMEMORY;
