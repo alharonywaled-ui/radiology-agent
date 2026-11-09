@@ -68,7 +68,7 @@ namespace RadiologyAgent {
         {"generationConfig",new Dictionary<string,object>{{"responseMimeType","application/json"},{"temperature",0.1}}}
       };
       ServicePointManager.SecurityProtocol=(SecurityProtocolType)3072;
-      var request=(HttpWebRequest)WebRequest.Create("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent");
+      var request=(HttpWebRequest)WebRequest.Create("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent");
       request.Method="POST";request.ContentType="application/json; charset=utf-8";request.Timeout=85000;request.ReadWriteTimeout=85000;request.Headers["x-goog-api-key"]=key;
       byte[] bytes=Encoding.UTF8.GetBytes(serializer.Serialize(payload));
       string response;
