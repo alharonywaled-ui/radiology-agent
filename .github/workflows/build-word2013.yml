@@ -59,7 +59,13 @@ jobs:
           if ((Get-ItemProperty $reg).LoadBehavior -ne 3) { throw 'COM add-in not configured for autoload' }
           $script = '$ErrorActionPreference="Stop"; $key="Registry::HKEY_CURRENT_USER\Software\Classes\CLSID\{D1FBEFD5-3B43-4516-9B7B-CDEB47AB0FA1}\InprocServer32"; $v=Get-ItemProperty -LiteralPath $key; Write-Host "REGISTERED_CODEBASE=$($v.CodeBase)"; Write-Host "DLL_EXISTS=$(Test-Path ([uri]$v.CodeBase).LocalPath)"; Write-Host "COM_VERSION=$($v.Assembly)"; $o=New-Object -ComObject RadiologyAgent.WordAddin; if($null -eq $o){throw "COM returned null"}; Write-Output "COM_ACTIVATION_OK"'
           & "$env:WINDIR\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command $script
-          if ($LASTEXITCODE -ne 0) { throw '32-bit COM activation failed' }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "DIAGNOSTIC: Comparing with RegAsm generated registry"
+            $regasm="$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\RegAsm.exe"
+            & $regasm "word2013/bin/RadiologyAgent.WordAddin.dll" /regfile:"word2013/expected-com.reg" /nologo
+            if(Test-Path word2013/expected-com.reg){ Get-Content word2013/expected-com.reg | Select-Object -First 100 }
+            throw '32-bit COM activation failed'
+          }
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
