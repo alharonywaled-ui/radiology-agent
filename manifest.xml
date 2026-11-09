@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0" xsi:type="TaskPaneApp">
+<Id>63d395aa-953b-4d8f-bf56-7a45327622fb</Id><Version>1.0.0.0</Version><ProviderName>Radiology Agent</ProviderName><DefaultLocale>en-US</DefaultLocale>
+<DisplayName DefaultValue="Radiology Agent"/><Description DefaultValue="AI-assisted radiology report proofreading. Clinical verification required."/>
+<IconUrl DefaultValue="https://alharonywaled-ui.github.io/radiology-agent/icon32.png"/><HighResolutionIconUrl DefaultValue="https://alharonywaled-ui.github.io/radiology-agent/icon80.png"/>
+<SupportUrl DefaultValue="https://alharonywaled-ui.github.io/radiology-agent/taskpane.html"/>
+<AppDomains><AppDomain>https://alharonywaled-ui.github.io</AppDomain></AppDomains>
+<Hosts><Host Name="Document"/></Hosts><Requirements><Sets DefaultMinVersion="1.1"><Set Name="WordApi" MinVersion="1.4"/></Sets></Requirements>
+<DefaultSettings><SourceLocation DefaultValue="https://alharonywaled-ui.github.io/radiology-agent/taskpane.html"/></DefaultSettings><Permissions>ReadWriteDocument</Permissions>
+<VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+<Hosts><Host xsi:type="Document"><DesktopFormFactor>
+<GetStarted><Title resid="Started.Title"/><Description resid="Started.Description"/><LearnMoreUrl resid="Pane.Url"/></GetStarted>
+<ExtensionPoint xsi:type="PrimaryCommandSurface"><CustomTab id="Radiology.Tab"><Group id="Radiology.Group"><Label resid="Group.Label"/>
+<Icon><bt:Image size="16" resid="Icon.16"/><bt:Image size="32" resid="Icon.32"/><bt:Image size="80" resid="Icon.80"/></Icon>
+<Control xsi:type="Button" id="Radiology.Review"><Label resid="Button.Label"/><Supertip><Title resid="Button.Label"/><Description resid="Button.Description"/></Supertip><Icon><bt:Image size="16" resid="Icon.16"/><bt:Image size="32" resid="Icon.32"/><bt:Image size="80" resid="Icon.80"/></Icon><Action xsi:type="ShowTaskpane"><TaskpaneId>Radiology.Pane</TaskpaneId><SourceLocation resid="Pane.Url"/></Action></Control></Group><Label resid="Tab.Label"/></CustomTab></ExtensionPoint>
+</DesktopFormFactor></Host></Hosts>
+<Resources><bt:Images>
+<bt:Image id="Icon.16" DefaultValue="https://alharonywaled-ui.github.io/radiology-agent/icon16.png"/>
+<bt:Image id="Icon.32" DefaultValue="https://alharonywaled-ui.github.io/radiology-agent/icon32.png"/>
+<bt:Image id="Icon.80" DefaultValue="https://alharonywaled-ui.github.io/radiology-agent/icon80.png"/>
+</bt:Images><bt:Urls><bt:Url id="Pane.Url" DefaultValue="https://alharonywaled-ui.github.io/radiology-agent/taskpane.html"/></bt:Urls>
+<bt:ShortStrings><bt:String id="Tab.Label" DefaultValue="Radiology Agent"/><bt:String id="Group.Label" DefaultValue="Report Review"/><bt:String id="Button.Label" DefaultValue="Review Text"/><bt:String id="Started.Title" DefaultValue="Radiology Agent"/></bt:ShortStrings>
+<bt:LongStrings><bt:String id="Button.Description" DefaultValue="Review and annotate the radiology report"/><bt:String id="Started.Description" DefaultValue="Choose Review Text on the Radiology Agent tab."/></bt:LongStrings>
+</Resources></VersionOverrides></OfficeApp>
