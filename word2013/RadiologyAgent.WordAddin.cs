@@ -79,7 +79,7 @@ namespace RadiologyAgent {
       }
       catch(WebException ex) {
         var http=ex.Response as HttpWebResponse;
-        if(http==null)throw new Exception("Gemini connection failed ("+ex.Status+"). Check TLS, proxy, firewall and internet access.");
+        if(http==null)throw new Exception("Haronex connection failed ("+ex.Status+"). Check TLS, proxy, firewall and internet access.");
         string status="HTTP "+(int)http.StatusCode;
         string googleStatus="";
         string reason="";
@@ -104,15 +104,15 @@ namespace RadiologyAgent {
         string advice;
         switch((int)http.StatusCode) {
           case 400: advice="Request or key rejected. Review API configuration.";break;
-          case 401: advice="Authentication rejected. Rotate the exposed key and enter a new Google AI Studio key.";break;
-          case 402: advice="Billing credit exhausted. Check your Google AI Studio billing.";break;
+          case 401: advice="Authentication rejected. Replace the API key with a valid new key during setup.";break;
+          case 402: advice="API billing credit exhausted. Check provider billing.";break;
           case 403: advice="Project/key lacks permission or billing/region prerequisites.";break;
           case 404: advice="Model unavailable for this key/API version. Check available models.";break;
-          case 429: advice="Quota or rate limit reached. Check your Gemini usage limits.";break;
-          case 500: case 502: case 503: case 504: advice="Google service issue or timeout. Try again later.";break;
+          case 429: advice="Quota or rate limit reached. Check Haronex usage limits.";break;
+          case 500: case 502: case 503: case 504: advice="Service issue or timeout. Try again later.";break;
           default: advice="Request failed. Verify key, model and network access.";break;
         }
-        throw new Exception("Gemini "+status+detail+". "+advice);
+        throw new Exception("Haronex "+status+detail+". "+advice);
       }
       var root=serializer.DeserializeObject(response) as Dictionary<string,object>;
       var candidates=(object[])root["candidates"];
@@ -136,10 +136,10 @@ namespace RadiologyAgent {
     }
     private static string ReadKey() {
       string path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"RadiologyAgent","key.dpapi");
-      if(!File.Exists(path))throw new Exception("Gemini key is missing. Reinstall Radiology Agent and enter your key.");
+      if(!File.Exists(path))throw new Exception("Haronex key is missing. Reinstall Radiology Agent and enter your key.");
       byte[] raw=Convert.FromBase64String(File.ReadAllText(path).Trim());
       string key=Encoding.UTF8.GetString(ProtectedData.Unprotect(raw,null,DataProtectionScope.CurrentUser));
-      if(key.Length<12)throw new Exception("Invalid saved Gemini key.");
+      if(key.Length<12)throw new Exception("Invalid saved Haronex key.");
       return key;
     }
   }
@@ -169,7 +169,7 @@ namespace RadiologyAgent {
         string report=String.IsNullOrWhiteSpace(selected)?full:selected;
         if(String.IsNullOrWhiteSpace(report))throw new Exception("The document is empty.");
         if(report.Length>18000)throw new Exception("Select a section of 18,000 characters or fewer.");
-        status.Text="Reviewing with Gemini…";
+        status.Text="Reviewing with Haronex…";
         var issues=await Task.Run(()=>Gemini.Review(report));
         status.Text="Adding Word annotations…";
         int added=0,skipped=0;
