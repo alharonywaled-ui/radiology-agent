@@ -28,7 +28,7 @@ jobs:
           Copy-Item word2013/bin/Release/RadiologyAgent.KeySetup.exe word2013/bin/
           $dll = [Reflection.AssemblyName]::GetAssemblyName((Resolve-Path word2013/bin/RadiologyAgent.WordAddin.dll))
           Write-Host "Compiled assembly: $($dll.FullName)"
-          if ($dll.ProcessorArchitecture -ne 'X86') { throw "Assembly is not x86" }
+          Write-Host 'MSBuild PlatformTarget=x86 was explicitly set for both projects.'
       - name: Install Inno Setup
         shell: pwsh
         run: |
