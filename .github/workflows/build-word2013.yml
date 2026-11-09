@@ -41,6 +41,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
           if (!(Test-Path word2013/output/RadiologyAgent_Word2013_x86_Setup.exe)) { throw "Missing setup EXE" }
           Get-FileHash word2013/output/RadiologyAgent_Word2013_x86_Setup.exe -Algorithm SHA256
+      - name: Smoke-test per-user installer and COM activation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:LOCALAPPDATA 'RadiologyAgent'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          Set-Content -LiteralPath (Join-Path $root 'pending.key') -Value 'CI_TEST_KEY_NOT_REAL_123456' -Encoding utf8 -NoNewline
+          & word2013/bin/RadiologyAgent.KeySetup.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Key DPAPI setup failed' }
+          if (!(Test-Path (Join-Path $root 'key.dpapi'))) { throw 'Encrypted key missing' }
+          $installer=(Resolve-Path 'word2013/output/RadiologyAgent_Word2013_x86_Setup.exe').Path
+          $p=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Silent install failed: $($p.ExitCode)" }
+          $reg='HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.WordAddin'
+          if (!(Test-Path $reg)) { throw 'Word COM add-in registry entry missing' }
+          if ((Get-ItemProperty $reg).LoadBehavior -ne 3) { throw 'COM add-in not configured for autoload' }
+          $script = '$ErrorActionPreference="Stop"; $o=New-Object -ComObject RadiologyAgent.WordAddin; if($null -eq $o){throw "COM returned null"}; Write-Output "COM_ACTIVATION_OK"'
+          & "$env:WINDIR\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command $script
+          if ($LASTEXITCODE -ne 0) { throw '32-bit COM activation failed' }
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
