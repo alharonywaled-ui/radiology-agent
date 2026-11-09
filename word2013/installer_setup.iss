@@ -22,6 +22,7 @@ UninstallDisplayName=Radiology Agent (Word 2013 x86)
 [Files]
 Source: "bin\RadiologyAgent.WordAddin.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\RadiologyAgent.KeySetup.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\RadiologyAgent.KeySetup.exe"; DestDir: "{tmp}"; DestName: "KeyCheck.exe"; Flags: dontcopy
 
 [Registry]
 ; Per-user .NET COM class activation: 32-bit Word reads the 32-bit registry view.
@@ -64,10 +65,10 @@ var
   CheckExitCode: Integer;
 begin
   NeedsKey := True;
-  if FileExists(ExpandConstant('{localappdata}\RadiologyAgent\key.dpapi')) and
-     FileExists(ExpandConstant('{localappdata}\RadiologyAgent\Word2013\RadiologyAgent.KeySetup.exe')) then begin
-    if Exec(ExpandConstant('{localappdata}\RadiologyAgent\Word2013\RadiologyAgent.KeySetup.exe'),
-      '--check', '', SW_HIDE, ewWaitUntilTerminated, CheckExitCode) then
+  if FileExists(ExpandConstant('{localappdata}\RadiologyAgent\key.dpapi')) then begin
+    ExtractTemporaryFile('KeyCheck.exe');
+    if Exec(ExpandConstant('{tmp}\KeyCheck.exe'), '--check', '',
+      SW_HIDE, ewWaitUntilTerminated, CheckExitCode) then
       NeedsKey := CheckExitCode <> 0;
   end;
   KeyPage := CreateInputQueryPage(wpSelectDir,'Gemini API Key',
