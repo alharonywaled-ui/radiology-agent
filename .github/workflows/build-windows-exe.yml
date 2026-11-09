@@ -1,0 +1,37 @@
+name: Build Radiology Agent Windows EXE
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate manifest
+        shell: pwsh
+        run: |
+          [xml]$manifest = Get-Content -Raw manifest.xml
+          if ($manifest.OfficeApp.Id -ne '63d395aa-953b-4d8f-bf56-7a45327622fb') { throw 'Unexpected manifest ID' }
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --yes --no-progress
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $compiler)) { throw "Inno Setup not found: $compiler" }
+      - name: Compile Windows installer
+        shell: pwsh
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $compiler "windows\installer_setup.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Installer compiler failed: $LASTEXITCODE" }
+          if (!(Test-Path "windows\output\RadiologyAgent_Setup_1.0.0.exe")) { throw 'Expected EXE missing' }
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RadiologyAgent_Setup_Windows
+          path: windows/output/RadiologyAgent_Setup_1.0.0.exe
+          if-no-files-found: error
+          retention-days: 30
