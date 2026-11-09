@@ -5,9 +5,9 @@ using System.Text;
 namespace RadiologyAgent {
   internal static class KeySetup {
     private static bool IsPlausibleGeminiKey(string key) {
-      if(String.IsNullOrEmpty(key)||!key.StartsWith("AIza",StringComparison.Ordinal)||key.Length<30||key.Length>128) return false;
+      if(String.IsNullOrEmpty(key)||!(key.StartsWith("AIza",StringComparison.Ordinal)||key.StartsWith("AQ.",StringComparison.Ordinal))||key.Length<30||key.Length>128) return false;
       foreach(char ch in key)
-        if(!Char.IsLetterOrDigit(ch) && ch!='_' && ch!='-') return false;
+        if(!Char.IsLetterOrDigit(ch) && ch!='_' && ch!='-' && ch!='.') return false;
       return true;
     }
     private static int Main() {
