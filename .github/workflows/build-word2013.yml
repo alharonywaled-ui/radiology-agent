@@ -65,7 +65,7 @@ jobs:
           $ErrorActionPreference='Stop'
           $root=Join-Path $env:LOCALAPPDATA 'RadiologyAgent'
           New-Item -ItemType Directory -Path $root -Force | Out-Null
-          Set-Content -LiteralPath (Join-Path $root 'pending.key') -Value 'AIza00000000000000000000000000000000000' -Encoding utf8 -NoNewline
+          Set-Content -LiteralPath (Join-Path $root 'pending.key') -Value 'AQ.Ab00000000000000000000000000000000000000000000000' -Encoding utf8 -NoNewline
           & word2013/bin/RadiologyAgent.KeySetup.exe
           if ($LASTEXITCODE -ne 0) { throw 'DPAPI write failed' }
           & word2013/bin/RadiologyAgent.KeySetup.exe --check
