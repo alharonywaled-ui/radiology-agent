@@ -1,13 +1,13 @@
 #define AppName "Radiology Agent for Word 2013"
-#define AppVersion "2.1.0"
+#define AppVersion "2.2.0"
 [Setup]
-AppId={{30BC199A-18A5-4B07-8184-2899E30E2CD3}
+AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
 AppVersion={#AppVersion}
-DefaultDirName={localappdata}\RadiologyAgent\Word2013
+DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
 DefaultGroupName=Radiology Agent
 OutputDir=output
-OutputBaseFilename=RadiologyAgent_Word2013_x86_Setup
+OutputBaseFilename=RadiologyAgent_Word2013_x86_Safe_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -22,6 +22,13 @@ Source: "bin\RadiologyAgent.NativeShim.dll"; DestDir: "{app}"; Flags: ignorevers
 Source: "bin\RadiologyAgent.ReviewHost.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\RadiologyAgent.KeySetup.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\RadiologyAgent.KeySetup.exe"; DestDir: "{tmp}"; DestName: "KeyCheck.exe"; Flags: dontcopy
+
+[Registry]
+; Remove ONLY the known older Radiology Agent registrations. Does not touch Nitro/other add-ins.
+Root: HKCU; Subkey: "Software\Microsoft\Office\Word\Addins\RadiologyAgent.WordAddin"; Flags: deletekey
+Root: HKCU; Subkey: "Software\Microsoft\Office\15.0\Word\Addins\RadiologyAgent.WordAddin"; Flags: deletekey
+Root: HKCU; Subkey: "Software\Classes\RadiologyAgent.WordAddin"; Flags: deletekey
+Root: HKCU; Subkey: "Software\Classes\CLSID\{{D1FBEFD5-3B43-4516-9B7B-CDEB47AB0FA1}"; Flags: deletekey
 
 [Code]
 var
