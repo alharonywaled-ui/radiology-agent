@@ -68,16 +68,27 @@ namespace RadiologyAgent {
         {"generationConfig",new Dictionary<string,object>{{"responseMimeType","application/json"},{"temperature",0.1}}}
       };
       ServicePointManager.SecurityProtocol=(SecurityProtocolType)3072;
-      var request=(HttpWebRequest)WebRequest.Create("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent");
-      request.Method="POST";request.ContentType="application/json; charset=utf-8";request.Timeout=85000;request.ReadWriteTimeout=85000;request.Headers["x-goog-api-key"]=key;
       byte[] bytes=Encoding.UTF8.GetBytes(serializer.Serialize(payload));
-      string response;
-      try {
-        using(var stream=request.GetRequestStream()) stream.Write(bytes,0,bytes.Length);
-        using(var result=(HttpWebResponse)request.GetResponse())
-        using(var reader=new StreamReader(result.GetResponseStream())) response=reader.ReadToEnd();
-      }
-      catch(WebException ex) {
+      string response=null;
+      for(int attempt=0;attempt<3;attempt++) {
+        var request=(HttpWebRequest)WebRequest.Create("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent");
+        request.Method="POST";request.ContentType="application/json; charset=utf-8";
+        request.Timeout=85000;request.ReadWriteTimeout=85000;
+        request.Headers["x-goog-api-key"]=key;
+        try {
+          using(var stream=request.GetRequestStream()) stream.Write(bytes,0,bytes.Length);
+          using(var result=(HttpWebResponse)request.GetResponse())
+          using(var reader=new StreamReader(result.GetResponseStream())) response=reader.ReadToEnd();
+          break;
+        }
+        catch(WebException ex) {
+          var retryResponse=ex.Response as HttpWebResponse;
+          int retryStatus=retryResponse==null?0:(int)retryResponse.StatusCode;
+          if(attempt<2&&(retryStatus==500||retryStatus==502||retryStatus==503||retryStatus==504)){
+            retryResponse.Close();
+            System.Threading.Thread.Sleep(attempt==0?1500:3500);
+            continue;
+          }
         var http=ex.Response as HttpWebResponse;
         if(http==null)throw new Exception("Haronex connection failed ("+ex.Status+"). Check TLS, proxy, firewall and internet access.");
         string status="HTTP "+(int)http.StatusCode;
@@ -113,6 +124,7 @@ namespace RadiologyAgent {
           default: advice="Request failed. Verify key, model and network access.";break;
         }
         throw new Exception("Haronex "+status+detail+". "+advice);
+        }
       }
       var root=serializer.DeserializeObject(response) as Dictionary<string,object>;
       var candidates=(object[])root["candidates"];
