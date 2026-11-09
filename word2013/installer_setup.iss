@@ -1,6 +1,6 @@
 #define AppName "Radiology Agent for Word 2013"
 #define AppVersion "2.0.0"
-#define Clsid "{D1FBEFD5-3B43-4516-9B7B-CDEB47AB0FA1}"
+#define Clsid "{{D1FBEFD5-3B43-4516-9B7B-CDEB47AB0FA1}"
 #define ProgId "RadiologyAgent.WordAddin"
 
 [Setup]
