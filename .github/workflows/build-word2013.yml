@@ -1,0 +1,49 @@
+name: Build Word 2013 x86 COM Installer
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'word2013/**'
+      - '.github/workflows/build-word2013.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Compile x86 .NET Framework add-in
+        shell: pwsh
+        run: |
+          msbuild word2013/RadiologyAgent.WordAddin.csproj /t:Rebuild /p:Configuration=Release /p:Platform=x86 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw "COM add-in build failed" }
+          msbuild word2013/RadiologyAgent.KeySetup.csproj /t:Rebuild /p:Configuration=Release /p:Platform=x86 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw "Key setup build failed" }
+          New-Item -ItemType Directory word2013/bin -Force | Out-Null
+          Copy-Item word2013/bin/Release/RadiologyAgent.WordAddin.dll word2013/bin/
+          Copy-Item word2013/bin/Release/RadiologyAgent.KeySetup.exe word2013/bin/
+          $dll = [Reflection.AssemblyName]::GetAssemblyName((Resolve-Path word2013/bin/RadiologyAgent.WordAddin.dll))
+          Write-Host "Compiled assembly: $($dll.FullName)"
+          if ($dll.ProcessorArchitecture -ne 'X86') { throw "Assembly is not x86" }
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --yes --no-progress
+          if (!(Test-Path "\${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { throw "Missing Inno Setup" }
+      - name: Compile setup EXE
+        shell: pwsh
+        run: |
+          & "\${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" word2013/installer_setup.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          if (!(Test-Path word2013/output/RadiologyAgent_Word2013_x86_Setup.exe)) { throw "Missing setup EXE" }
+          Get-FileHash word2013/output/RadiologyAgent_Word2013_x86_Setup.exe -Algorithm SHA256
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: RadiologyAgent_Word2013_x86_Setup
+          path: word2013/output/RadiologyAgent_Word2013_x86_Setup.exe
+          if-no-files-found: error
