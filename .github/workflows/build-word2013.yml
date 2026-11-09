@@ -57,7 +57,7 @@ jobs:
           $reg='HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.WordAddin'
           if (!(Test-Path $reg)) { throw 'Word COM add-in registry entry missing' }
           if ((Get-ItemProperty $reg).LoadBehavior -ne 3) { throw 'COM add-in not configured for autoload' }
-          $script = '$ErrorActionPreference="Stop"; $o=New-Object -ComObject RadiologyAgent.WordAddin; if($null -eq $o){throw "COM returned null"}; Write-Output "COM_ACTIVATION_OK"'
+          $script = '$ErrorActionPreference="Stop"; $key="Registry::HKEY_CURRENT_USER\Software\Classes\CLSID\{D1FBEFD5-3B43-4516-9B7B-CDEB47AB0FA1}\InprocServer32"; $v=Get-ItemProperty -LiteralPath $key; Write-Host "REGISTERED_CODEBASE=$($v.CodeBase)"; Write-Host "DLL_EXISTS=$(Test-Path ([uri]$v.CodeBase).LocalPath)"; Write-Host "COM_VERSION=$($v.Assembly)"; $o=New-Object -ComObject RadiologyAgent.WordAddin; if($null -eq $o){throw "COM returned null"}; Write-Output "COM_ACTIVATION_OK"'
           & "$env:WINDIR\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command $script
           if ($LASTEXITCODE -ne 0) { throw '32-bit COM activation failed' }
       - name: Upload EXE
