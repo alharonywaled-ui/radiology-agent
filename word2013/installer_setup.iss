@@ -66,8 +66,8 @@ begin
   Result := True;
   if CurPageID = KeyPage.ID then begin
     ApiKey := Trim(KeyPage.Values[0]);
-    if (Length(ApiKey) < 30) or (Copy(ApiKey,1,4) <> 'AIza') or (Pos(' ',ApiKey) > 0) then begin
-      MsgBox('Enter a Gemini API Key beginning with AIza. Get a key from Google AI Studio.', mbError, MB_OK);
+    if (Length(ApiKey) < 30) or ((Copy(ApiKey,1,4) <> 'AIza') and (Copy(ApiKey,1,3) <> 'AQ.')) or (Pos(' ',ApiKey) > 0) then begin
+      MsgBox('Enter a Gemini API Key issued by Google AI Studio (AQ. or AIza format).', mbError, MB_OK);
       Result := False;
     end;
   end;
