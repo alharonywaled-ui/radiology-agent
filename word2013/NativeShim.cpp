@@ -4,6 +4,7 @@
 #include <oleauto.h>
 #include <shellapi.h>
 #include <string>
+#include <new>
 #include <cwchar>
 
 static const wchar_t* PROGID = L"RadiologyAgent.WordAddin";
