@@ -47,7 +47,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:LOCALAPPDATA 'RadiologyAgent'
           New-Item -ItemType Directory -Path $root -Force | Out-Null
-          Set-Content -LiteralPath (Join-Path $root 'pending.key') -Value 'CI_TEST_KEY_NOT_REAL_123456' -Encoding utf8 -NoNewline
+          Set-Content -LiteralPath (Join-Path $root 'pending.key') -Value 'AIza00000000000000000000000000000000000' -Encoding utf8 -NoNewline
           & word2013/bin/RadiologyAgent.KeySetup.exe
           if ($LASTEXITCODE -ne 0) { throw 'Key DPAPI setup failed' }
           if (!(Test-Path (Join-Path $root 'key.dpapi'))) { throw 'Encrypted key missing' }
