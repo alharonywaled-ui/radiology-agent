@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<PropertyGroup>
+ <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+ <Platform Condition=" '$(Platform)' == '' ">x86</Platform>
+ <ProjectGuid>{58C7CD17-690B-4AA6-8D47-27D4A50F2A8B}</ProjectGuid>
+ <OutputType>WinExe</OutputType><RootNamespace>RadiologyAgent</RootNamespace>
+ <AssemblyName>RadiologyAgent.ReviewHost</AssemblyName>
+ <StartupObject>RadiologyAgent.ReviewHost</StartupObject>
+ <TargetFrameworkVersion>v4.8</TargetFrameworkVersion><PlatformTarget>x86</PlatformTarget>
+</PropertyGroup>
+<PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|x86' "><OutputPath>bin\Release\</OutputPath><Optimize>true</Optimize></PropertyGroup>
+<ItemGroup><Reference Include="System"/><Reference Include="System.Core"/><Reference Include="System.Drawing"/><Reference Include="System.Security"/><Reference Include="System.Web.Extensions"/><Reference Include="System.Windows.Forms"/><Reference Include="Microsoft.CSharp"/></ItemGroup>
+<ItemGroup><Compile Include="ReviewHost.cs"/><Compile Include="RadiologyAgent.WordAddin.cs"/></ItemGroup>
+<Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets"/>
+</Project>
