@@ -3,6 +3,7 @@
 #include <ole2.h>
 #include <oleauto.h>
 #include <ocidl.h>
+#include <olectl.h>
 #include <shellapi.h>
 #include <string>
 #include <new>
