@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <ole2.h>
 #include <oleauto.h>
+#include <ocidl.h>
 #include <shellapi.h>
 #include <string>
 #include <new>
@@ -15,6 +16,77 @@ static const GUID IID_RIBBON = {0x000C0396,0x0000,0x0000,{0xC0,0x00,0x00,0x00,0x
 static HMODULE g_instance = nullptr;
 static LONG g_objects = 0;
 static LONG g_locks = 0;
+static IDispatch* g_ribbonUi = nullptr;
+static UINT_PTR g_ribbonTimer = 0;
+static DWORD g_lastReviewResult = 0xFFFFFFFF;
+static DWORD ReadReviewResult() {
+  DWORD value=0, size=sizeof(value);
+  HKEY key=nullptr;
+  if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,KEY_QUERY_VALUE,&key)==ERROR_SUCCESS) {
+    if(RegQueryValueExW(key,L"ReviewResult",nullptr,nullptr,reinterpret_cast<BYTE*>(&value),&size)!=ERROR_SUCCESS)value=0;
+    RegCloseKey(key);
+  }
+  return value;
+}
+static void RefreshRibbonButton() {
+  if(!g_ribbonUi)return;
+  LPOLESTR method=const_cast<LPOLESTR>(L"InvalidateControl");
+  DISPID dispid=0;
+  if(FAILED(g_ribbonUi->GetIDsOfNames(IID_NULL,&method,1,LOCALE_USER_DEFAULT,&dispid)))return;
+  VARIANTARG arg;VariantInit(&arg);
+  arg.vt=VT_BSTR;arg.bstrVal=SysAllocString(L"RadiologyAgentReview");
+  if(!arg.bstrVal)return;
+  DISPPARAMS params={&arg,nullptr,1,0};
+  g_ribbonUi->Invoke(dispid,IID_NULL,LOCALE_USER_DEFAULT,DISPATCH_METHOD,&params,nullptr,nullptr,nullptr);
+  VariantClear(&arg);
+}
+static VOID CALLBACK RibbonStateTimer(HWND,UINT,UINT_PTR,DWORD) {
+  DWORD state=ReadReviewResult();
+  if(state!=g_lastReviewResult) {
+    g_lastReviewResult=state;
+    RefreshRibbonButton();
+  }
+}
+static HRESULT CreateReviewIcon(DWORD state,VARIANT* out) {
+  if(!out)return E_POINTER;
+  HDC screen=GetDC(nullptr);
+  if(!screen)return E_FAIL;
+  HDC dc=CreateCompatibleDC(screen);
+  HBITMAP bmp=CreateCompatibleBitmap(screen,32,32);
+  ReleaseDC(nullptr,screen);
+  if(!dc||!bmp){if(dc)DeleteDC(dc);if(bmp)DeleteObject(bmp);return E_OUTOFMEMORY;}
+  HGDIOBJ old=SelectObject(dc,bmp);
+  RECT area={0,0,32,32};
+  HBRUSH white=CreateSolidBrush(RGB(255,255,255));
+  FillRect(dc,&area,white);DeleteObject(white);
+  COLORREF color=state==1?RGB(24,160,75):(state==2?RGB(210,45,45):RGB(30,100,200));
+  HBRUSH brush=CreateSolidBrush(color);
+  HGDIOBJ oldBrush=SelectObject(dc,brush);
+  HPEN pen=CreatePen(PS_SOLID,1,color);
+  HGDIOBJ oldPen=SelectObject(dc,pen);
+  Ellipse(dc,2,2,30,30);
+  SelectObject(dc,oldPen);DeleteObject(pen);
+  SelectObject(dc,oldBrush);DeleteObject(brush);
+  HPEN markPen=CreatePen(PS_SOLID,3,RGB(255,255,255));
+  oldPen=SelectObject(dc,markPen);
+  if(state==2){
+    MoveToEx(dc,10,10,nullptr);LineTo(dc,22,22);
+    MoveToEx(dc,22,10,nullptr);LineTo(dc,10,22);
+  }else{
+    MoveToEx(dc,9,16,nullptr);LineTo(dc,14,22);
+    MoveToEx(dc,14,22,nullptr);LineTo(dc,24,10);
+  }
+  SelectObject(dc,oldPen);DeleteObject(markPen);
+  SelectObject(dc,old);DeleteDC(dc);
+  PICTDESC desc={};desc.cbSizeofstruct=sizeof(desc);desc.picType=PICTYPE_BITMAP;
+  desc.bmp.hbitmap=bmp;desc.bmp.hpal=nullptr;
+  IPictureDisp* picture=nullptr;
+  HRESULT hr=OleCreatePictureIndirect(&desc,IID_IPictureDisp,TRUE,reinterpret_cast<void**>(&picture));
+  if(FAILED(hr)){DeleteObject(bmp);return hr;}
+  VariantInit(out);out->vt=VT_DISPATCH;out->pdispVal=picture;
+  return S_OK;
+}
+
 
 struct IExtensibility2 : IDispatch {
   virtual HRESULT STDMETHODCALLTYPE OnConnection(IDispatch*, LONG, IDispatch*, SAFEARRAY**) = 0;
@@ -89,18 +161,38 @@ public:
       else if(!_wcsicmp(n,L"OnStartupComplete")) ids[i]=4;
       else if(!_wcsicmp(n,L"OnBeginShutdown")) ids[i]=5;
       else if(!_wcsicmp(n,L"ReviewTextClick")) ids[i]=100;
+      else if(!_wcsicmp(n,L"RibbonLoaded")) ids[i]=101;
+      else if(!_wcsicmp(n,L"ReviewIcon")) ids[i]=102;
       else return DISP_E_UNKNOWNNAME;
     }
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE Invoke(DISPID id,REFIID,LCID,WORD,DISPPARAMS*,VARIANT* result,EXCEPINFO*,UINT*) override {
+  HRESULT STDMETHODCALLTYPE Invoke(DISPID id,REFIID,LCID,WORD,DISPPARAMS* params,VARIANT* result,EXCEPINFO*,UINT*) override {
     if(result)VariantInit(result);
     if(id==100){LaunchReview();return S_OK;}
+    if(id==101) {
+      if(params&&params->cArgs>=1) {
+        VARIANTARG& arg=params->rgvarg[0];
+        IDispatch* ui=arg.vt==VT_DISPATCH?arg.pdispVal:nullptr;
+        if(ui) {
+          if(g_ribbonUi)g_ribbonUi->Release();
+          g_ribbonUi=ui;g_ribbonUi->AddRef();
+          g_lastReviewResult=ReadReviewResult();
+          if(!g_ribbonTimer)g_ribbonTimer=SetTimer(nullptr,0,500,RibbonStateTimer);
+        }
+      }
+      return S_OK;
+    }
+    if(id==102)return CreateReviewIcon(ReadReviewResult(),result);
     if(id>=1&&id<=5)return S_OK;
     return DISP_E_MEMBERNOTFOUND;
   }
   HRESULT STDMETHODCALLTYPE OnConnection(IDispatch*,LONG,IDispatch*,SAFEARRAY**) override{return S_OK;}
-  HRESULT STDMETHODCALLTYPE OnDisconnection(LONG,SAFEARRAY**) override{return S_OK;}
+  HRESULT STDMETHODCALLTYPE OnDisconnection(LONG,SAFEARRAY**) override{
+    if(g_ribbonTimer){KillTimer(nullptr,g_ribbonTimer);g_ribbonTimer=0;}
+    if(g_ribbonUi){g_ribbonUi->Release();g_ribbonUi=nullptr;}
+    return S_OK;
+  }
   HRESULT STDMETHODCALLTYPE OnAddInsUpdate(SAFEARRAY**) override{return S_OK;}
   HRESULT STDMETHODCALLTYPE OnStartupComplete(SAFEARRAY**) override{return S_OK;}
   HRESULT STDMETHODCALLTYPE OnBeginShutdown(SAFEARRAY**) override{return S_OK;}
@@ -108,10 +200,10 @@ public:
     if(!xml)return E_POINTER;
     static const wchar_t* ui =
       LR"(<?xml version="1.0" encoding="utf-8"?>)"
-      LR"(<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui">)"
+      LR"(<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="RibbonLoaded">)"
       LR"(<ribbon><tabs><tab id="RadiologyAgentTab" label="Radiology Agent">)"
       LR"(<group id="RadiologyAgentGroup" label="Report Review">)"
-      LR"(<button id="RadiologyAgentReview" label="Review Text" size="large" imageMso="ReviewAcceptChange" onAction="ReviewTextClick"/>)"
+      LR"(<button id="RadiologyAgentReview" label="Review Text" size="large" getImage="ReviewIcon" onAction="ReviewTextClick"/>)"
       LR"(</group></tab></tabs></ribbon></customUI>)";
     *xml=SysAllocString(ui);
     return *xml?S_OK:E_OUTOFMEMORY;
