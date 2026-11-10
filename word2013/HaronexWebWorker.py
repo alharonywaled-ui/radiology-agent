@@ -1,10 +1,11 @@
 # Haronex experimental Gemini Web browser worker. No API keys or passwords.
-# Only the user-controlled, logged-in browser session is used.
+# Browser must be signed out; disposable Guest mode profile, no account/session reuse.
 # Protocol: one JSON object on stdin; one JSON object on stdout.
 import json
 import os
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 URL = "https://gemini.google.com/app"
@@ -122,35 +123,33 @@ def main():
             raise ValueError("One or more prompts are invalid.")
         from selenium import webdriver
         from selenium.webdriver.edge.options import Options
-        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Haronex" / "BrowserProfile"
-        base.mkdir(parents=True, exist_ok=True)
-        options = Options()
-        options.add_argument("--user-data-dir=" + str(base))
-        options.add_argument("--no-first-run")
-        options.add_argument("--disable-notifications")
-        options.add_argument("--window-size=1100,800")
-        driver = webdriver.Edge(options=options)
-        try:
-            all_issues = []
-            for index, prompt in enumerate(prompts):
-                driver.get(URL)
-                deadline = time.monotonic() + 120
-                while editor(driver) is None and time.monotonic() < deadline:
-                    time.sleep(0.5)
-                if editor(driver) is None:
-                    raise RuntimeError("Gemini Web login or verification required. Sign in once in the opened Edge window, then retry.")
-                # Minimize while web service processes prompts. Never bypass login/verification.
-                try:
-                    driver.minimize_window()
-                except Exception:
-                    pass
-                before = len(response_texts(driver))
-                send_prompt(driver, prompt)
-                parsed = wait_for_response(driver, before)
-                all_issues.append(parsed["issues"])
-            result(True, groups=all_issues, requests=len(prompts))
-        finally:
-            driver.quit()
+        # An isolated temporary profile is deliberately not the user's Edge profile.
+        # Never use stored Google sign-in cookies or credentials.
+        with tempfile.TemporaryDirectory(prefix="HaronexGuest_") as fresh_profile:
+            options = Options()
+            options.add_argument("--user-data-dir=" + fresh_profile)
+            options.add_argument("--guest")
+            options.add_argument("--headless=new")
+            options.add_argument("--no-first-run")
+            options.add_argument("--disable-notifications")
+            options.add_argument("--window-size=1100,800")
+            driver = webdriver.Edge(options=options)
+            try:
+                all_issues = []
+                for index, prompt in enumerate(prompts):
+                    driver.get(URL)
+                    deadline = time.monotonic() + 25
+                    while editor(driver) is None and time.monotonic() < deadline:
+                        time.sleep(0.5)
+                    if editor(driver) is None:
+                        raise RuntimeError("Guest text input unavailable. Gemini may require sign-in or may be unsupported for this location/device.")
+                    before = len(response_texts(driver))
+                    send_prompt(driver, prompt)
+                    parsed = wait_for_response(driver, before)
+                    all_issues.append(parsed["issues"])
+                result(True, groups=all_issues, requests=len(prompts), mode="guest")
+            finally:
+                driver.quit()
     except Exception as exc:
         result(False, error=str(exc)[:400])
 
