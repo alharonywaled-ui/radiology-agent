@@ -82,7 +82,7 @@ def send_prompt(driver, prompt):
         driver.execute_cdp_cmd("Input.insertText", {"text": prompt})
     except Exception:
         field.send_keys(prompt)
-    time.sleep(0.9)
+    time.sleep(0.2)
     for selector in ('button[aria-label*="Send"]', 'button[aria-label*="send"]',
                      'button[data-test-id*="send"]', 'button.send-button'):
         for button in driver.find_elements("css selector", selector):
@@ -107,9 +107,9 @@ def wait_for_response(driver, previous_count, seconds=160):
             if marker != stable:
                 stable = marker
                 stable_since = time.monotonic()
-            elif stable_since and time.monotonic() - stable_since >= 3:
+            elif stable_since and time.monotonic() - stable_since >= 1.5:
                 return parsed
-        time.sleep(1)
+        time.sleep(0.5)
     raise RuntimeError("No complete JSON answer received within the timeout. Gemini Web may have changed.")
 
 def main():
@@ -136,7 +136,7 @@ def main():
                 driver.get(URL)
                 deadline = time.monotonic() + 120
                 while editor(driver) is None and time.monotonic() < deadline:
-                    time.sleep(2)
+                    time.sleep(0.5)
                 if editor(driver) is None:
                     raise RuntimeError("Gemini Web login or verification required. Sign in once in the opened Edge window, then retry.")
                 # Minimize while web service processes prompts. Never bypass login/verification.
