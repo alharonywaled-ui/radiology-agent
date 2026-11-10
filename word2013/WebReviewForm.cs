@@ -15,7 +15,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    private const string ReviewAlgorithmVersion="haronex-guest-only-v4-cache1";
+    private const string ReviewAlgorithmVersion="haronex-comprehensive-v5-two-pass-cache1";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=1; Height=1;
@@ -36,13 +36,21 @@ namespace RadiologyAgent {
     }
     private static string BuildPrompt(string text,int index,int total) {
       return "You are Haronex, a cautious English radiology report proofreader. "+
-        "Identify spelling, grammar, terminology consistency mistakes and ONLY clear internal contradictions. "+
-        "Never invent medical findings, diagnoses, treatment, or measurements. "+
-        "Return ONE strict JSON object, no Markdown, no introduction. "+
-        "Schema: {\"issues\":[{\"quote\":\"exact substring from text\",\"category\":\"language or logic\",\"explanation\":\"brief explanation, no patient identifiers\",\"suggestion\":\"optional proposed wording\"}]}. "+
-        "Use only categories language and logic. Keep each quote exactly as in the report. "+
-        "Do not repeat patient identifiers. If no reliable issues return {\"issues\":[]}. "+
-        "Clinical verification is mandatory. Part "+(index+1)+"/"+total+":\n"+text;
+        "Perform a COMPLETE structured review BEFORE answering, in this order: "+
+        "PHASE 1: inspect every sentence for spelling, grammar, syntax, punctuation, ambiguous phrasing and inconsistencies in language. "+
+        "PHASE 2: inspect medical terminology and abbreviations for internal consistency and obvious transcription errors; "+
+        "do not change valid radiology terms or infer findings not explicitly in the text. "+
+        "PHASE 3: compare the findings and impression, laterality, negation, lesion counts, dates and measurements "+
+        "for CLEAR contradictions supported entirely by this chunk. Flag possible contradictions as needing clinical verification. "+
+        "PHASE 4: re-read each sentence and heading to find any remaining independent issues missed in earlier phases. "+
+        "Find as many distinct, well-supported issues as the text warrants. Never invent findings or diagnoses. "+
+        "Return ONE complete JSON object only, without markdown, introduction, or any extra text. "+
+        "Use schema {\\\"issues\\\":[{\\\"quote\\\":\\\"exact substring from report\\\",\\\"category\\\":\\\"language or logic\\\",\\\"explanation\\\":\\\"short reason\\\",\\\"suggestion\\\":\\\"optional correction\\\"}]}. "+
+        "Only categories language and logic are accepted. Each quote MUST be copied exactly, including spaces, from the report. "+
+        "Include each distinct issue once; do not repeat patient identifiers in reasons or suggestions. "+
+        "An empty issues array is allowed ONLY if no reliable issues were found after all four phases. "+
+        "Never assert the report is clinically safe. Clinical verification is mandatory. "+
+        "PART "+(index+1)+" OF "+total+" REPORT_TEXT_START\\n"+text;
     }
     private static bool Approved() {
       using(var key=Registry.CurrentUser.OpenSubKey(@"Software\Haronex")) {
@@ -116,12 +124,12 @@ namespace RadiologyAgent {
         var prompts=new List<string>();
         for(int i=0;i<chunks.Count;i++)prompts.Add(BuildPrompt(chunks[i],i,chunks.Count));
         var serializer=new JavaScriptSerializer{MaxJsonLength=2000000};
-        var payload=serializer.Serialize(new Dictionary<string,object>{{"prompts",prompts}});
+        var payload=serializer.Serialize(new Dictionary<string,object>{{"prompts",prompts},{"texts",chunks},{"review_version",ReviewAlgorithmVersion}});
         string cacheFile=CachePath(report,hasSelection);
         string workerResult=ReadCached(cacheFile);
         bool cached=workerResult!=null;
         if(!cached) {
-          status.Text="Reviewing "+report.Length+" characters in "+chunks.Count+
+          status.Text="Comprehensive two-pass review of "+report.Length+" characters in "+chunks.Count+
             " part(s) in signed-out Guest Mode (no Google account).";
           workerResult=await Task.Run(()=>CallBrowserWorker(payload,chunks.Count));
         } else {
@@ -133,8 +141,11 @@ namespace RadiologyAgent {
           throw new Exception("Web review did not complete: "+Safe(error,330));
         }
         // Cache only completed, validated responses (never error pages or partial replies).
-        if(!root.ContainsKey("mode")||Convert.ToString(root["mode"])!="guest")
+        if(!root.ContainsKey("mode")||Convert.ToString(root["mode"])!="guest"||
+           !root.ContainsKey("review_version")||Convert.ToString(root["review_version"])!=ReviewAlgorithmVersion)
           throw new Exception("Unexpected non-guest browser result; no Word changes applied.");
+        if(!root.ContainsKey("passes")||Convert.ToInt32(root["passes"])!=2)
+          throw new Exception("Incomplete review stages; no Word changes applied.");
         var groups=root["groups"] as object[];
         if(groups==null||groups.Length!=chunks.Count)throw new Exception("Incomplete web response: no Word changes applied.");
         var valid=new List<Tuple<string,string,string,string>>();
