@@ -85,10 +85,7 @@ namespace RadiologyAgent {
         if(!ConnectWord())return;
         PollWord();
         CheckClick();
-        if(!working&&!failed&&readyResponse==null&&currentText!=null
-           &&WebReviewForm.Approved()
-           &&(DateTime.UtcNow-lastChangeUtc).TotalMilliseconds>=DebounceMilliseconds)
-          StartAnalysis();
+        // No background API calls: only explicit Review Text click triggers analysis.
       } catch {
         // Word may temporarily be in a modal operation; retry without leaking report text.
       } finally {polling=false;}
@@ -152,6 +149,7 @@ namespace RadiologyAgent {
       // The user clicked before review was ready. Show the final popup after the
       // current version has completed, never falsely apply stale results.
       pendingClick=true;
+      if(!working)StartAnalysis();
     }
 
     private static List<string> Chunks(string report) {
@@ -175,10 +173,10 @@ namespace RadiologyAgent {
         var parser=new JavaScriptSerializer{MaxJsonLength=2000000};
         var root=parser.DeserializeObject(json) as Dictionary<string,object>;
         if(root==null||!root.ContainsKey("ok")||!Convert.ToBoolean(root["ok"]))return null;
-        if(!root.ContainsKey("mode")||Convert.ToString(root["mode"])!="guest")return null;
+        if(!root.ContainsKey("mode")||Convert.ToString(root["mode"])!="groq")return null;
         if(!root.ContainsKey("review_version")||
            Convert.ToString(root["review_version"])!=WebReviewForm.ReviewAlgorithmVersion)return null;
-        if(!root.ContainsKey("passes")||Convert.ToInt32(root["passes"])!=2)return null;
+        if(!root.ContainsKey("passes")||Convert.ToInt32(root["passes"])!=1)return null;
         var groups=root["groups"] as object[];
         var chunks=Chunks(report);
         if(groups==null||groups.Length!=chunks.Count)return null;
@@ -212,7 +210,8 @@ namespace RadiologyAgent {
         var serializer=new JavaScriptSerializer{MaxJsonLength=2000000};
         string payload=serializer.Serialize(new Dictionary<string,object> {
           {"prompts",prompts},{"texts",chunks},
-          {"review_version",WebReviewForm.ReviewAlgorithmVersion}
+          {"review_version",WebReviewForm.ReviewAlgorithmVersion},
+          {"api_key",WebReviewForm.ReadGroqKey()}
         });
         string answer=await Task.Run(()=>WebReviewForm.CallBrowserWorker(payload,chunks.Count,token.Token));
         if(token.IsCancellationRequested||id!=documentId||report!=currentText)return;
@@ -247,7 +246,7 @@ namespace RadiologyAgent {
           {"explanation","Laterality conflict"},{"suggestion","Verify laterality"}
         };
         var response=new Dictionary<string,object> {
-          {"ok",true},{"mode","guest"},{"passes",2},
+          {"ok",true},{"mode","groq"},{"passes",1},
           {"review_version",WebReviewForm.ReviewAlgorithmVersion},
           {"groups",new object[]{new object[]{issue}}}
         };
@@ -255,7 +254,7 @@ namespace RadiologyAgent {
         return DebounceMilliseconds==1200
           && ValidateResponse(json,report)!=null
           && ValidateResponse(json,report.Replace("Left kidney","Spleen"))==null
-          && ValidateResponse(json.Replace("\"guest\"","\"account\""),report)==null;
+          && ValidateResponse(json.Replace("\"groq\"","\"account\""),report)==null;
       } catch {return false;}
     }
 
