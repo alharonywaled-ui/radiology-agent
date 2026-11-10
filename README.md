@@ -1,12 +1,11 @@
-# Haronex Web Mode for Word 2013 (x86)
+# Haronex Auto Web Mode — experimental (Word 2013 x86)
 
-The new **Web Mode** is a user-mediated integration with [Gemini Web](https://gemini.google.com/app), not a Gemini API or hidden-browser automation. It needs **no API key, Google password, or third-party automation tools**. The Word tab remains **Radiology Agent** and the review window displays **Haronex**.
+This branch now has an **experimental one-click Edge automation** mode. From Word, **Radiology Agent → Review Text** starts the Haronex review host automatically. The host reads the selected range or the Word main-document story, splits it into 12,000-character chunks, starts a Selenium Edge worker with a persistent, private browser profile, navigates to `https://gemini.google.com/app`, submits the prompt, attempts to detect a complete JSON response, then applies yellow language highlights, red potential-contradiction highlights, and Word comments. It never saves report text to a local diagnostics file and never stores Google login credentials or an API key.
 
-**Workflow:** close Word, install the Web Mode EXE, open Word and choose **Radiology Agent → Review Text → Review By Agent**. The app requests explicit permission before copying report text to the clipboard, opens Gemini Web in your normal browser, and prepares a report chunk plus instructions. Paste the prompt into Gemini Web, send it, and copy the **complete JSON reply**. Back in Haronex, click **Import Result From Clipboard**. Haronex highlights language errors yellow, potential internal contradictions red, and adds Word comments. For longer reports, it prepares the next chunk and repeats until finished. The button changes function during the review; there is no separate API setting.
+**First-use limitations:** a browser login and/or Google's normal verification may be necessary once; no credential or CAPTCHA automation is implemented. The browser is minimized while processing, but this is not a guaranteed headless integration. The site's changing UI or policy may block automation; a model response is never fabricated. A one-time installer checkbox explicitly authorizes external transfer (including possible patient identifiers); without that authorization, automatic transfer fails closed. Only transmit data approved for this external service. There is no recurring privacy popup.
 
-**Important limitations:** the web site is not an official programmable interface and the send/copy step must be completed by the user; this is not fully automatic or hidden. Only the main document body or a selection is processed, not all Word story ranges (headers, text boxes, etc.). Matching quotes must be exact and unambiguous; ambiguous ones are skipped. Do not send identifiable patient reports to a consumer service without organizational authorization. The install/COM smoke test on Windows passes; the end-to-end import into an actual Word 2013 session requires user validation.
+**Validation:** CI compiles the Word 2013 x86 host and the packaged Selenium worker, checks the worker's offline JSON parser, installs the executable, and verifies COM/Ribbon activation. CI **does not test a logged-in Google account or a real Word 2013 instance**, so end-to-end reliability is not certified.
 
----
 
 # ⚠️ Word 2013 native add-in: deployment blocked after a real Word crash
 
