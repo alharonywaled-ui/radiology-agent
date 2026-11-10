@@ -140,6 +140,13 @@ static void RequestReview() {
   if(RegCreateKeyExW(HKEY_CURRENT_USER,key,0,nullptr,REG_OPTION_NON_VOLATILE,
                      KEY_QUERY_VALUE|KEY_SET_VALUE,nullptr,&h,nullptr)!=ERROR_SUCCESS)
     return;
+  // Record the exact Word window that invoked the ribbon action. The monitor
+  // must not blindly bind to a different Word.Application instance from ROT.
+  HWND clicked=GetForegroundWindow();
+  HWND root=clicked?GetAncestor(clicked,GA_ROOT):nullptr;
+  DWORD windowHandle=static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(root));
+  RegSetValueExW(h,L"WordWindowHwnd",0,REG_DWORD,
+    reinterpret_cast<const BYTE*>(&windowHandle),sizeof(windowHandle));
   DWORD seq=0,size=sizeof(seq),type=REG_DWORD;
   if(RegQueryValueExW(h,L"LiveReviewCommand",nullptr,&type,
                       reinterpret_cast<BYTE*>(&seq),&size)!=ERROR_SUCCESS)seq=0;
