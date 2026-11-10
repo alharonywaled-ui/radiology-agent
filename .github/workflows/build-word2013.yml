@@ -49,7 +49,7 @@ jobs:
           @echo off
           call "$vs\Common7\Tools\VsDevCmd.bat" -arch=x86 -host_arch=x64
           if errorlevel 1 exit /b 12
-          cl /nologo /LD /std:c++17 /EHsc /W3 /DUNICODE /D_UNICODE /Fe:"$root\word2013\bin\RadiologyAgent.NativeShim.dll" "$root\word2013\NativeShim.cpp" /link /DEF:"$root\word2013\NativeShim.def" ole32.lib oleaut32.lib shell32.lib user32.lib advapi32.lib
+          cl /nologo /LD /std:c++17 /EHsc /W3 /DUNICODE /D_UNICODE /Fe:"$root\word2013\bin\RadiologyAgent.NativeShim.dll" "$root\word2013\NativeShim.cpp" /link /DEF:"$root\word2013\NativeShim.def" ole32.lib oleaut32.lib shell32.lib user32.lib gdi32.lib advapi32.lib
           if errorlevel 1 exit /b 13
           cl /nologo /std:c++17 /EHsc /W3 /DUNICODE /D_UNICODE /Fe:"$root\word2013\bin\NativeSmoke.exe" "$root\word2013\NativeSmoke.cpp" ole32.lib oleaut32.lib
           if errorlevel 1 exit /b 14
