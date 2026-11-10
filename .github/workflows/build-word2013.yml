@@ -23,6 +23,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ReviewHost compile failed" }
           New-Item -ItemType Directory word2013/bin -Force | Out-Null
           Copy-Item word2013/bin/Release/RadiologyAgent.ReviewHost.exe word2013/bin/
+      - name: Package Haronex web worker with Selenium
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build automatic Edge browser worker
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check pyinstaller selenium
+          if ($LASTEXITCODE -ne 0) { throw 'Browser worker dependencies failed' }
+          python -m PyInstaller --noconfirm --onefile --console --collect-all selenium --name HaronexWebWorker --distpath word2013/bin --workpath word2013/pybuild/work --specpath word2013/pybuild word2013/HaronexWebWorker.py
+          if ($LASTEXITCODE -ne 0) { throw 'Browser worker packaging failed' }
+          $test=& word2013/bin/HaronexWebWorker.exe --self-test
+          if ($LASTEXITCODE -ne 0 -or $test -notmatch '"ok": true') { throw "Browser parser smoke test failed: $test" }
       - name: Compile native 32-bit COM Ribbon add-in and smoke-test binary
         shell: pwsh
         run: |
@@ -55,12 +68,12 @@ jobs:
           $compiler=Join-Path $env:SystemDrive 'Program Files (x86)\Inno Setup 6\ISCC.exe'
           & $compiler word2013/installer_setup.iss
           if ($LASTEXITCODE -ne 0) { throw "Installer compile failed" }
-          if (!(Test-Path word2013/output/Haronex_Word2013_Web_Setup.exe)) { throw "Setup missing" }
+          if (!(Test-Path word2013/output/Haronex_Word2013_AutoWeb_Setup.exe)) { throw "Setup missing" }
       - name: Smoke test Web Mode installer and native COM Ribbon
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $installer=(Resolve-Path word2013/output/Haronex_Word2013_Web_Setup.exe).Path
+          $installer=(Resolve-Path word2013/output/Haronex_Word2013_AutoWeb_Setup.exe).Path
           $p=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
           if($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
           $reg=Get-ItemProperty 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word2013.Safe'
@@ -68,12 +81,16 @@ jobs:
           if (Test-Path 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.WordAddin') { throw 'Legacy WordAddin registration still exists' }
           $hostExe=Join-Path $env:LOCALAPPDATA 'RadiologyAgent\Word2013Safe\RadiologyAgent.ReviewHost.exe'
           if (!(Test-Path $hostExe)) { throw "Web host not installed" }
+          $worker=Join-Path $env:LOCALAPPDATA 'RadiologyAgent\Word2013Safe\HaronexWebWorker.exe'
+          if (!(Test-Path $worker)) { throw "Web worker not installed" }
+          $enabled=Get-ItemProperty -Path 'HKCU:\Software\Haronex' -ErrorAction SilentlyContinue
+          if ($enabled -and $enabled.WebTransferAllowed -eq 1) { throw 'Silent installer must not grant consent automatically' }
           & word2013/bin/NativeSmoke.exe
           if ($LASTEXITCODE -ne 0) { throw "Native x86 COM or Ribbon test failed: $LASTEXITCODE" }
           Write-Host 'WEB_MODE_SMOKE_TEST_PASSED'
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: Haronex_Word2013_Web_Mode
-          path: word2013/output/Haronex_Word2013_Web_Setup.exe
+          name: Haronex_Word2013_AutoWeb_Experimental
+          path: word2013/output/Haronex_Word2013_AutoWeb_Setup.exe
           if-no-files-found: error
