@@ -15,7 +15,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    private const string ReviewAlgorithmVersion="haronex-web-review-v3.2-cache1";
+    private const string ReviewAlgorithmVersion="haronex-guest-only-v4-cache1";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=610; Height=250;
@@ -114,7 +114,7 @@ namespace RadiologyAgent {
         bool cached=workerResult!=null;
         if(!cached) {
           status.Text="Reviewing "+report.Length+" characters in "+chunks.Count+
-            " part(s) with Haronex Web. You may need to sign in once in Edge.";
+            " part(s) in signed-out Guest Mode (no Google account).";
           workerResult=await Task.Run(()=>CallBrowserWorker(payload,chunks.Count));
         } else {
           status.Text="Reusing encrypted previous review for unchanged text…";
@@ -125,6 +125,8 @@ namespace RadiologyAgent {
           throw new Exception("Web review did not complete: "+Safe(error,330));
         }
         // Cache only completed, validated responses (never error pages or partial replies).
+        if(!root.ContainsKey("mode")||Convert.ToString(root["mode"])!="guest")
+          throw new Exception("Unexpected non-guest browser result; no Word changes applied.");
         var groups=root["groups"] as object[];
         if(groups==null||groups.Length!=chunks.Count)throw new Exception("Incomplete web response: no Word changes applied.");
         var valid=new List<Tuple<string,string,string,string>>();
