@@ -16,16 +16,13 @@ jobs:
         uses: actions/checkout@v4
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
-      - name: Compile x86 review application and DPAPI helper
+      - name: Compile x86 Haronex Web review host
         shell: pwsh
         run: |
           msbuild word2013/RadiologyAgent.ReviewHost.csproj /t:Rebuild /p:Configuration=Release /p:Platform=x86 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) { throw "ReviewHost compile failed" }
-          msbuild word2013/RadiologyAgent.KeySetup.csproj /t:Rebuild /p:Configuration=Release /p:Platform=x86 /verbosity:minimal
-          if ($LASTEXITCODE -ne 0) { throw "Key helper compile failed" }
           New-Item -ItemType Directory word2013/bin -Force | Out-Null
           Copy-Item word2013/bin/Release/RadiologyAgent.ReviewHost.exe word2013/bin/
-          Copy-Item word2013/bin/Release/RadiologyAgent.KeySetup.exe word2013/bin/
       - name: Compile native 32-bit COM Ribbon add-in and smoke-test binary
         shell: pwsh
         run: |
@@ -58,30 +55,25 @@ jobs:
           $compiler=Join-Path $env:SystemDrive 'Program Files (x86)\Inno Setup 6\ISCC.exe'
           & $compiler word2013/installer_setup.iss
           if ($LASTEXITCODE -ne 0) { throw "Installer compile failed" }
-          if (!(Test-Path word2013/output/RadiologyAgent_Word2013_x86_Safe_Setup.exe)) { throw "Setup missing" }
-      - name: Test one-time key, silent install and native COM Ribbon
+          if (!(Test-Path word2013/output/Haronex_Word2013_Web_Setup.exe)) { throw "Setup missing" }
+      - name: Smoke test Web Mode installer and native COM Ribbon
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $root=Join-Path $env:LOCALAPPDATA 'RadiologyAgent'
-          New-Item -ItemType Directory -Path $root -Force | Out-Null
-          Set-Content -LiteralPath (Join-Path $root 'pending.key') -Value 'AQ.Ab00000000000000000000000000000000000000000000000' -Encoding utf8 -NoNewline
-          & word2013/bin/RadiologyAgent.KeySetup.exe
-          if ($LASTEXITCODE -ne 0) { throw 'DPAPI write failed' }
-          & word2013/bin/RadiologyAgent.KeySetup.exe --check
-          if ($LASTEXITCODE -ne 0) { throw 'DPAPI read/validation failed' }
-          $installer=(Resolve-Path word2013/output/RadiologyAgent_Word2013_x86_Safe_Setup.exe).Path
+          $installer=(Resolve-Path word2013/output/Haronex_Word2013_Web_Setup.exe).Path
           $p=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
           if($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
           $reg=Get-ItemProperty 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word2013.Safe'
           if ($reg.LoadBehavior -ne 3) { throw 'Autoload registration incorrect' }
-          if (Test-Path 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.WordAddin') { throw 'Legacy WordAddin registry entry was not removed' }
+          if (Test-Path 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.WordAddin') { throw 'Legacy WordAddin registration still exists' }
+          $hostExe=Join-Path $env:LOCALAPPDATA 'RadiologyAgent\Word2013Safe\RadiologyAgent.ReviewHost.exe'
+          if (!(Test-Path $hostExe)) { throw "Web host not installed" }
           & word2013/bin/NativeSmoke.exe
-          if ($LASTEXITCODE -ne 0) { throw "Native 32-bit COM or Ribbon activation failed: $LASTEXITCODE" }
-          Write-Host 'SMOKE_TEST_PASSED'
+          if ($LASTEXITCODE -ne 0) { throw "Native x86 COM or Ribbon test failed: $LASTEXITCODE" }
+          Write-Host 'WEB_MODE_SMOKE_TEST_PASSED'
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: RadiologyAgent_Word2013_x86_ABI_Fixed
-          path: word2013/output/RadiologyAgent_Word2013_x86_Safe_Setup.exe
+          name: Haronex_Word2013_Web_Mode
+          path: word2013/output/Haronex_Word2013_Web_Setup.exe
           if-no-files-found: error
