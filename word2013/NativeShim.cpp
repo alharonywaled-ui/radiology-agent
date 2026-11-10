@@ -3,7 +3,11 @@
 #include <ole2.h>
 #include <oleauto.h>
 #include <ocidl.h>
+#define DllRegisterServer OlectlDllRegisterServer
+#define DllUnregisterServer OlectlDllUnregisterServer
 #include <olectl.h>
+#undef DllRegisterServer
+#undef DllUnregisterServer
 #include <shellapi.h>
 #include <string>
 #include <new>
