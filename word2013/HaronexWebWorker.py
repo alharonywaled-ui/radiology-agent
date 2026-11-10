@@ -113,14 +113,79 @@ def wait_for_response(driver, previous_count, seconds=160):
         time.sleep(0.5)
     raise RuntimeError("No complete JSON answer received within the timeout. Gemini Web may have changed.")
 
+def audit_prompt(report, prior_issues):
+    # A genuinely second model call, not just rephrasing the first answer.
+    # Do not assume the first answer is complete or correct.
+    known = [
+        {"quote": issue.get("quote", ""), "category": issue.get("category", "")}
+        for issue in prior_issues if isinstance(issue, dict)
+    ]
+    return (
+        "You are Haronex's independent second-pass audit reviewer. "
+        "Read the ENTIRE report again, sentence by sentence. "
+        "Search independently for errors missed by the first review, checking: "
+        "(1) spelling, grammar, punctuation, sentence clarity; "
+        "(2) internal consistency of clinical terminology and abbreviations; "
+        "(3) contradictions between findings and impression, right versus left, "
+        "negation, measurements, counts and anatomical descriptions; "
+        "(4) any remaining distinct internally supported errors. "
+        "Known findings to avoid duplicating (not guaranteed to be correct): "
+        + json.dumps(known, ensure_ascii=False) +
+        "\\nReport to audit:\\n" + report +
+        "\\nReturn ONLY one JSON object: "
+        '{"issues":[{"quote":"exact substring from report","category":"language or logic",'
+        '"explanation":"brief evidence-based reason","suggestion":"optional wording"}]}. '
+        "Each quote MUST appear exactly in the report. Include only NEW, well-supported "
+        "issues not already listed. Do not invent medical diagnoses. "
+        "An empty issues array is valid when no additional reliable issues exist. "
+        "Clinical verification remains required."
+    )
+
+
+def normalize_issues(report, *groups):
+    # Deterministic merge and conservative filtering. Order by source location.
+    entries = {}
+    for issues in groups:
+        for item in issues:
+            if not isinstance(item, dict):
+                continue
+            quote, category = item.get("quote"), item.get("category")
+            if not isinstance(quote, str) or not 2 <= len(quote) <= 500:
+                continue
+            if not isinstance(category, str):
+                continue
+            category = category.strip().lower()
+            if category not in ("language", "logic") or quote not in report:
+                continue
+            key = quote  # same range should not carry duplicate comments
+            record = {
+                "quote": quote, "category": category,
+                "explanation": str(item.get("explanation") or "")[:500],
+                "suggestion": str(item.get("suggestion") or "")[:250],
+            }
+            if key not in entries or (category == "logic" and entries[key]["category"] != "logic"):
+                entries[key] = record
+    return sorted(entries.values(), key=lambda row: (
+        report.find(row["quote"]), row["category"], row["quote"]
+    ))
+
+
 def main():
     try:
         payload = json.loads(sys.stdin.read())
         prompts = payload.get("prompts", [])
+        texts = payload.get("texts", [])
+        review_version = payload.get("review_version", "")
         if not isinstance(prompts, list) or not prompts or len(prompts) > 20:
             raise ValueError("Invalid prompt list.")
+        if not isinstance(texts, list) or len(texts) != len(prompts):
+            raise ValueError("Missing matching original report parts.")
+        if not isinstance(review_version, str) or not review_version.startswith("haronex-comprehensive-v5-"):
+            raise ValueError("Unsupported review version.")
         if any(not isinstance(p, str) or not p or len(p) > 30000 for p in prompts):
             raise ValueError("One or more prompts are invalid.")
+        if any(not isinstance(t, str) or not t or len(t) > 12000 for t in texts):
+            raise ValueError("Invalid report parts.")
         from selenium import webdriver
         from selenium.webdriver.edge.options import Options
         # An isolated temporary profile is deliberately not the user's Edge profile.
@@ -137,17 +202,27 @@ def main():
             try:
                 all_issues = []
                 for index, prompt in enumerate(prompts):
-                    driver.get(URL)
-                    deadline = time.monotonic() + 25
-                    while editor(driver) is None and time.monotonic() < deadline:
-                        time.sleep(0.5)
-                    if editor(driver) is None:
-                        raise RuntimeError("Guest text input unavailable. Gemini may require sign-in or may be unsupported for this location/device.")
-                    before = len(response_texts(driver))
-                    send_prompt(driver, prompt)
-                    parsed = wait_for_response(driver, before)
-                    all_issues.append(parsed["issues"])
-                result(True, groups=all_issues, requests=len(prompts), mode="guest")
+                    collected = []
+                    for pass_index in (0, 1):
+                        driver.get(URL)
+                        deadline = time.monotonic() + 25
+                        while editor(driver) is None and time.monotonic() < deadline:
+                            time.sleep(0.5)
+                        if editor(driver) is None:
+                            raise RuntimeError("Guest text input unavailable. Gemini may require sign-in or may be unsupported for this location/device.")
+                        before = len(response_texts(driver))
+                        content = prompt if pass_index == 0 else audit_prompt(texts[index], collected)
+                        send_prompt(driver, content)
+                        parsed = wait_for_response(driver, before)
+                        if not isinstance(parsed, dict) or not isinstance(parsed.get("issues"), list):
+                            raise RuntimeError("Incomplete response in comprehensive review.")
+                        if pass_index == 0:
+                            collected = normalize_issues(texts[index], parsed["issues"])
+                        else:
+                            collected = normalize_issues(texts[index], collected, parsed["issues"])
+                    all_issues.append(collected)
+                result(True, groups=all_issues, requests=len(prompts) * 2,
+                       passes=2, mode="guest", review_version=review_version)
             finally:
                 driver.quit()
     except Exception as exc:
@@ -157,6 +232,15 @@ if __name__ == "__main__":
     if "--self-test" in sys.argv:
         sample = 'Some text before { "issues":[{"quote":"abc","category":"language"}] } after'
         parsed = balanced_json(sample)
-        result(parsed is not None and len(parsed.get("issues", [])) == 1, test="parser")
+        merged = normalize_issues("abc xyz", [
+            {"quote":"abc","category":"language","explanation":"typo"},
+            {"quote":"abc","category":"language","explanation":"typo"},
+            {"quote":"missing","category":"logic"}
+        ], [{"quote":"xyz","category":"logic","explanation":"conflict"}])
+        second = audit_prompt("abc xyz", merged)
+        ok = (parsed is not None and len(parsed.get("issues", [])) == 1
+              and len(merged) == 2 and merged[0]["quote"] == "abc"
+              and merged[1]["quote"] == "xyz" and "abc xyz" in second)
+        result(ok, test="parser_and_comprehensive_merge")
     else:
         main()
