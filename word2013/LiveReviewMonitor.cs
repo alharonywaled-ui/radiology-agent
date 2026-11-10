@@ -19,6 +19,8 @@ namespace RadiologyAgent {
     private const int DebounceMilliseconds=1200;
     private readonly System.Windows.Forms.Timer timer;
     private object word;
+    private object boundWordWindow;
+    private uint boundWordHwnd;
     private bool polling;
     private int missingWordTicks;
     private string documentId, currentText, snapshotToken;
@@ -87,6 +89,37 @@ namespace RadiologyAgent {
     }
 
     private bool ConnectWord() {
+      uint requested=ReadDword("WordWindowHwnd");
+      if(requested!=0&&requested!=boundWordHwnd) {
+        object window;
+        if(WordWindowBinding.TryGetWordWindow(requested,out window)) {
+          try {
+            dynamic activeWindow=window;
+            object owner=activeWindow.Application;
+            object document=activeWindow.Document;
+            if(owner!=null&&document!=null) {
+              word=owner;
+              boundWordWindow=window;
+              boundWordHwnd=requested;
+              lastWordProblem="WORD_DOCUMENT_READY";
+              missingWordTicks=0;
+              return true;
+            }
+          } catch {
+            lastWordProblem="WORD_NATIVEOM_DOCUMENT_ERROR";
+          }
+        }
+        // Never silently grab another Word process if a specific clicked
+        // window is known, as that can annotate the wrong patient's report.
+        word=null;
+        boundWordWindow=null;
+        boundWordHwnd=0;
+        if(lastWordProblem!="WORD_NATIVEOM_DOCUMENT_ERROR")
+          lastWordProblem="WORD_NATIVEOM_BIND_FAILED";
+        return false;
+      }
+      if(boundWordWindow!=null&&word!=null)return true;
+      if(requested!=0)return false;
       if(word!=null)return true;
       try {
         word=Marshal.GetActiveObject("Word.Application");
@@ -94,7 +127,6 @@ namespace RadiologyAgent {
         lastWordProblem="WORD_NO_ACTIVE_DOCUMENT";
         return true;
       } catch {
-        // Word may not yet be registered in the ROT when started.
         lastWordProblem="WORD_COM_UNAVAILABLE";
         ++missingWordTicks;
         return false;
@@ -117,7 +149,7 @@ namespace RadiologyAgent {
     private void PollWord() {
       dynamic app=word;
       dynamic doc;
-      try {doc=app.ActiveDocument;}
+      try {doc=boundWordWindow!=null?((dynamic)boundWordWindow).Document:app.ActiveDocument;}
       catch (COMException) {
         lastWordProblem="WORD_NO_ACTIVE_DOCUMENT";
         if(documentId!=null)ClearDocument();
@@ -126,14 +158,14 @@ namespace RadiologyAgent {
       catch {
         lastWordProblem="WORD_ACTIVE_DOCUMENT_ERROR";
         if(documentId!=null)ClearDocument();
-        word=null; // Reacquire Word after transient COM/RPC disconnection.
+        word=null;boundWordWindow=null;boundWordHwnd=0; // Reacquire pinned Word window.
         return;
       }
       string id,report;
       try {
         string name=Convert.ToString(doc.FullName);
         int hwnd;
-        try {hwnd=(int)app.ActiveWindow.Hwnd;}
+        try {hwnd=boundWordWindow!=null?(int)((dynamic)boundWordWindow).Hwnd:(int)app.ActiveWindow.Hwnd;}
         catch {hwnd=(int)app.Hwnd;}
         id=hwnd.ToString()+"|"+name;
         report=Convert.ToString(doc.Content.Text);
@@ -178,6 +210,8 @@ namespace RadiologyAgent {
       if(command==lastHandledCommand)return;
       lastHandledCommand=command;
       WriteDword("LiveReviewHandled",command);
+      // Rebind to the exact Word window that raised the Ribbon click.
+      if(ConnectWord())PollWord();
       if(!WebReviewForm.Approved()) {LogFailure("KEY_OR_CONSENT_MISSING");Notify(false);return;}
       if(currentText==null) {
         // Word may be starting or its COM document snapshot not yet available.
@@ -332,11 +366,11 @@ namespace RadiologyAgent {
     private void ApplyReady() {
       if(readyResponse==null||currentText==null){Notify(false);return;}
       try {
-        dynamic app=word,doc=app.ActiveDocument;
+        dynamic app=word,doc=boundWordWindow!=null?((dynamic)boundWordWindow).Document:app.ActiveDocument;
         string latest=Convert.ToString(doc.Content.Text);
         string name=Convert.ToString(doc.FullName);
         int hwnd;
-        try {hwnd=(int)app.ActiveWindow.Hwnd;}
+        try {hwnd=boundWordWindow!=null?(int)((dynamic)boundWordWindow).Hwnd:(int)app.ActiveWindow.Hwnd;}
         catch{hwnd=(int)app.Hwnd;}
         if(latest!=currentText||hwnd.ToString()+"|"+name!=documentId) {
           pendingClick=true;return;
