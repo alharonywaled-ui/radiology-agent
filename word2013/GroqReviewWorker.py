@@ -70,7 +70,8 @@ def api_review(key, text):
     req = urllib.request.Request(ENDPOINT, data=data, method="POST",
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json",
-                 "Accept": "application/json"})
+                 "Accept": "application/json",
+                 "User-Agent": "Haronex-Radiology-Agent/7.2"})
     try:
         with urllib.request.urlopen(req, timeout=45) as response:
             raw = response.read(3 * 1024 * 1024)
@@ -123,7 +124,7 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 12000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v7-2":
+        if version != "haronex-groq-qwen38-v7-3":
             raise ValueError("Unsupported review version")
         groups = [api_review(key, text) for text in texts]
         print(json.dumps({"ok": True, "mode": "groq", "passes": 1,
@@ -147,6 +148,7 @@ def self_test():
                                 "suggestion": "Small fat-containing umbilical hernia."}])
     assert len(issues) == 1 and issues[0]["category"] == "language"
     assert MODEL == "qwen/qwen3.8-27b"
+    assert "User-Agent" in api_review.__code__.co_consts or "Haronex-Radiology-Agent/7.2" in str(api_review.__code__.co_consts)
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
     except ValueError:
