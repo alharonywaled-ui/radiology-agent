@@ -179,7 +179,10 @@ def self_test():
                                 "suggestion": "Small fat-containing umbilical hernia."}])
     assert len(issues) == 1 and issues[0]["category"] == "language"
     assert MODEL == "qwen/qwen3.8-27b"
-    assert classify_http_400(type("E", (), {"read": lambda self, n: b\'{"error":{"message":"unsupported reasoning effort"}}\'})()) == "GROQ_REQUEST_400_REASONING"
+    class FakeError:
+        def read(self, limit):
+            return b'{"error":{"message":"unsupported reasoning effort"}}'
+    assert classify_http_400(FakeError()) == "GROQ_REQUEST_400_REASONING"
     assert "User-Agent" in api_review.__code__.co_consts or "Haronex-Radiology-Agent/7.2" in str(api_review.__code__.co_consts)
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
