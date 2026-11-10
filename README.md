@@ -1,3 +1,13 @@
+# Haronex Web Mode for Word 2013 (x86)
+
+The new **Web Mode** is a user-mediated integration with [Gemini Web](https://gemini.google.com/app), not a Gemini API or hidden-browser automation. It needs **no API key, Google password, or third-party automation tools**. The Word tab remains **Radiology Agent** and the review window displays **Haronex**.
+
+**Workflow:** close Word, install the Web Mode EXE, open Word and choose **Radiology Agent → Review Text → Review By Agent**. The app requests explicit permission before copying report text to the clipboard, opens Gemini Web in your normal browser, and prepares a report chunk plus instructions. Paste the prompt into Gemini Web, send it, and copy the **complete JSON reply**. Back in Haronex, click **Import Result From Clipboard**. Haronex highlights language errors yellow, potential internal contradictions red, and adds Word comments. For longer reports, it prepares the next chunk and repeats until finished. The button changes function during the review; there is no separate API setting.
+
+**Important limitations:** the web site is not an official programmable interface and the send/copy step must be completed by the user; this is not fully automatic or hidden. Only the main document body or a selection is processed, not all Word story ranges (headers, text boxes, etc.). Matching quotes must be exact and unambiguous; ambiguous ones are skipped. Do not send identifiable patient reports to a consumer service without organizational authorization. The install/COM smoke test on Windows passes; the end-to-end import into an actual Word 2013 session requires user validation.
+
+---
+
 # ⚠️ Word 2013 native add-in: deployment blocked after a real Word crash
 
 **9 Nov 2026:** The Windows CI COM activation test passed, but the add-in caused Microsoft Word 2013 (32-bit) to report serious Data Execution Prevention compatibility failures for `radiologyagent.wordaddin` and `radiology agent`. **Do not install or re-enable the current native EXE while the incident is unresolved.** CI does not run Word 2013 and therefore cannot certify Office compatibility.
