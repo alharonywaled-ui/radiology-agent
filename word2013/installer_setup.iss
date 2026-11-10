@@ -56,6 +56,7 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
+  if WizardSilent then Exit;
   if CurPageID = AuthorizationPage.ID then begin
     if not AuthorizationPage.Values[0] then begin
       MsgBox('Please grant authorization, or cancel installation. Automatic transfer will remain disabled.', mbInformation, MB_OK);
