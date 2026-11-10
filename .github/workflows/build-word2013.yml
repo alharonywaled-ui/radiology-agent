@@ -79,12 +79,12 @@ jobs:
           $compiler=Join-Path $env:SystemDrive 'Program Files (x86)\Inno Setup 6\ISCC.exe'
           & $compiler word2013/installer_setup.iss
           if ($LASTEXITCODE -ne 0) { throw "Installer compile failed" }
-          if (!(Test-Path word2013/output/Haronex_Word2013_Groq_Qwen38_V7_4_Setup.exe)) { throw "Setup missing" }
+          if (!(Test-Path word2013/output/Haronex_Word2013_Groq_Qwen38_V7_5_Setup.exe)) { throw "Setup missing" }
       - name: Smoke test Web Mode installer and native COM Ribbon
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $installer=(Resolve-Path word2013/output/Haronex_Word2013_Groq_Qwen38_V7_4_Setup.exe).Path
+          $installer=(Resolve-Path word2013/output/Haronex_Word2013_Groq_Qwen38_V7_5_Setup.exe).Path
           $p=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
           if($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
           $reg=Get-ItemProperty 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word2013.Safe'
@@ -102,6 +102,6 @@ jobs:
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: Haronex_Word2013_Groq_Qwen38_V7_4
-          path: word2013/output/Haronex_Word2013_Groq_Qwen38_V7_4_Setup.exe
+          name: Haronex_Word2013_Groq_Qwen38_V7_5
+          path: word2013/output/Haronex_Word2013_Groq_Qwen38_V7_5_Setup.exe
           if-no-files-found: error
