@@ -33,6 +33,7 @@ jobs:
           Copy-Item word2013/bin/Release/RadiologyAgent.KeySetup.exe word2013/bin/
           & word2013/bin/RadiologyAgent.KeySetup.exe --check
           if ($LASTEXITCODE -ne 2) { throw "Expected no key in clean CI environment" }
+          $global:LASTEXITCODE=0 # Expected negative key check must not fail the CI step
       - name: Package Haronex Groq Qwen worker
         uses: actions/setup-python@v5
         with:
