@@ -1,3 +1,17 @@
+# Haronex Live Review v6.0 — Word 2013 x86
+
+**One-click apply, background pre-review:** The native Word Ribbon add-in starts a single persistent, invisible .NET Framework 4.8 STA monitor at Word startup. The monitor detects opening and switching active documents and polls the main-document body every 400 ms; Word 2013 classic COM does not supply a general keystroke event. It waits **1200 ms after the most recent detected text change** (debounce) before preparing the next review. Gemini Web Guest Mode processes report chunks in a hidden experimental Edge browser worker; the first request prioritizes internally supported clinical contradictions, and a second independent audit searches for additional findings.
+
+While text is changing, in-flight work for superseded revisions is canceled, and mismatched results are discarded. Completed responses are validated (guest-only, matching version, two passes, exact quotes) and DPAPI-cached by report text. **The monitor does not insert Word comments before the user clicks Review Text.** Clicking the button applies the ready matching results immediately; if the current text is still being processed, the click queues the apply until review succeeds or fails. Logic annotations (red) precede language annotations (yellow), and existing comment positions are not duplicated. The only success/error popups are **تمت المراجعة** or **رجاءً أعد المحاولة** on click-related completion. The Ribbon icon is green for ready and red for failure.
+
+**Explicit data-transfer authorization:** Because this version automatically sends Word report text to an external consumer site as soon as a document is opened/edited, the installer demands a *new* explicit approval. The old v5 WebTransferAllowed flag alone does NOT enable this feature. The silent installer never grants it. Do not enable automatic transfer for documents with identifiable patient data unless approved by the organization and covered by appropriate safeguards.
+
+**Limitations:** The active main body of the Word document is monitored, not headers, text boxes or every StoryRange. Polling long documents can consume resources and a first-time uncached analysis still takes the external service's response time. Guest availability and headless Gemini Web behavior are not guaranteed; the website is not an official integration. Switching active documents cancels outdated work; no results for older text are silently applied. A completed response does not certify clinical correctness, and a person must verify possible internal contradictions.
+
+**Validation:** Windows CI compiles x86 COM and the standalone worker, runs offline result-validation/debounce checks, checks JSON parsing and installer activation. It does not test a real logged-in/guest Gemini Web session or live Word 2013 editing; end-to-end user testing is required.
+
+---
+
 # Haronex Comprehensive Review v5.0 — Word 2013 x86
 
 **One-click, Guest-only, hidden-browser experimental review.** For every report chunk Haronex runs two separate Gemini Web reviews:
