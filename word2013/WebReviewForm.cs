@@ -137,11 +137,13 @@ namespace RadiologyAgent {
       var info=new ProcessStartInfo(executable){
         UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,
         RedirectStandardInput=true,RedirectStandardOutput=true,
-        StandardInputEncoding=new UTF8Encoding(false),StandardOutputEncoding=new UTF8Encoding(false)
+        StandardOutputEncoding=new UTF8Encoding(false)
       };
       using(var process=Process.Start(info)) {
         if(process==null)throw new Exception("Unable to start Haronex browser worker.");
-        process.StandardInput.Write(payload);
+        var bytes=new UTF8Encoding(false).GetBytes(payload);
+        process.StandardInput.BaseStream.Write(bytes,0,bytes.Length);
+        process.StandardInput.BaseStream.Flush();
         process.StandardInput.Close();
         var output=process.StandardOutput.ReadToEnd();
         if(!process.WaitForExit(Math.Max(240000,count*210000))) {
