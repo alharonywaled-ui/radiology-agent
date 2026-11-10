@@ -1,29 +1,28 @@
-#define AppName "Radiology Agent for Word 2013"
-#define AppVersion "6.0.0"
+#define AppName "Haronex Radiology Agent for Word 2013"
+#define AppVersion "7.0.0"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
 AppVersion={#AppVersion}
 DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
-DefaultGroupName=Radiology Agent
+DefaultGroupName=Haronex
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_LiveReview_V6_Setup
+OutputBaseFilename=Haronex_Word2013_Groq_Qwen38_V7_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
 WizardStyle=modern
 CloseApplications=yes
 DisableProgramGroupPage=yes
-UninstallDisplayName=Radiology Agent (Word 2013 x86)
+UninstallDisplayName=Haronex (Word 2013 x86)
 
 [Files]
-; Native 32-bit COM DLL: does not use managed COM activation through mscoree.dll.
 Source: "bin\RadiologyAgent.NativeShim.dll"; DestDir: "{app}"; Flags: ignoreversion regserver
 Source: "bin\RadiologyAgent.ReviewHost.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "bin\HaronexWebWorker.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\HaronexGroqWorker.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\RadiologyAgent.KeySetup.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
-; Remove ONLY the known older Radiology Agent registrations. Does not touch Nitro/other add-ins.
 Root: HKCU; Subkey: "Software\Microsoft\Office\Word\Addins\RadiologyAgent.WordAddin"; Flags: deletekey
 Root: HKCU; Subkey: "Software\Microsoft\Office\15.0\Word\Addins\RadiologyAgent.WordAddin"; Flags: deletekey
 Root: HKCU; Subkey: "Software\Classes\RadiologyAgent.WordAddin"; Flags: deletekey
@@ -31,7 +30,8 @@ Root: HKCU; Subkey: "Software\Classes\CLSID\{{D1FBEFD5-3B43-4516-9B7B-CDEB47AB0F
 
 [Code]
 var
-  AuthorizationPage: TInputOptionWizardPage;
+  KeyPage: TInputQueryWizardPage;
+  ConsentPage: TInputOptionWizardPage;
 
 function InitializeSetup: Boolean;
 var
@@ -45,34 +45,57 @@ end;
 
 procedure InitializeWizard;
 begin
-  AuthorizationPage := CreateInputOptionPage(wpSelectDir,
-    'Haronex Web Data Transfer Permission', 'Authorize external processing once',
-    'Haronex v6 automatically reads Word report text on opening and while editing, then sends it to the external Gemini website in Guest Mode after 1.2 seconds without additional review clicks. The report may contain patient identifiers. ONLY authorize this behavior if your organization permits external processing, and use de-identified documents. Guest access is not guaranteed. No Google account or API key is used.',
+  KeyPage := CreateInputQueryPage(wpSelectDir,
+    'Groq API Configuration', 'Enter your Groq API Key',
+    'Enter an existing API key from console.groq.com/keys. The key is not embedded in the installer and will be protected locally for this Windows account with DPAPI.');
+  KeyPage.Add('Groq API Key:', True);
+
+  ConsentPage := CreateInputOptionPage(KeyPage.ID,
+    'External Report Processing Consent', 'Authorization required',
+    'Haronex sends the selected Word report text directly from this PC to the Groq cloud API when the user clicks Review Text. Patient identifiers may be in the text. Use only if authorized by your medical organization. No report is sent in the background. Clinical verification is mandatory.',
     False, False);
-  AuthorizationPage.Add('I confirm I am authorized to send my document text to this external service automatically.');
-  AuthorizationPage.Values[0] := False;
+  ConsentPage.Add('I am authorized to send these medical report texts to Groq for proofreading.');
+  ConsentPage.Values[0] := False;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  KeyText: String;
 begin
   Result := True;
   if WizardSilent then Exit;
-  if CurPageID = AuthorizationPage.ID then begin
-    if not AuthorizationPage.Values[0] then begin
-      MsgBox('Please grant authorization, or cancel installation. Automatic transfer will remain disabled.', mbInformation, MB_OK);
+  if CurPageID = KeyPage.ID then begin
+    KeyText := Trim(KeyPage.Values[0]);
+    if (Length(KeyText) < 20) or (Copy(KeyText, 1, 4) <> 'gsk_') then begin
+      MsgBox('Please enter a valid Groq API key beginning with gsk_.', mbError, MB_OK);
       Result := False;
     end;
+  end;
+  if (CurPageID = ConsentPage.ID) and (not ConsentPage.Values[0]) then begin
+    MsgBox('External processing authorization is required to enable review.', mbError, MB_OK);
+    Result := False;
   end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  StagingPath: String;
+  ResultCode: Integer;
 begin
-  if CurStep = ssPostInstall then begin
-    if WizardSilent then Exit;
-    if AuthorizationPage.Values[0] then
-    begin
-      RegWriteDWordValue(HKCU, 'Software\Haronex', 'WebTransferAllowed', 1);
-      RegWriteDWordValue(HKCU, 'Software\Haronex', 'LiveAutoReviewAllowed', 1);
-    end;
+  if CurStep <> ssPostInstall then Exit;
+  if WizardSilent then Exit;
+  StagingPath := ExpandConstant('{localappdata}\RadiologyAgent\pending-groq.key');
+  ForceDirectories(ExtractFileDir(StagingPath));
+  try
+    if not SaveStringToFile(StagingPath, Trim(KeyPage.Values[0]), False) then
+      RaiseException('Could not stage Groq configuration');
+    if not Exec(ExpandConstant('{app}\RadiologyAgent.KeySetup.exe'),
+        '--import "' + StagingPath + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
+       or (ResultCode <> 0) then
+      RaiseException('Could not protect Groq key. Installation incomplete.');
+    RegWriteDWordValue(HKCU, 'Software\Haronex', 'WebTransferAllowed', 1);
+    RegWriteDWordValue(HKCU, 'Software\Haronex', 'LiveAutoReviewAllowed', 0);
+  finally
+    DeleteFile(StagingPath);
   end;
 end;
