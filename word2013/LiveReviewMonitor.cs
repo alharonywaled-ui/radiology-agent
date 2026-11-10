@@ -59,6 +59,24 @@ namespace RadiologyAgent {
           key.SetValue(name,unchecked((int)value),RegistryValueKind.DWord);
       } catch{}
     }
+    private static void LogFailure(string code) {
+      try {
+        // Only short reason codes; no report text, file paths, keys, prompts, or responses.
+        if(String.IsNullOrWhiteSpace(code))code="UNKNOWN";
+        var clean=new StringBuilder();
+        foreach(char c in code.ToUpperInvariant()) {
+          if((c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_')
+            clean.Append(c);
+          if(clean.Length>=65)break;
+        }
+        string dir=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Haronex");
+        Directory.CreateDirectory(dir);
+        string file=Path.Combine(dir,"diagnostics.log");
+        if(File.Exists(file)&&new FileInfo(file).Length>20000)File.Delete(file);
+        File.AppendAllText(file,DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")+" "+clean.ToString()+"\r\n");
+      } catch {}
+    }
+
     private static void Notify(bool success) {
       WebReviewForm.SetReviewStatus(success?1:2);
       MessageBox(IntPtr.Zero,success?"تمت المراجعة":"رجاءً أعد المحاولة",
@@ -138,7 +156,7 @@ namespace RadiologyAgent {
       if(command==lastHandledCommand)return;
       lastHandledCommand=command;
       WriteDword("LiveReviewHandled",command);
-      if(currentText==null||!WebReviewForm.Approved()) {Notify(false);return;}
+      if(currentText==null||!WebReviewForm.Approved()) {LogFailure(currentText==null?"WORD_NO_DOCUMENT":"KEY_OR_CONSENT_MISSING");Notify(false);return;}
       if(readyResponse!=null){ApplyReady();return;}
       if(failed) {
         Notify(false);
@@ -216,7 +234,16 @@ namespace RadiologyAgent {
         string answer=await Task.Run(()=>WebReviewForm.CallBrowserWorker(payload,chunks.Count,token.Token));
         if(token.IsCancellationRequested||id!=documentId||report!=currentText)return;
         string valid=ValidateResponse(answer,report);
-        if(valid==null)throw new Exception("Incomplete review");
+        if(valid==null) {
+          string code="INVALID_WORKER_RESPONSE";
+          try {
+            var response=serializer.DeserializeObject(answer) as Dictionary<string,object>;
+            if(response!=null&&response.ContainsKey("error"))
+              code=Convert.ToString(response["error"]);
+          } catch {}
+          LogFailure(code);
+          throw new Exception("Invalid review response");
+        }
         WebReviewForm.SaveCached(cacheFile,valid);
         readyResponse=valid;
         failed=false;
@@ -224,8 +251,9 @@ namespace RadiologyAgent {
         if(pendingClick)ApplyReady();
       } catch(OperationCanceledException) {
         // Any result for an obsolete revision is discarded.
-      } catch {
+      } catch(Exception ex) {
         if(!token.IsCancellationRequested&&id==documentId&&report==currentText) {
+          if(ex.Message!="Invalid review response")LogFailure("HOST_"+ex.GetType().Name);
           failed=true;
           WebReviewForm.SetReviewStatus(2);
           if(pendingClick){pendingClick=false;Notify(false);}
@@ -333,7 +361,8 @@ namespace RadiologyAgent {
         }
         pendingClick=false;
         Notify(true);
-      } catch {
+      } catch(Exception ex) {
+        LogFailure("WORD_ANNOTATE_"+ex.GetType().Name);
         pendingClick=false;Notify(false);
       }
     }
