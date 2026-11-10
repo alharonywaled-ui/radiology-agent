@@ -1,5 +1,5 @@
 #define AppName "Radiology Agent for Word 2013"
-#define AppVersion "4.1.0"
+#define AppVersion "5.0.0"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
 DefaultGroupName=Radiology Agent
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_AutoWeb_Setup
+OutputBaseFilename=Haronex_Word2013_Comprehensive_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
