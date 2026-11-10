@@ -228,11 +228,13 @@ namespace RadiologyAgent {
         process.StandardInput.BaseStream.Write(bytes,0,bytes.Length);
         process.StandardInput.BaseStream.Flush();
         process.StandardInput.Close();
-        var output=process.StandardOutput.ReadToEnd();
-        if(!process.WaitForExit(Math.Max(240000,count*210000))) {
+        // Read output asynchronously so an unresponsive browser cannot block timeout handling.
+        var outputTask=process.StandardOutput.ReadToEndAsync();
+        if(!process.WaitForExit(Math.Max(400000,count*410000))) {
           try{process.Kill();}catch{}
           throw new Exception("Browser review timed out.");
         }
+        string output=outputTask.GetAwaiter().GetResult();
         if(String.IsNullOrWhiteSpace(output))throw new Exception("Browser worker returned no result.");
         return output.Trim();
       }
