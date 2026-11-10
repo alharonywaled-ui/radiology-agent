@@ -155,4 +155,9 @@ def main():
         result(False, error=str(exc)[:400])
 
 if __name__ == "__main__":
-    main()
+    if "--self-test" in sys.argv:
+        sample = 'Some text before { "issues":[{"quote":"abc","category":"language"}] } after'
+        parsed = balanced_json(sample)
+        result(parsed is not None and len(parsed.get("issues", [])) == 1, test="parser")
+    else:
+        main()
