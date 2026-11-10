@@ -62,8 +62,9 @@ def api_review(key, text):
                      {"role": "user", "content": "Review this report completely:\n\n" + text}],
         "response_format": {"type": "json_object"},
         "reasoning_effort": "low",
+        "reasoning_format": "hidden",
         "temperature": 0.2,
-        "max_completion_tokens": 1600
+        "max_completion_tokens": 3200
     }
     data = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(ENDPOINT, data=data, method="POST",
@@ -75,21 +76,37 @@ def api_review(key, text):
             raw = response.read(3 * 1024 * 1024)
     except urllib.error.HTTPError as exc:
         # Avoid logging response headers/body or access credentials.
-        raise RuntimeError("Groq HTTP status " + str(exc.code))
+        code = exc.code
+        if code == 401:
+            raise RuntimeError("GROQ_AUTH_401")
+        if code == 403:
+            raise RuntimeError("GROQ_FORBIDDEN_403")
+        if code == 404:
+            raise RuntimeError("GROQ_MODEL_404")
+        if code == 429:
+            raise RuntimeError("GROQ_LIMIT_429")
+        if code == 400:
+            raise RuntimeError("GROQ_REQUEST_400")
+        if code >= 500:
+            raise RuntimeError("GROQ_SERVER_5XX")
+        raise RuntimeError("GROQ_HTTP_" + str(code))
     except urllib.error.URLError:
-        raise RuntimeError("Unable to reach Groq API")
+        raise RuntimeError("GROQ_NETWORK")
     obj = json.loads(raw.decode("utf-8"))
     choices = obj.get("choices", [])
     if not choices:
         raise ValueError("Groq returned no choices")
     choice = choices[0]
     if choice.get("finish_reason") not in ("stop",):
-        raise ValueError("Groq response truncated or incomplete")
+        raise ValueError("GROQ_TRUNCATED")
     message = choice.get("message") or {}
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
-        raise ValueError("Groq returned no review JSON")
-    parsed = json.loads(content)
+        raise ValueError("GROQ_EMPTY_RESPONSE")
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError):
+        raise ValueError("GROQ_INVALID_JSON")
     if not isinstance(parsed, dict):
         raise ValueError("Groq returned invalid structure")
     return normalize(text, parsed.get("issues"))
@@ -114,7 +131,14 @@ def main():
                          ensure_ascii=False))
     except Exception as exc:
         # No error bodies, secrets or reports in stdout.
-        print(json.dumps({"ok": False, "error": type(exc).__name__ + ": " + str(exc)[:120]}))
+        # Emit only fixed error categories; never expose raw server response or report.
+        message = str(exc)
+        safe_codes = {"GROQ_AUTH_401", "GROQ_FORBIDDEN_403", "GROQ_MODEL_404",
+                      "GROQ_LIMIT_429", "GROQ_REQUEST_400", "GROQ_SERVER_5XX",
+                      "GROQ_NETWORK", "GROQ_TRUNCATED", "GROQ_EMPTY_RESPONSE",
+                      "GROQ_INVALID_JSON"}
+        code = message if message in safe_codes else "WORKER_" + type(exc).__name__.upper()
+        print(json.dumps({"ok": False, "error": code}))
 
 def self_test():
     sample = "Mild fatty hepatomegaly. Small fat containing umbilical hernia."
@@ -122,6 +146,7 @@ def self_test():
                                 "category": "language", "explanation": "Missing punctuation",
                                 "suggestion": "Small fat-containing umbilical hernia."}])
     assert len(issues) == 1 and issues[0]["category"] == "language"
+    assert MODEL == "qwen/qwen3.8-27b"
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
     except ValueError:
