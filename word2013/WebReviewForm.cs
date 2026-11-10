@@ -6,6 +6,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
+using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -15,7 +16,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    private const string ReviewAlgorithmVersion="haronex-comprehensive-v5-two-pass-cache1";
+    internal const string ReviewAlgorithmVersion="haronex-comprehensive-v5-live-v6-cache1";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=1; Height=1;
@@ -31,10 +32,10 @@ namespace RadiologyAgent {
       Shown+=async (sender,args)=>await RunOnce();
       FormClosing+=(sender,args)=>{if(running){args.Cancel=true;}};
     }
-    private static string Safe(string text,int max) {
+    internal static string Safe(string text,int max) {
       return String.IsNullOrEmpty(text)?"":text.Substring(0,Math.Min(text.Length,max));
     }
-    private static string BuildPrompt(string text,int index,int total) {
+    internal static string BuildPrompt(string text,int index,int total) {
       return "You are Haronex, a cautious English radiology report proofreader. "+
         "Perform a COMPLETE structured review BEFORE answering, in this order: "+
         "PHASE 1: inspect every sentence for spelling, grammar, syntax, punctuation, ambiguous phrasing and inconsistencies in language. "+
@@ -52,12 +53,12 @@ namespace RadiologyAgent {
         "Never assert the report is clinically safe. Clinical verification is mandatory. "+
         "PART "+(index+1)+" OF "+total+" REPORT_TEXT_START\\n"+text;
     }
-    private static bool Approved() {
+    internal static bool Approved() {
       using(var key=Registry.CurrentUser.OpenSubKey(@"Software\Haronex")) {
         return key!=null&&Convert.ToString(key.GetValue("WebTransferAllowed",0))=="1";
       }
     }
-    private static string CachePath(string report,bool selection) {
+    internal static string CachePath(string report,bool selection) {
       string identity=ReviewAlgorithmVersion+"|"+(selection?"selection":"document")+"|"+report;
       byte[] hash;
       using(var sha=SHA256.Create())hash=sha.ComputeHash(Encoding.UTF8.GetBytes(identity));
@@ -66,7 +67,7 @@ namespace RadiologyAgent {
         "Haronex","ReviewCache");
       return Path.Combine(folder,token+".dpapi");
     }
-    private static string ReadCached(string path) {
+    internal static string ReadCached(string path) {
       try {
         if(!File.Exists(path))return null;
         if(DateTime.UtcNow-File.GetLastWriteTimeUtc(path)>TimeSpan.FromDays(30))return null;
@@ -75,7 +76,7 @@ namespace RadiologyAgent {
         return Encoding.UTF8.GetString(clear);
       } catch { return null; }
     }
-    private static void SaveCached(string path,string response) {
+    internal static void SaveCached(string path,string response) {
       try {
         string directory=Path.GetDirectoryName(path);
         Directory.CreateDirectory(directory);
@@ -90,7 +91,7 @@ namespace RadiologyAgent {
         for(int i=30;i<entries.Length;i++)try{entries[i].Delete();}catch{}
       } catch { /* Cache write failures cannot block reviewing. */ }
     }
-    private static void SetReviewStatus(int code) {
+    internal static void SetReviewStatus(int code) {
       try {
         using(var key=Registry.CurrentUser.CreateSubKey(@"Software\Haronex"))
           key.SetValue("ReviewResult",code,RegistryValueKind.DWord);
@@ -214,7 +215,21 @@ namespace RadiologyAgent {
       }
       finally {running=false; BeginInvoke((Action)(()=>Close()));}
     }
-    private static string CallBrowserWorker(string payload,int count) {
+    private static void KillWorkerTree(Process process) {
+      try {
+        using(var kill=Process.Start(new ProcessStartInfo("taskkill.exe",
+            "/PID "+process.Id+" /T /F") {
+          CreateNoWindow=true,UseShellExecute=false,
+          WindowStyle=ProcessWindowStyle.Hidden
+        })) {
+          if(kill!=null)kill.WaitForExit(3000);
+        }
+      } catch { try {process.Kill();} catch {} }
+    }
+    internal static string CallBrowserWorker(string payload,int count) {
+      return CallBrowserWorker(payload,count,CancellationToken.None);
+    }
+    internal static string CallBrowserWorker(string payload,int count,CancellationToken cancellation) {
       string executable=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"HaronexWebWorker.exe");
       if(!File.Exists(executable))throw new Exception("Web worker missing. Reinstall Haronex.");
       var info=new ProcessStartInfo(executable){
@@ -230,10 +245,19 @@ namespace RadiologyAgent {
         process.StandardInput.Close();
         // Read output asynchronously so an unresponsive browser cannot block timeout handling.
         var outputTask=process.StandardOutput.ReadToEndAsync();
-        if(!process.WaitForExit(Math.Max(400000,count*410000))) {
-          try{process.Kill();}catch{}
-          throw new Exception("Browser review timed out.");
+        var watch=Stopwatch.StartNew();
+        int maxMs=Math.Max(400000,count*410000);
+        while(!process.WaitForExit(250)) {
+          if(cancellation.IsCancellationRequested) {
+            KillWorkerTree(process);
+            cancellation.ThrowIfCancellationRequested();
+          }
+          if(watch.ElapsedMilliseconds>maxMs) {
+            KillWorkerTree(process);
+            throw new Exception("Browser review timed out.");
+          }
         }
+        cancellation.ThrowIfCancellationRequested();
         string output=outputTask.GetAwaiter().GetResult();
         if(String.IsNullOrWhiteSpace(output))throw new Exception("Browser worker returned no result.");
         return output.Trim();
