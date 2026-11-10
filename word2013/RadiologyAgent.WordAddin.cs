@@ -208,18 +208,20 @@ namespace RadiologyAgent {
       try {
         dynamic word=application;
         dynamic doc=word.ActiveDocument;
-        string selected=(string)word.Selection.Text;
+        int selectionStart=(int)word.Selection.Start;
+        int selectionEnd=(int)word.Selection.End;
+        bool useSelection=selectionEnd>selectionStart;
+        string selected=useSelection?(string)word.Selection.Text:"";
         string full=(string)doc.Content.Text;
-        string report=String.IsNullOrWhiteSpace(selected)?full:selected;
+        string report=useSelection?selected:full;
         if(String.IsNullOrWhiteSpace(report))throw new Exception("The document is empty.");
         if(report.Length>120000)throw new Exception("Document too large (120,000 characters maximum).");
-        status.Text="Reviewing with Haronex…";
+        status.Text="Haronex reviewing "+report.Length+" characters from "+(useSelection?"selection":"main document")+"…";
         var outcome=await Task.Run(()=>Gemini.Review(report));
         status.Text="Adding Word annotations…";
         int added=0,skipped=0;
-        int selectedStart=(int)word.Selection.Start;
-        int selectedEnd=(int)word.Selection.End;
-        bool useSelection=!String.IsNullOrWhiteSpace(selected);
+        int selectedStart=selectionStart;
+        int selectedEnd=selectionEnd;
         foreach(var issue in outcome.Issues) {
           dynamic search=doc.Range(useSelection?selectedStart:0,useSelection?selectedEnd:(int)doc.Content.End);
           dynamic find=search.Find;
