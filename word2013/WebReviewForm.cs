@@ -36,26 +36,28 @@ namespace RadiologyAgent {
       return String.IsNullOrEmpty(text)?"":text.Substring(0,Math.Min(text.Length,max));
     }
     internal static string BuildPrompt(string text,int index,int total) {
-      return "You are Haronex, a cautious English radiology report proofreader. "+
-        "Perform a COMPLETE structured review BEFORE answering, in this order: "+
-        "PHASE 1: inspect every sentence for spelling, grammar, syntax, punctuation, ambiguous phrasing and inconsistencies in language. "+
-        "PHASE 2: inspect medical terminology and abbreviations for internal consistency and obvious transcription errors; "+
-        "do not change valid radiology terms or infer findings not explicitly in the text. "+
-        "PHASE 3: compare the findings and impression, laterality, negation, lesion counts, dates and measurements "+
-        "for CLEAR contradictions supported entirely by this chunk. Flag possible contradictions as needing clinical verification. "+
-        "PHASE 4: re-read each sentence and heading to find any remaining independent issues missed in earlier phases. "+
-        "Find as many distinct, well-supported issues as the text warrants. Never invent findings or diagnoses. "+
-        "Return ONE complete JSON object only, without markdown, introduction, or any extra text. "+
-        "Use schema {\\\"issues\\\":[{\\\"quote\\\":\\\"exact substring from report\\\",\\\"category\\\":\\\"language or logic\\\",\\\"explanation\\\":\\\"short reason\\\",\\\"suggestion\\\":\\\"optional correction\\\"}]}. "+
-        "Only categories language and logic are accepted. Each quote MUST be copied exactly, including spaces, from the report. "+
-        "Include each distinct issue once; do not repeat patient identifiers in reasons or suggestions. "+
-        "An empty issues array is allowed ONLY if no reliable issues were found after all four phases. "+
-        "Never assert the report is clinically safe. Clinical verification is mandatory. "+
-        "PART "+(index+1)+" OF "+total+" REPORT_TEXT_START\\n"+text;
+      return "You are Haronex, an English radiology report proofreader. "
+        +"PRIORITY ONE (LOGIC): compare findings against impression, laterality, positive/negative claims, "
+        +"lesion counts, dates and measurements, and only identify conflicts explicitly supported by this text. "
+        +"Do not claim a contradiction where there is merely uncertainty or different context. "
+        +"PRIORITY TWO: verify medical terminology and abbreviations are internally consistent. "
+        +"PRIORITY THREE: check every sentence for spelling, grammar and punctuation. "
+        +"PRIORITY FOUR: re-scan each section for remaining independent issues. "
+        +"Never invent a medical fact, diagnosis, or finding. All logic findings require clinical verification. "
+        +"Return ONLY a single strict JSON object with schema "
+        +"{\"issues\":[{\"quote\":\"exact short substring from report\","
+        +"\"category\":\"logic or language\",\"explanation\":\"brief reason without identifiers\","
+        +"\"suggestion\":\"optional proposed wording\"}]}. "
+        +"Each quote must match an exact character sequence in the text. "
+        +"Use category logic for explicit internal contradictions, language otherwise. "
+        +"Deduplicate findings. Empty issues array ONLY if no well-supported findings after all checks. "
+        +"Never repeat patient identifiers in explanations or suggestions. "
+        +"PART "+(index+1)+" OF "+total+":\n"+text;
     }
     internal static bool Approved() {
       using(var key=Registry.CurrentUser.OpenSubKey(@"Software\Haronex")) {
-        return key!=null&&Convert.ToString(key.GetValue("WebTransferAllowed",0))=="1";
+        return key!=null&&Convert.ToString(key.GetValue("WebTransferAllowed",0))=="1"&&
+          Convert.ToString(key.GetValue("LiveAutoReviewAllowed",0))=="1";
       }
     }
     internal static string CachePath(string report,bool selection) {
