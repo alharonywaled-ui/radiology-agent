@@ -128,16 +128,28 @@ static std::wstring ModuleDirectory() {
   if(slash)*(slash+1)=L'\0';
   return std::wstring(path);
 }
-static void LaunchReview() {
+static void StartLiveMonitor() {
   std::wstring exe=ModuleDirectory()+L"RadiologyAgent.ReviewHost.exe";
-  if(GetFileAttributesW(exe.c_str())==INVALID_FILE_ATTRIBUTES) {
-    MessageBoxW(nullptr,L"Radiology Agent ReviewHost.exe was not found. Reinstall the application.",L"Radiology Agent",MB_OK|MB_ICONERROR);
-    return;
-  }
-  HINSTANCE outcome=ShellExecuteW(nullptr,L"open",exe.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
-  if(reinterpret_cast<INT_PTR>(outcome)<=32)
-    MessageBoxW(nullptr,L"Unable to start the report review window.",L"Radiology Agent",MB_OK|MB_ICONERROR);
+  if(GetFileAttributesW(exe.c_str())==INVALID_FILE_ATTRIBUTES)return;
+  // The C# monitor enforces a per-Windows-user singleton and talks to Word on its STA.
+  ShellExecuteW(nullptr,L"open",exe.c_str(),L"--monitor",nullptr,SW_HIDE);
 }
+static void RequestReview() {
+  const wchar_t* key=L"Software\\Haronex";
+  HKEY h=nullptr;
+  if(RegCreateKeyExW(HKEY_CURRENT_USER,key,0,nullptr,REG_OPTION_NON_VOLATILE,
+                     KEY_QUERY_VALUE|KEY_SET_VALUE,nullptr,&h,nullptr)!=ERROR_SUCCESS)
+    return;
+  DWORD seq=0,size=sizeof(seq),type=REG_DWORD;
+  if(RegQueryValueExW(h,L"LiveReviewCommand",nullptr,&type,
+                      reinterpret_cast<BYTE*>(&seq),&size)!=ERROR_SUCCESS)seq=0;
+  ++seq;
+  RegSetValueExW(h,L"LiveReviewCommand",0,REG_DWORD,
+                 reinterpret_cast<const BYTE*>(&seq),sizeof(seq));
+  RegCloseKey(h);
+  StartLiveMonitor();
+}
+
 class Agent : public IExtensibility2, public IRibbonExtensibilityNative {
   LONG refs_;
 public:
@@ -174,7 +186,7 @@ public:
   }
   HRESULT STDMETHODCALLTYPE Invoke(DISPID id,REFIID,LCID,WORD,DISPPARAMS* params,VARIANT* result,EXCEPINFO*,UINT*) override {
     if(result)VariantInit(result);
-    if(id==100){LaunchReview();return S_OK;}
+    if(id==100){RequestReview();return S_OK;}
     if(id==101) {
       if(params&&params->cArgs>=1) {
         VARIANTARG& arg=params->rgvarg[0];
@@ -192,14 +204,14 @@ public:
     if(id>=1&&id<=5)return S_OK;
     return DISP_E_MEMBERNOTFOUND;
   }
-  HRESULT STDMETHODCALLTYPE OnConnection(IDispatch*,LONG,IDispatch*,SAFEARRAY**) override{return S_OK;}
+  HRESULT STDMETHODCALLTYPE OnConnection(IDispatch*,LONG,IDispatch*,SAFEARRAY**) override{StartLiveMonitor();return S_OK;}
   HRESULT STDMETHODCALLTYPE OnDisconnection(LONG,SAFEARRAY**) override{
     if(g_ribbonTimer){KillTimer(nullptr,g_ribbonTimer);g_ribbonTimer=0;}
     if(g_ribbonUi){g_ribbonUi->Release();g_ribbonUi=nullptr;}
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE OnAddInsUpdate(SAFEARRAY**) override{return S_OK;}
-  HRESULT STDMETHODCALLTYPE OnStartupComplete(SAFEARRAY**) override{return S_OK;}
+  HRESULT STDMETHODCALLTYPE OnStartupComplete(SAFEARRAY**) override{StartLiveMonitor();return S_OK;}
   HRESULT STDMETHODCALLTYPE OnBeginShutdown(SAFEARRAY**) override{return S_OK;}
   HRESULT STDMETHODCALLTYPE GetCustomUI(BSTR,BSTR* xml) override {
     if(!xml)return E_POINTER;
