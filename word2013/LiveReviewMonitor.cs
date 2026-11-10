@@ -138,7 +138,7 @@ namespace RadiologyAgent {
       if(command==lastHandledCommand)return;
       lastHandledCommand=command;
       WriteDword("LiveReviewHandled",command);
-      if(currentText==null) {Notify(false);return;}
+      if(currentText==null||!WebReviewForm.Approved()) {Notify(false);return;}
       if(readyResponse!=null){ApplyReady();return;}
       if(failed) {
         Notify(false);
