@@ -18,9 +18,10 @@ namespace RadiologyAgent {
     private const string ReviewAlgorithmVersion="haronex-guest-only-v4-cache1";
     public WebReviewForm(object application) {
       word=application;
-      Text="Haronex — Word 2013"; Width=610; Height=250;
-      StartPosition=FormStartPosition.CenterScreen;
-      FormBorderStyle=FormBorderStyle.FixedDialog;
+      Text="Haronex — Word 2013"; Width=1; Height=1;
+      ShowInTaskbar=false; Opacity=0;
+      StartPosition=FormStartPosition.Manual; Location=new Point(-30000,-30000);
+      FormBorderStyle=FormBorderStyle.None;
       MaximizeBox=false;MinimizeBox=false;
       var title=new Label{Text="Haronex",Font=new Font("Segoe UI",18,FontStyle.Bold),
         Location=new Point(20,18),Size=new Size(550,45)};
@@ -81,9 +82,16 @@ namespace RadiologyAgent {
         for(int i=30;i<entries.Length;i++)try{entries[i].Delete();}catch{}
       } catch { /* Cache write failures cannot block reviewing. */ }
     }
+    private static void SetReviewStatus(int code) {
+      try {
+        using(var key=Registry.CurrentUser.CreateSubKey(@"Software\Haronex"))
+          key.SetValue("ReviewResult",code,RegistryValueKind.DWord);
+      } catch { /* Never fail reviewing due to UI status. */ }
+    }
     private async Task RunOnce() {
       if(running)return;
       running=true;
+      SetReviewStatus(0);
       try {
         if(!Approved())throw new Exception("External web transfer is not authorized. Reinstall Haronex and approve Web Mode data transfer during setup.");
         dynamic app=word,doc=app.ActiveDocument;
@@ -185,13 +193,15 @@ namespace RadiologyAgent {
             applied++;
           } catch {skipped++;}
         }
-        status.Text="Haronex completed"+(cached?" (same saved review)":"")+
-          ". "+report.Length+" chars, "+received+" returned, "+applied+
-          " applied, "+duplicates+" already marked, "+rejected+" rejected, "+skipped+" skipped."+
-          (received==0?" No issues returned; NOT clinical clearance.":"");
+        SetReviewStatus(1);
+        MessageBox.Show("تمت المراجعة", "Haronex", MessageBoxButtons.OK, MessageBoxIcon.Information);
       }
-      catch(Exception ex) {status.Text="Haronex: "+Safe(ex.Message,420);}
-      finally {running=false;}
+      catch(Exception ex) {
+        SetReviewStatus(2);
+        // Do not expose service or report details in an end-user popup.
+        MessageBox.Show("رجاءً أعد المحاولة", "Haronex", MessageBoxButtons.OK, MessageBoxIcon.Error);
+      }
+      finally {running=false; BeginInvoke((Action)(()=>Close()));}
     }
     private static string CallBrowserWorker(string payload,int count) {
       string executable=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"HaronexWebWorker.exe");
