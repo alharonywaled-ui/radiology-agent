@@ -243,7 +243,13 @@ namespace RadiologyAgent {
           doc.Comments.Add(search,comment);
           added++;
         }
-        status.Text="Haronex: sent "+outcome.SentCharacters+" characters / "+outcome.Requests+" requests; received "+outcome.ReceivedIssues+" issues; applied "+added+"; unmatched "+skipped+"; rejected "+outcome.RejectedIssues+".";
+        status.Text="Haronex: sent "+outcome.SentCharacters+" chars in "+outcome.Requests+
+          " request(s); model returned "+outcome.ReceivedIssues+" issues; applied "+added+
+          ", unmatched "+skipped+", rejected "+outcome.RejectedIssues+".";
+        if(outcome.ReceivedIssues==0)
+          status.Text+=" No issues returned; this is NOT clinical clearance.";
+        else if(added==0)
+          status.Text+=" No Word annotations could be created.";
       } catch(Exception ex) { status.Text="Error: "+ex.Message; }
       finally { review.Enabled=true; }
     }
