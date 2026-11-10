@@ -16,7 +16,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    internal const string ReviewAlgorithmVersion="haronex-comprehensive-v5-live-v6-cache1";
+    internal const string ReviewAlgorithmVersion="haronex-groq-qwen38-v7-1";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=1; Height=1;
@@ -56,9 +56,24 @@ namespace RadiologyAgent {
     }
     internal static bool Approved() {
       using(var key=Registry.CurrentUser.OpenSubKey(@"Software\Haronex")) {
-        return key!=null&&Convert.ToString(key.GetValue("WebTransferAllowed",0))=="1"&&
-          Convert.ToString(key.GetValue("LiveAutoReviewAllowed",0))=="1";
+        return key!=null&&Convert.ToString(key.GetValue("WebTransferAllowed",0))=="1" && File.Exists(GroqKeyPath());
       }
+    }
+    internal static string GroqKeyPath() {
+      return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "RadiologyAgent","groq.key.dpapi");
+    }
+    internal static string ReadGroqKey() {
+      string path=GroqKeyPath();
+      if(!File.Exists(path))throw new Exception("Groq API key is missing. Reinstall Haronex.");
+      byte[] encrypted=Convert.FromBase64String(File.ReadAllText(path).Trim());
+      byte[] clear=ProtectedData.Unprotect(encrypted,null,DataProtectionScope.CurrentUser);
+      try {
+        string key=Encoding.UTF8.GetString(clear);
+        if(!key.StartsWith("gsk_",StringComparison.Ordinal)||key.Length<20)
+          throw new Exception("Groq API key format is invalid.");
+        return key;
+      } finally {Array.Clear(clear,0,clear.Length);}
     }
     internal static string CachePath(string report,bool selection) {
       string identity=ReviewAlgorithmVersion+"|"+(selection?"selection":"document")+"|"+report;
@@ -127,13 +142,12 @@ namespace RadiologyAgent {
         var prompts=new List<string>();
         for(int i=0;i<chunks.Count;i++)prompts.Add(BuildPrompt(chunks[i],i,chunks.Count));
         var serializer=new JavaScriptSerializer{MaxJsonLength=2000000};
-        var payload=serializer.Serialize(new Dictionary<string,object>{{"prompts",prompts},{"texts",chunks},{"review_version",ReviewAlgorithmVersion}});
+        var payload=serializer.Serialize(new Dictionary<string,object>{{"prompts",prompts},{"texts",chunks},{"review_version",ReviewAlgorithmVersion},{"api_key",ReadGroqKey()}});
         string cacheFile=CachePath(report,hasSelection);
         string workerResult=ReadCached(cacheFile);
         bool cached=workerResult!=null;
         if(!cached) {
-          status.Text="Comprehensive two-pass review of "+report.Length+" characters in "+chunks.Count+
-            " part(s) in signed-out Guest Mode (no Google account).";
+          status.Text="Groq Qwen API reviewing "+report.Length+" characters in "+chunks.Count+" part(s).";
           workerResult=await Task.Run(()=>CallBrowserWorker(payload,chunks.Count));
         } else {
           status.Text="Reusing encrypted previous review for unchanged text…";
@@ -144,10 +158,10 @@ namespace RadiologyAgent {
           throw new Exception("Web review did not complete: "+Safe(error,330));
         }
         // Cache only completed, validated responses (never error pages or partial replies).
-        if(!root.ContainsKey("mode")||Convert.ToString(root["mode"])!="guest"||
+        if(!root.ContainsKey("mode")||Convert.ToString(root["mode"])!="groq"||
            !root.ContainsKey("review_version")||Convert.ToString(root["review_version"])!=ReviewAlgorithmVersion)
           throw new Exception("Unexpected non-guest browser result; no Word changes applied.");
-        if(!root.ContainsKey("passes")||Convert.ToInt32(root["passes"])!=2)
+        if(!root.ContainsKey("passes")||Convert.ToInt32(root["passes"])!=1)
           throw new Exception("Incomplete review stages; no Word changes applied.");
         var groups=root["groups"] as object[];
         if(groups==null||groups.Length!=chunks.Count)throw new Exception("Incomplete web response: no Word changes applied.");
@@ -232,7 +246,7 @@ namespace RadiologyAgent {
       return CallBrowserWorker(payload,count,CancellationToken.None);
     }
     internal static string CallBrowserWorker(string payload,int count,CancellationToken cancellation) {
-      string executable=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"HaronexWebWorker.exe");
+      string executable=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"HaronexGroqWorker.exe");
       if(!File.Exists(executable))throw new Exception("Web worker missing. Reinstall Haronex.");
       var info=new ProcessStartInfo(executable){
         UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,
@@ -248,7 +262,7 @@ namespace RadiologyAgent {
         // Read output asynchronously so an unresponsive browser cannot block timeout handling.
         var outputTask=process.StandardOutput.ReadToEndAsync();
         var watch=Stopwatch.StartNew();
-        int maxMs=Math.Max(400000,count*410000);
+        int maxMs=Math.Max(65000,count*65000);
         while(!process.WaitForExit(250)) {
           if(cancellation.IsCancellationRequested) {
             KillWorkerTree(process);
