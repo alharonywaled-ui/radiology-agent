@@ -1,19 +1,11 @@
-# Haronex Auto Web Mode — experimental (Word 2013 x86)
+# Haronex Guest-Only Web Mode (Word 2013 x86)
 
-This branch now has an **experimental one-click Edge automation** mode. From Word, **Radiology Agent → Review Text** starts the Haronex review host automatically. The host reads the selected range or the Word main-document story, splits it into 12,000-character chunks, starts a Selenium Edge worker with a persistent, private browser profile, navigates to `https://gemini.google.com/app`, submits the prompt, attempts to detect a complete JSON response, then applies yellow language highlights, red potential-contradiction highlights, and Word comments. It never saves report text to a local diagnostics file and never stores Google login credentials or an API key.
+This version uses only **signed-out Guest Mode** in a disposable, headless Microsoft Edge browser profile. It requires no Google account, password, API key, or browser login. It never reuses a previously signed-in Haronex/Edge profile. Word's **Radiology Agent → Review Text** triggers review automatically, then applies yellow language highlights, red potential-internal-contradiction highlights, and Word comments if a complete, valid JSON response is obtained.
 
-**First-use limitations:** a browser login and/or Google's normal verification may be necessary once; no credential or CAPTCHA automation is implemented. The browser is minimized while processing, but this is not a guaranteed headless integration. The site's changing UI or policy may block automation; a model response is never fabricated. A one-time installer checkbox explicitly authorizes external transfer (including possible patient identifiers); without that authorization, automatic transfer fails closed. Only transmit data approved for this external service. There is no recurring privacy popup.
+Guest access to Gemini text chats is not guaranteed by Google for all devices, regions, or sessions; if it is unavailable or the site asks for sign-in, Haronex fails clearly rather than circumventing the restriction. Selenium site automation itself remains experimental and cannot be guaranteed to work with future site updates. First-run installer authorization for external text transfer remains mandatory. **Never send identifiable patient reports without explicit organizational approval.** Repeated unchanged-text reviews use a DPAPI-encrypted 30-day cache, separated from earlier signed-in-mode caches. The old `%LOCALAPPDATA%\\Haronex\\BrowserProfile` directory from prior versions is not used and can be removed separately by an administrator after confirming it is no longer needed.
 
-**Validation:** CI compiles the Word 2013 x86 host and the packaged Selenium worker, checks the worker's offline JSON parser, installs the executable, and verifies COM/Ribbon activation. CI **does not test a logged-in Google account or a real Word 2013 instance**, so end-to-end reliability is not certified.
+CI validates Windows packaging, the offline JSON parser, installer, and COM activation; it does not execute live Gemini guest-mode tests or clinical validation.
 
-
-# ⚠️ Word 2013 native add-in: deployment blocked after a real Word crash
-
-**9 Nov 2026:** The Windows CI COM activation test passed, but the add-in caused Microsoft Word 2013 (32-bit) to report serious Data Execution Prevention compatibility failures for `radiologyagent.wordaddin` and `radiology agent`. **Do not install or re-enable the current native EXE while the incident is unresolved.** CI does not run Word 2013 and therefore cannot certify Office compatibility.
-
-To recover Word safely, close Word and use [Recover-RadiologyAgent.ps1](word2013/Recover-RadiologyAgent.ps1). This disables Radiology Agent Word startup without disabling DEP, touching other add-ins, or deleting the Gemini key. Next engineering step: debug against a real Word 2013 x86 test environment with crash dumps and Office event logs, then certify an isolated new COM registration before release.
-
----
 
 # Radiology Agent for Microsoft Word 2013 (32-bit)
 
