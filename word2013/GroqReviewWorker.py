@@ -123,7 +123,7 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 12000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v7-1":
+        if version != "haronex-groq-qwen38-v7-2":
             raise ValueError("Unsupported review version")
         groups = [api_review(key, text) for text in texts]
         print(json.dumps({"ok": True, "mode": "groq", "passes": 1,
