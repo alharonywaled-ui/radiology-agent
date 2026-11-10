@@ -1,176 +1,156 @@
 using System;
 using System.Collections.Generic;
-using System.Drawing;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Text;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace RadiologyAgent {
-  // Web Mode deliberately does not automate login, bypass web limits, or call an API.
-  // The user explicitly submits the prompt and copies the response in their own browser.
   internal sealed class WebReviewForm : Form {
     private readonly object word;
-    private readonly Button action;
     private readonly Label status;
-    private string documentText;
-    private int rangeStart, rangeEnd;
-    private bool selectedRange;
-    private readonly List<string> chunks=new List<string>();
-    private int chunkIndex;
-    private int received, applied, skipped, rejected;
-    private enum Phase { Initial, Import }
-    private Phase phase=Phase.Initial;
+    private bool running;
     public WebReviewForm(object application) {
       word=application;
-      Text="Haronex — Word 2013"; Width=610; Height=320;
+      Text="Haronex — Word 2013"; Width=610; Height=250;
       StartPosition=FormStartPosition.CenterScreen;
-      FormBorderStyle=FormBorderStyle.FixedDialog; MaximizeBox=false; MinimizeBox=false;
+      FormBorderStyle=FormBorderStyle.FixedDialog;
+      MaximizeBox=false;MinimizeBox=false;
       var title=new Label{Text="Haronex",Font=new Font("Segoe UI",18,FontStyle.Bold),
         Location=new Point(20,18),Size=new Size(550,45)};
-      var help=new Label{Text="Web review: paste the prepared prompt in your browser, then copy the complete JSON answer.",
-        Location=new Point(20,65),Size=new Size(550,50)};
-      action=new Button{Text="Review By Agent",Location=new Point(20,124),Size=new Size(550,44),
-        BackColor=Color.FromArgb(20,96,208),ForeColor=Color.White,
-        FlatStyle=FlatStyle.Flat,Font=new Font("Segoe UI",10,FontStyle.Bold)};
-      status=new Label{Text="Ready. Only send authorized, de-identified reports to the web service.",
-        Location=new Point(20,185),Size=new Size(550,82)};
-      Controls.Add(title);Controls.Add(help);Controls.Add(action);Controls.Add(status);
-      action.Click+=(s,e)=>RunStep();
+      status=new Label{Text="Ready. Starting review…",
+        Location=new Point(20,80),Size=new Size(550,100),Font=new Font("Segoe UI",10)};
+      Controls.Add(title);Controls.Add(status);
+      Shown+=async (sender,args)=>await RunOnce();
+      FormClosing+=(sender,args)=>{if(running){args.Cancel=true;}};
     }
-    private void RunStep() {
-      try {if(phase==Phase.Initial)Prepare();else Import();}
-      catch(Exception ex) {status.Text="Haronex: "+ex.Message;}
+    private static string Safe(string text,int max) {
+      return String.IsNullOrEmpty(text)?"":text.Substring(0,Math.Min(text.Length,max));
     }
-    private void Prepare() {
-      dynamic app=word;
-      dynamic doc=app.ActiveDocument;
-      int a=(int)app.Selection.Start,b=(int)app.Selection.End;
-      selectedRange=b>a;
-      rangeStart=selectedRange?a:(int)doc.Content.Start;
-      rangeEnd=selectedRange?b:(int)doc.Content.End;
-      documentText=selectedRange?(string)app.Selection.Text:(string)doc.Content.Text;
-      if(String.IsNullOrWhiteSpace(documentText))throw new Exception("Document/selection has no text.");
-      if(documentText.Length>120000)throw new Exception("Review limited to 120,000 characters. Select a smaller part.");
-      var consent=MessageBox.Show(this,
-        "The prepared prompt may contain names, patient IDs and clinical data.\n"+
-        "Only continue if you are authorized to send this text to the web service "+
-        "and have removed personal identifiers. The full prompt will be copied to the clipboard.\n\nContinue?",
-        "Haronex — Protect patient privacy",MessageBoxButtons.YesNo,MessageBoxIcon.Warning);
-      if(consent!=DialogResult.Yes)return;
-      chunks.Clear();chunkIndex=0;received=0;applied=0;skipped=0;rejected=0;
-      int pos=0;
-      while(pos<documentText.Length) {
-        int length=Math.Min(12000,documentText.Length-pos);
-        if(pos+length<documentText.Length) {
-          int newline=documentText.LastIndexOf('\n',pos+length-1,length);
-          if(newline>=pos+6000)length=newline-pos+1;
+    private static string BuildPrompt(string text,int index,int total) {
+      return "You are Haronex, a cautious English radiology report proofreader. "+
+        "Identify spelling, grammar, terminology consistency mistakes and ONLY clear internal contradictions. "+
+        "Never invent medical findings, diagnoses, treatment, or measurements. "+
+        "Return ONE strict JSON object, no Markdown, no introduction. "+
+        "Schema: {\"issues\":[{\"quote\":\"exact substring from text\",\"category\":\"language or logic\",\"explanation\":\"brief explanation, no patient identifiers\",\"suggestion\":\"optional proposed wording\"}]}. "+
+        "Use only categories language and logic. Keep each quote exactly as in the report. "+
+        "Do not repeat patient identifiers. If no reliable issues return {\"issues\":[]}. "+
+        "Clinical verification is mandatory. Part "+(index+1)+"/"+total+":\n"+text;
+    }
+    private static bool Approved() {
+      using(var key=Registry.CurrentUser.OpenSubKey(@"Software\Haronex")) {
+        return key!=null&&Convert.ToString(key.GetValue("WebTransferAllowed",0))=="1";
+      }
+    }
+    private async Task RunOnce() {
+      if(running)return;
+      running=true;
+      try {
+        if(!Approved())throw new Exception("External web transfer is not authorized. Reinstall Haronex and approve Web Mode data transfer during setup.");
+        dynamic app=word,doc=app.ActiveDocument;
+        int selectionStart=(int)app.Selection.Start,selectionEnd=(int)app.Selection.End;
+        bool hasSelection=selectionEnd>selectionStart;
+        int rangeStart=hasSelection?selectionStart:(int)doc.Content.Start;
+        int rangeEnd=hasSelection?selectionEnd:(int)doc.Content.End;
+        string report=hasSelection?(string)app.Selection.Text:(string)doc.Content.Text;
+        if(String.IsNullOrWhiteSpace(report))throw new Exception("No text to review.");
+        if(report.Length>120000)throw new Exception("Report exceeds 120,000 characters. Select a smaller section.");
+        var chunks=new List<string>();
+        int pos=0;
+        while(pos<report.Length) {
+          int length=Math.Min(12000,report.Length-pos);
+          if(pos+length<report.Length) {
+            int boundary=report.LastIndexOf('\n',pos+length-1,length);
+            if(boundary>=pos+6000)length=boundary-pos+1;
+          }
+          chunks.Add(report.Substring(pos,length));
+          pos+=length;
         }
-        chunks.Add(documentText.Substring(pos,length));pos+=length;
-      }
-      if(!String.IsNullOrEmpty(documentText))SendCurrentPrompt();
-      phase=Phase.Import;action.Text="Import Result From Clipboard";
-      try {Process.Start(new ProcessStartInfo("https://gemini.google.com/app"){UseShellExecute=true});}
-      catch {status.Text+=" Open https://gemini.google.com/app manually."; }
-    }
-    private string BuildPrompt(string text,int index,int count) {
-      return "You are Haronex, a careful English radiology report proofreading assistant. "+
-        "Check grammar, spelling, medical terminology consistency, and ONLY clear internal contradictions. "+
-        "Never invent findings, measurements, or diagnoses. "+
-        "Return a SINGLE raw JSON object, with NO markdown fences or introduction. "+
-        "Schema: {\"issues\":[{\"quote\":\"an EXACT short substring of this chunk\",\"category\":\"language or logic\",\"explanation\":\"brief explanation without patient identifiers\",\"suggestion\":\"optional corrected wording\"}]}. "+
-        "Use only categories language and logic. Keep quotes exact, including punctuation and spacing. "+
-        "If there are no reliable issues, return {\"issues\":[]}. "+
-        "Do not repeat patient identifiers in explanations or suggestions. "+
-        "Do not rewrite the report. Clinical verification is mandatory. "+
-        "CHUNK "+(index+1)+" OF "+count+"; TEXT:\n"+text;
-    }
-    private void SendCurrentPrompt() {
-      Clipboard.SetText(BuildPrompt(chunks[chunkIndex],chunkIndex,chunks.Count));
-      status.Text="Copied prompt "+(chunkIndex+1)+"/"+chunks.Count+
-        " to clipboard. Paste and send in Gemini Web, copy the FULL JSON reply, "+
-        "then click Import Result. Do not copy the report into this chat.";
-    }
-    private void Import() {
-      if(chunkIndex>=chunks.Count)throw new Exception("No chunk is pending.");
-      if(!Clipboard.ContainsText())throw new Exception("Clipboard contains no text. Copy the web response first.");
-      string answer=Clipboard.GetText();
-      // The prompt itself is not a response. Avoid processing it accidentally.
-      if(answer.Contains("CHUNK "+(chunkIndex+1)+" OF "+chunks.Count+"; TEXT:"))
-        throw new Exception("Clipboard still contains the prompt. Copy the web response first.");
-      var parsed=ExtractObject(answer);
-      var serializer=new JavaScriptSerializer{MaxJsonLength=500000};
-      var root=serializer.DeserializeObject(parsed) as Dictionary<string,object>;
-      if(root==null||!root.ContainsKey("issues"))throw new Exception("No issues array in copied response. Copy the full JSON object.");
-      var rows=root["issues"] as object[];
-      if(rows==null)throw new Exception("Invalid issues list. Copy a valid JSON response.");
-      int localReceived=rows.Length,localRejected=0,localSkipped=0,localApplied=0;
-      // Validate every row before applying any document changes.
-      var valid=new List<Tuple<string,string,string,string>>();
-      foreach(var entry in rows) {
-        var row=entry as Dictionary<string,object>;
-        if(row==null){localRejected++;continue;}
-        Func<string,string> field=name=>row.ContainsKey(name)&&row[name]!=null?Convert.ToString(row[name]):"";
-        var quote=field("quote");
-        var category=field("category").Trim().ToLowerInvariant();
-        if(quote.Length<2||quote.Length>500||(category!="language"&&category!="logic")||
-           !chunks[chunkIndex].Contains(quote)){localRejected++;continue;}
-        valid.Add(Tuple.Create(quote,category,field("explanation"),field("suggestion")));
-      }
-      dynamic doc=((dynamic)word).ActiveDocument;
-      foreach(var issue in valid) {
-        try {
-          dynamic region=doc.Range(rangeStart,rangeEnd);
-          dynamic find=region.Find;
-          find.ClearFormatting();find.Text=issue.Item1;find.Forward=true;find.Wrap=0;
-          find.MatchCase=true;find.MatchWildcards=false;
-          if(!(bool)find.Execute()){localSkipped++;continue;}
-          int end=(int)region.End;
-          dynamic again=doc.Range(end,rangeEnd);
-          dynamic nextFind=again.Find;
-          nextFind.ClearFormatting();nextFind.Text=issue.Item1;nextFind.Forward=true;
-          nextFind.Wrap=0;nextFind.MatchCase=true;nextFind.MatchWildcards=false;
-          if((bool)nextFind.Execute()){localSkipped++;continue;}
-          region.HighlightColorIndex=issue.Item2=="logic"?6:7;
-          string comment="[Haronex — "+(issue.Item2=="logic"?"Potential internal contradiction":"Language")+"]\r\n"+
-            Short(issue.Item3,500)+(issue.Item4.Length>0?"\r\nSuggestion: "+Short(issue.Item4,250):"")+
-            "\r\nRequires clinical verification.";
-          doc.Comments.Add(region,comment);localApplied++;
-        } catch {localSkipped++; }
-      }
-      received+=localReceived;rejected+=localRejected;skipped+=localSkipped;applied+=localApplied;
-      chunkIndex++;
-      if(chunkIndex<chunks.Count) {
-        SendCurrentPrompt();
-        status.Text+=" Previous chunk: "+localReceived+" received, "+localApplied+" applied, "+
-          localRejected+" rejected, "+localSkipped+" skipped.";
-      } else {
-        phase=Phase.Initial;action.Text="Review By Agent";
-        status.Text="Haronex finished. Sent "+documentText.Length+" chars across "+chunks.Count+
-          " chunks; received "+received+" issues, applied "+applied+", rejected "+rejected+
-          ", skipped "+skipped+". "+(received==0?"No issues returned; NOT a clinical clearance.":"Clinical verification required.");
-      }
-    }
-    private static string ExtractObject(string answer) {
-      // Extract first balanced JSON object; handles quoted braces and Markdown fences.
-      int start=answer.IndexOf('{');
-      if(start<0)throw new Exception("Copied text has no JSON object.");
-      bool quoted=false,escape=false;int depth=0;
-      for(int i=start;i<answer.Length;i++){
-        char c=answer[i];
-        if(quoted) {
-          if(escape)escape=false;
-          else if(c=='\\')escape=true;
-          else if(c=='"')quoted=false;
-        } else {
-          if(c=='"')quoted=true;
-          else if(c=='{')depth++;
-          else if(c=='}'&&--depth==0)return answer.Substring(start,i-start+1);
+        var prompts=new List<string>();
+        for(int i=0;i<chunks.Count;i++)prompts.Add(BuildPrompt(chunks[i],i,chunks.Count));
+        var serializer=new JavaScriptSerializer{MaxJsonLength=2000000};
+        var payload=serializer.Serialize(new Dictionary<string,object>{{"prompts",prompts}});
+        status.Text="Reviewing "+report.Length+" characters in "+chunks.Count+
+          " part(s) with Haronex Web. You may need to sign in once in Edge.";
+        var workerResult=await Task.Run(()=>CallBrowserWorker(payload,chunks.Count));
+        var root=serializer.DeserializeObject(workerResult) as Dictionary<string,object>;
+        if(root==null||!root.ContainsKey("ok")||!Convert.ToBoolean(root["ok"])) {
+          string error=root!=null&&root.ContainsKey("error")?Convert.ToString(root["error"]):"No browser response.";
+          throw new Exception("Web review did not complete: "+Safe(error,330));
         }
+        var groups=root["groups"] as object[];
+        if(groups==null||groups.Length!=chunks.Count)throw new Exception("Incomplete web response: no Word changes applied.");
+        var valid=new List<Tuple<string,string,string,string>>();
+        int received=0,rejected=0;
+        for(int i=0;i<groups.Length;i++) {
+          var rows=groups[i] as object[];
+          if(rows==null)throw new Exception("Invalid response group: no Word changes applied.");
+          foreach(var entry in rows) {
+            received++;
+            var row=entry as Dictionary<string,object>;
+            if(row==null){rejected++;continue;}
+            Func<string,string> field=k=>row.ContainsKey(k)&&row[k]!=null?Convert.ToString(row[k]):"";
+            var quote=field("quote");
+            var category=field("category").Trim().ToLowerInvariant();
+            if(quote.Length<2||quote.Length>500||!chunks[i].Contains(quote)||
+               (category!="language"&&category!="logic")) {rejected++;continue;}
+            valid.Add(Tuple.Create(quote,category,field("explanation"),field("suggestion")));
+          }
+        }
+        // Apply only after all chunks have been checked. Word's COM objects are used on the UI STA thread.
+        status.Text="Adding "+valid.Count+" Haronex Word annotations…";
+        int applied=0,skipped=0;
+        foreach(var issue in valid) {
+          try {
+            dynamic region=doc.Range(rangeStart,rangeEnd);
+            dynamic find=region.Find;
+            find.ClearFormatting();find.Text=issue.Item1;
+            find.Forward=true;find.Wrap=0;find.MatchCase=true;find.MatchWildcards=false;
+            if(!(bool)find.Execute()){skipped++;continue;}
+            dynamic again=doc.Range((int)region.End,rangeEnd);
+            dynamic second=again.Find;
+            second.ClearFormatting();second.Text=issue.Item1;
+            second.Forward=true;second.Wrap=0;second.MatchCase=true;second.MatchWildcards=false;
+            if((bool)second.Execute()){skipped++;continue;}
+            string comment="[Haronex: "+(issue.Item2=="logic"?"Potential internal contradiction":"Language")+"]\r\n"+
+              Safe(issue.Item3,500)+(issue.Item4.Length>0?"\r\nSuggestion: "+Safe(issue.Item4,250):"")+
+              "\r\nRequires clinical verification.";
+            region.HighlightColorIndex=issue.Item2=="logic"?6:7;
+            doc.Comments.Add(region,comment);
+            applied++;
+          } catch {skipped++;}
+        }
+        status.Text="Haronex completed. "+report.Length+" chars, "+received+
+          " returned, "+applied+" applied, "+rejected+" rejected, "+skipped+
+          " skipped."+(received==0?" No issues returned; NOT clinical clearance.":"");
       }
-      throw new Exception("Incomplete JSON response. Copy the entire response.");
+      catch(Exception ex) {status.Text="Haronex: "+Safe(ex.Message,420);}
+      finally {running=false;}
     }
-    private static string Short(string text,int max) {return String.IsNullOrEmpty(text)?"":text.Substring(0,Math.Min(text.Length,max));}
+    private static string CallBrowserWorker(string payload,int count) {
+      string executable=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"HaronexWebWorker.exe");
+      if(!File.Exists(executable))throw new Exception("Web worker missing. Reinstall Haronex.");
+      var info=new ProcessStartInfo(executable){
+        UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,
+        RedirectStandardInput=true,RedirectStandardOutput=true,
+        StandardInputEncoding=new UTF8Encoding(false),StandardOutputEncoding=new UTF8Encoding(false)
+      };
+      using(var process=Process.Start(info)) {
+        if(process==null)throw new Exception("Unable to start Haronex browser worker.");
+        process.StandardInput.Write(payload);
+        process.StandardInput.Close();
+        var output=process.StandardOutput.ReadToEnd();
+        if(!process.WaitForExit(Math.Max(240000,count*210000))) {
+          try{process.Kill();}catch{}
+          throw new Exception("Browser review timed out.");
+        }
+        if(String.IsNullOrWhiteSpace(output))throw new Exception("Browser worker returned no result.");
+        return output.Trim();
+      }
+    }
   }
 }
