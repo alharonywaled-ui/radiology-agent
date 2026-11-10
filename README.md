@@ -1,3 +1,16 @@
+# Haronex Comprehensive Review v5.0 — Word 2013 x86
+
+**One-click, Guest-only, hidden-browser experimental review.** For every report chunk Haronex runs two separate Gemini Web reviews:
+
+1. **Structured first pass:** explicit sentence-by-sentence language/grammar review, medical terminology consistency, internally supported logic contradictions, and final completeness scan.
+2. **Independent second pass:** audits the same chunk while knowing the earlier quotes, to seek additional distinct issues. The worker validates quoted phrases against the source, merges findings deterministically, and removes duplicates before Word annotations.
+
+No manual steps or new buttons are introduced. Errors still produce the generic **رجاءً أعد المحاولة** popup; completed workflows produce **تمت المراجعة**. The Ribbon status icon is green/red. Every chunk must complete *both* passes; partial web responses are rejected rather than quietly marked successful. Cached earlier versions are isolated by an algorithm-version key; unchanged documents reuse an encrypted review for speed. This version typically performs **2 web requests per chunk**, so new uncached reviews can take longer and may hit Guest Mode availability/rate limits. It cannot guarantee every possible radiological error or full clinical consistency across separate chunks; medical review remains necessary.
+
+Avoid transmitting identifiable patient data unless expressly approved by the organization. The program does not use an API key or Google login. Site automation is not an official Gemini integration and requires end-to-end testing in the intended environment.
+
+---
+
 # Haronex Guest-Only Web Mode (Word 2013 x86)
 
 This version uses only **signed-out Guest Mode** in a disposable, headless Microsoft Edge browser profile. It requires no Google account, password, API key, or browser login. It never reuses a previously signed-in Haronex/Edge profile. Word's **Radiology Agent → Review Text** triggers review automatically, then applies yellow language highlights, red potential-internal-contradiction highlights, and Word comments if a complete, valid JSON response is obtained.
