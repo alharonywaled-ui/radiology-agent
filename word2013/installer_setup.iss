@@ -1,5 +1,5 @@
 #define AppName "Radiology Agent for Word 2013"
-#define AppVersion "3.1.0"
+#define AppVersion "4.0.0"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
@@ -47,7 +47,7 @@ procedure InitializeWizard;
 begin
   AuthorizationPage := CreateInputOptionPage(wpSelectDir,
     'Haronex Web Data Transfer Permission', 'Authorize external processing once',
-    'Haronex can automatically send the selected Word text, including clinical details or patient identifiers, to the external Gemini website. You are responsible for removing identifiers and obtaining organizational approval. This is an experimental web integration, not a guaranteed background API.',
+    'Haronex Guest Mode may automatically send the selected Word text, including clinical details or patient identifiers, to the external Gemini website without Google sign-in. Remove identifiers and obtain organizational approval first. Guest access depends on Google and may be unavailable. No Google account or password is stored.',
     False, False);
   AuthorizationPage.Add('I confirm I am authorized to send my document text to this external service automatically.');
   AuthorizationPage.Values[0] := False;
