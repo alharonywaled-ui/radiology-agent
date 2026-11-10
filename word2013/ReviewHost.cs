@@ -6,6 +6,10 @@ namespace RadiologyAgent {
   internal static class ReviewHost {
     [STAThread]
     private static void Main(string[] args) {
+      if(args!=null&&args.Length>0&&args[0]=="--self-test") {
+        Environment.Exit(LiveReviewMonitor.SelfTest()?0:7);
+        return;
+      }
       Application.EnableVisualStyles();
       Application.SetCompatibleTextRenderingDefault(false);
       // Exactly one persistent monitor per interactive Windows user.
