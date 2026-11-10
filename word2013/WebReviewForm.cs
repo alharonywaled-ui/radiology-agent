@@ -147,7 +147,19 @@ namespace RadiologyAgent {
         if(!cached)SaveCached(cacheFile,workerResult);
         // Apply only after all chunks have been checked. Word's COM objects are used on the UI STA thread.
         status.Text="Adding "+valid.Count+" Haronex Word annotations…";
-        int applied=0,skipped=0;
+        int applied=0,skipped=0,duplicates=0;
+        var existing=new HashSet<string>(StringComparer.Ordinal);
+        try {
+          dynamic comments=doc.Comments;
+          int count=(int)comments.Count;
+          for(int i=1;i<=count;i++) {
+            dynamic comment=comments.Item(i);
+            string body=Convert.ToString(comment.Range.Text);
+            if(body.IndexOf("[Haronex:",StringComparison.Ordinal)<0)continue;
+            dynamic anchor=comment.Scope;
+            existing.Add(((int)anchor.Start).ToString()+":"+((int)anchor.End).ToString());
+          }
+        } catch { /* Duplicates can still be checked against current-session changes. */ }
         foreach(var issue in valid) {
           try {
             dynamic region=doc.Range(rangeStart,rangeEnd);
@@ -160,17 +172,20 @@ namespace RadiologyAgent {
             second.ClearFormatting();second.Text=issue.Item1;
             second.Forward=true;second.Wrap=0;second.MatchCase=true;second.MatchWildcards=false;
             if((bool)second.Execute()){skipped++;continue;}
+            string anchorId=((int)region.Start).ToString()+":"+((int)region.End).ToString();
+            if(existing.Contains(anchorId)){duplicates++;continue;}
             string comment="[Haronex: "+(issue.Item2=="logic"?"Potential internal contradiction":"Language")+"]\r\n"+
               Safe(issue.Item3,500)+(issue.Item4.Length>0?"\r\nSuggestion: "+Safe(issue.Item4,250):"")+
               "\r\nRequires clinical verification.";
             region.HighlightColorIndex=issue.Item2=="logic"?6:7;
             doc.Comments.Add(region,comment);
+            existing.Add(anchorId);
             applied++;
           } catch {skipped++;}
         }
         status.Text="Haronex completed"+(cached?" (same saved review)":"")+
           ". "+report.Length+" chars, "+received+" returned, "+applied+
-          " applied, "+rejected+" rejected, "+skipped+" skipped."+
+          " applied, "+duplicates+" already marked, "+rejected+" rejected, "+skipped+" skipped."+
           (received==0?" No issues returned; NOT clinical clearance.":"");
       }
       catch(Exception ex) {status.Text="Haronex: "+Safe(ex.Message,420);}
