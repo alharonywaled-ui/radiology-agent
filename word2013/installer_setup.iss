@@ -1,5 +1,5 @@
 #define AppName "Radiology Agent for Word 2013"
-#define AppVersion "5.0.0"
+#define AppVersion "6.0.0"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
 DefaultGroupName=Radiology Agent
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_Comprehensive_Setup
+OutputBaseFilename=Haronex_Word2013_LiveReview_V6_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -47,7 +47,7 @@ procedure InitializeWizard;
 begin
   AuthorizationPage := CreateInputOptionPage(wpSelectDir,
     'Haronex Web Data Transfer Permission', 'Authorize external processing once',
-    'Haronex Guest Mode may automatically send the selected Word text, including clinical details or patient identifiers, to the external Gemini website without Google sign-in. Remove identifiers and obtain organizational approval first. Guest access depends on Google and may be unavailable. No Google account or password is stored.',
+    'Haronex v6 automatically reads Word report text on opening and while editing, then sends it to the external Gemini website in Guest Mode after 1.2 seconds without additional review clicks. The report may contain patient identifiers. ONLY authorize this behavior if your organization permits external processing, and use de-identified documents. Guest access is not guaranteed. No Google account or API key is used.',
     False, False);
   AuthorizationPage.Add('I confirm I am authorized to send my document text to this external service automatically.');
   AuthorizationPage.Values[0] := False;
@@ -70,6 +70,9 @@ begin
   if CurStep = ssPostInstall then begin
     if WizardSilent then Exit;
     if AuthorizationPage.Values[0] then
+    begin
       RegWriteDWordValue(HKCU, 'Software\Haronex', 'WebTransferAllowed', 1);
+      RegWriteDWordValue(HKCU, 'Software\Haronex', 'LiveAutoReviewAllowed', 1);
+    end;
   end;
 end;
