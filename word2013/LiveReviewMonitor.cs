@@ -238,6 +238,27 @@ namespace RadiologyAgent {
       }
     }
 
+    internal static bool SelfTest() {
+      try {
+        string report="FINDINGS: Right kidney normal.\rIMPRESSION: Left kidney normal.\r";
+        var parser=new JavaScriptSerializer{MaxJsonLength=2000000};
+        var issue=new Dictionary<string,object> {
+          {"quote","Left kidney"},{"category","logic"},
+          {"explanation","Laterality conflict"},{"suggestion","Verify laterality"}
+        };
+        var response=new Dictionary<string,object> {
+          {"ok",true},{"mode","guest"},{"passes",2},
+          {"review_version",WebReviewForm.ReviewAlgorithmVersion},
+          {"groups",new object[]{new object[]{issue}}}
+        };
+        string json=parser.Serialize(response);
+        return DebounceMilliseconds==1200
+          && ValidateResponse(json,report)!=null
+          && ValidateResponse(json,report.Replace("Left kidney","Spleen"))==null
+          && ValidateResponse(json.Replace("\"guest\"","\"account\""),report)==null;
+      } catch {return false;}
+    }
+
     private void ApplyReady() {
       if(readyResponse==null||currentText==null){Notify(false);return;}
       try {
