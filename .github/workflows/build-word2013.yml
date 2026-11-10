@@ -23,6 +23,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ReviewHost compile failed" }
           New-Item -ItemType Directory word2013/bin -Force | Out-Null
           Copy-Item word2013/bin/Release/RadiologyAgent.ReviewHost.exe word2013/bin/
+          & word2013/bin/RadiologyAgent.ReviewHost.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Live review monitor offline self-test failed: $LASTEXITCODE" }
       - name: Package Haronex web worker with Selenium
         uses: actions/setup-python@v5
         with:
