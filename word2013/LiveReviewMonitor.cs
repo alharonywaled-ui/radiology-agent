@@ -27,6 +27,9 @@ namespace RadiologyAgent {
     private bool failed, working, pendingClick;
     private CancellationTokenSource runningCancellation;
     private uint lastHandledCommand;
+    private bool awaitingDocument;
+    private DateTime documentWaitStarted;
+    private string lastWordProblem="WORD_NOT_CONNECTED";
 
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     private static extern int MessageBox(IntPtr owner,string message,string title,uint flags);
@@ -88,10 +91,12 @@ namespace RadiologyAgent {
       try {
         word=Marshal.GetActiveObject("Word.Application");
         missingWordTicks=0;
+        lastWordProblem="WORD_NO_ACTIVE_DOCUMENT";
         return true;
       } catch {
-        // Word may not yet be present in the ROT at add-in OnConnection.
-        if(++missingWordTicks>90)Close();
+        // Word may not yet be registered in the ROT when started.
+        lastWordProblem="WORD_COM_UNAVAILABLE";
+        ++missingWordTicks;
         return false;
       }
     }
@@ -100,12 +105,12 @@ namespace RadiologyAgent {
       if(polling||IsDisposed)return;
       polling=true;
       try {
-        if(!ConnectWord())return;
-        PollWord();
+        if(ConnectWord())PollWord();
         CheckClick();
+        CheckPendingDocument();
         // No background API calls: only explicit Review Text click triggers analysis.
       } catch {
-        // Word may temporarily be in a modal operation; retry without leaking report text.
+        lastWordProblem="WORD_POLL_FAILED";
       } finally {polling=false;}
     }
 
@@ -113,8 +118,15 @@ namespace RadiologyAgent {
       dynamic app=word;
       dynamic doc;
       try {doc=app.ActiveDocument;}
-      catch {
+      catch (COMException) {
+        lastWordProblem="WORD_NO_ACTIVE_DOCUMENT";
         if(documentId!=null)ClearDocument();
+        return;
+      }
+      catch {
+        lastWordProblem="WORD_ACTIVE_DOCUMENT_ERROR";
+        if(documentId!=null)ClearDocument();
+        word=null; // Reacquire Word after transient COM/RPC disconnection.
         return;
       }
       string id,report;
@@ -125,14 +137,24 @@ namespace RadiologyAgent {
         catch {hwnd=(int)app.Hwnd;}
         id=hwnd.ToString()+"|"+name;
         report=Convert.ToString(doc.Content.Text);
-      } catch {return;}
-      if(String.IsNullOrWhiteSpace(report)||report.Length>120000) {
+      } catch {
+        lastWordProblem="WORD_DOCUMENT_READ_FAILED";
+        return;
+      }
+      if(String.IsNullOrWhiteSpace(report)) {
+        lastWordProblem="WORD_DOCUMENT_EMPTY";
         if(documentId!=null)ClearDocument();
         return;
       }
+      if(report.Length>120000) {
+        lastWordProblem="WORD_DOCUMENT_TOO_LONG";
+        if(documentId!=null)ClearDocument();
+        return;
+      }
+      lastWordProblem="WORD_DOCUMENT_READY";
       bool changedDoc=!String.Equals(documentId,id,StringComparison.Ordinal);
       if(changedDoc||!String.Equals(currentText,report,StringComparison.Ordinal)) {
-        if(changedDoc)pendingClick=false;
+        // Preserve the click while the document becomes available.
         if(runningCancellation!=null)runningCancellation.Cancel();
         documentId=id;
         currentText=report;
@@ -147,7 +169,7 @@ namespace RadiologyAgent {
     private void ClearDocument() {
       if(runningCancellation!=null)runningCancellation.Cancel();
       documentId=null;currentText=null;snapshotToken=null;
-      readyResponse=null;failed=false;pendingClick=false;
+      readyResponse=null;failed=false;
       WebReviewForm.SetReviewStatus(0);
     }
 
@@ -156,7 +178,13 @@ namespace RadiologyAgent {
       if(command==lastHandledCommand)return;
       lastHandledCommand=command;
       WriteDword("LiveReviewHandled",command);
-      if(currentText==null||!WebReviewForm.Approved()) {LogFailure(currentText==null?"WORD_NO_DOCUMENT":"KEY_OR_CONSENT_MISSING");Notify(false);return;}
+      if(!WebReviewForm.Approved()) {LogFailure("KEY_OR_CONSENT_MISSING");Notify(false);return;}
+      if(currentText==null) {
+        // Word may be starting or its COM document snapshot not yet available.
+        awaitingDocument=true;
+        documentWaitStarted=DateTime.UtcNow;
+        return;
+      }
       if(readyResponse!=null){ApplyReady();return;}
       if(failed) {
         Notify(false);
@@ -168,6 +196,21 @@ namespace RadiologyAgent {
       // current version has completed, never falsely apply stale results.
       pendingClick=true;
       if(!working)StartAnalysis();
+    }
+
+    private void CheckPendingDocument() {
+      if(!awaitingDocument)return;
+      if(currentText!=null) {
+        awaitingDocument=false;
+        if(readyResponse!=null)ApplyReady();
+        else {pendingClick=true;if(!working)StartAnalysis();}
+        return;
+      }
+      if((DateTime.UtcNow-documentWaitStarted).TotalSeconds>=6) {
+        awaitingDocument=false;
+        LogFailure(lastWordProblem);
+        Notify(false);
+      }
     }
 
     private static List<string> Chunks(string report) {
