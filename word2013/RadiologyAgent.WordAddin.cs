@@ -58,8 +58,31 @@ namespace RadiologyAgent {
     public string Quote, Category, Explanation, Suggestion;
   }
 
+  internal sealed class ReviewOutcome {
+    public List<Issue> Issues=new List<Issue>();
+    public int SentCharacters, ReceivedIssues, RejectedIssues, Requests;
+  }
   internal static class Gemini {
-    public static List<Issue> Review(string report) {
+    public static ReviewOutcome Review(string report) {
+      var combined=new ReviewOutcome();
+      int position=0;
+      while(position<report.Length) {
+        int length=Math.Min(12000,report.Length-position);
+        if(position+length<report.Length){
+          int boundary=report.LastIndexOf('\n',position+length-1,length);
+          if(boundary>=position+6000)length=boundary-position+1;
+        }
+        var result=ReviewChunk(report.Substring(position,length));
+        combined.SentCharacters+=result.SentCharacters;
+        combined.ReceivedIssues+=result.ReceivedIssues;
+        combined.RejectedIssues+=result.RejectedIssues;
+        combined.Requests++;
+        combined.Issues.AddRange(result.Issues);
+        position+=length;
+      }
+      return combined;
+    }
+    private static ReviewOutcome ReviewChunk(string report) {
       string key=ReadKey();
       var prompt="You are a cautious English radiology-report proofreader. Identify grammar errors and clear INTERNAL contradictions only. Do not invent medical findings. Do not disclose patient identifiers in explanations. Return at most 25 issues in strict JSON of the form {\"issues\":[{\"quote\":\"an exact phrase copied from the report\",\"category\":\"language or logic\",\"explanation\":\"brief explanation\",\"suggestion\":\"optional suggested wording\"}]}. Every quote must match the report exactly. Do not rewrite the report. Clinical verification remains essential.\nREPORT:\n"+report;
       var serializer=new JavaScriptSerializer { MaxJsonLength=300000 };
@@ -126,25 +149,34 @@ namespace RadiologyAgent {
         throw new Exception("Haronex "+status+detail+". "+advice);
         }
       }
+      if(String.IsNullOrWhiteSpace(response))throw new Exception("Haronex returned empty content.");
       var root=serializer.DeserializeObject(response) as Dictionary<string,object>;
-      var candidates=(object[])root["candidates"];
-      var candidate=(Dictionary<string,object>)candidates[0];
-      var content=(Dictionary<string,object>)candidate["content"];
-      var parts=(object[])content["parts"];
-      string json=Convert.ToString(((Dictionary<string,object>)parts[0])["text"]);
+      if(root==null||!root.ContainsKey("candidates"))throw new Exception("Haronex response has no candidates.");
+      var candidates=root["candidates"] as object[];
+      if(candidates==null||candidates.Length==0)throw new Exception("Haronex returned no candidate results.");
+      var candidate=candidates[0] as Dictionary<string,object>;
+      if(candidate==null||!candidate.ContainsKey("content"))throw new Exception("Haronex returned no text content.");
+      var content=candidate["content"] as Dictionary<string,object>;
+      var parts=(content!=null&&content.ContainsKey("parts"))?content["parts"] as object[]:null;
+      if(parts==null||parts.Length==0)throw new Exception("Haronex returned no text parts.");
+      var first=parts[0] as Dictionary<string,object>;
+      if(first==null||!first.ContainsKey("text"))throw new Exception("Haronex returned an unsupported response.");
+      string json=Convert.ToString(first["text"]).Trim();
       var parsed=serializer.DeserializeObject(json) as Dictionary<string,object>;
-      var list=new List<Issue>();
-      if(parsed==null||!parsed.ContainsKey("issues"))return list;
-      object[] issues=parsed["issues"] as object[];if(issues==null)return list;
+      if(parsed==null||!parsed.ContainsKey("issues"))throw new Exception("Haronex response did not include the issues field.");
+      object[] issues=parsed["issues"] as object[];
+      if(issues==null)throw new Exception("Haronex returned an invalid issues list.");
+      var outcome=new ReviewOutcome{SentCharacters=report.Length,ReceivedIssues=issues.Length};
       foreach(object item in issues) {
-        if(list.Count>=25)break;
-        var row=item as Dictionary<string,object>;if(row==null)continue;
-        Func<string,string> get=name=>row.ContainsKey(name) ? Convert.ToString(row[name]) : "";
-        string quote=get("quote"), category=get("category");
-        if(quote.Length==0||quote.Length>300||!report.Contains(quote)||(category!="language"&&category!="logic"))continue;
-        list.Add(new Issue{Quote=quote,Category=category,Explanation=get("explanation"),Suggestion=get("suggestion")});
+        var row=item as Dictionary<string,object>;if(row==null){outcome.RejectedIssues++;continue;}
+        Func<string,string> get=name=>row.ContainsKey(name)&&row[name]!=null?Convert.ToString(row[name]):"";
+        string quote=get("quote"),category=get("category").Trim().ToLowerInvariant();
+        if(quote.Length==0||quote.Length>500||report.IndexOf(quote,StringComparison.Ordinal)<0||
+           (category!="language"&&category!="logic")){outcome.RejectedIssues++;continue;}
+        if(outcome.Issues.Count>=25){outcome.RejectedIssues++;continue;}
+        outcome.Issues.Add(new Issue{Quote=quote,Category=category,Explanation=get("explanation"),Suggestion=get("suggestion")});
       }
-      return list;
+      return outcome;
     }
     private static string ReadKey() {
       string path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"RadiologyAgent","key.dpapi");
@@ -162,12 +194,12 @@ namespace RadiologyAgent {
     private readonly Label status;
     public ReviewForm(object app) {
       application=app;
-      Text="Radiology Agent — Word 2013";Width=530;Height=260;
+      Text="Radiology Agent — Word 2013";Width=610;Height=300;
       StartPosition=FormStartPosition.CenterScreen;FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;MinimizeBox=false;
-      var title=new Label{Text="Radiology Agent",Font=new Font("Segoe UI",17,FontStyle.Bold),Location=new Point(20,18),Size=new Size(470,42)};
-      var sub=new Label{Text="Review selected text or entire document. AI suggestions require clinical verification.",Location=new Point(20,65),Size=new Size(470,45)};
-      review=new Button{Text="Review By Agent",Location=new Point(20,120),Size=new Size(470,43),BackColor=Color.FromArgb(20,96,208),ForeColor=Color.White,FlatStyle=FlatStyle.Flat,Font=new Font("Segoe UI",10,FontStyle.Bold)};
-      status=new Label{Text="Ready. Do not send identifiable patient data without organizational approval.",Location=new Point(20,177),Size=new Size(470,50)};
+      var title=new Label{Text="Radiology Agent",Font=new Font("Segoe UI",17,FontStyle.Bold),Location=new Point(20,18),Size=new Size(550,42)};
+      var sub=new Label{Text="Review selected text or entire document. AI suggestions require clinical verification.",Location=new Point(20,65),Size=new Size(550,45)};
+      review=new Button{Text="Review By Agent",Location=new Point(20,120),Size=new Size(550,43),BackColor=Color.FromArgb(20,96,208),ForeColor=Color.White,FlatStyle=FlatStyle.Flat,Font=new Font("Segoe UI",10,FontStyle.Bold)};
+      status=new Label{Text="Ready. Do not send identifiable patient data without organizational approval.",Location=new Point(20,177),Size=new Size(550,85)};
       Controls.Add(title);Controls.Add(sub);Controls.Add(review);Controls.Add(status);
       review.Click+=async (sender,args)=>await RunReview();
     }
@@ -180,15 +212,15 @@ namespace RadiologyAgent {
         string full=(string)doc.Content.Text;
         string report=String.IsNullOrWhiteSpace(selected)?full:selected;
         if(String.IsNullOrWhiteSpace(report))throw new Exception("The document is empty.");
-        if(report.Length>18000)throw new Exception("Select a section of 18,000 characters or fewer.");
+        if(report.Length>120000)throw new Exception("Document too large (120,000 characters maximum).");
         status.Text="Reviewing with Haronex…";
-        var issues=await Task.Run(()=>Gemini.Review(report));
+        var outcome=await Task.Run(()=>Gemini.Review(report));
         status.Text="Adding Word annotations…";
         int added=0,skipped=0;
         int selectedStart=(int)word.Selection.Start;
         int selectedEnd=(int)word.Selection.End;
         bool useSelection=!String.IsNullOrWhiteSpace(selected);
-        foreach(var issue in issues) {
+        foreach(var issue in outcome.Issues) {
           dynamic search=doc.Range(useSelection?selectedStart:0,useSelection?selectedEnd:(int)doc.Content.End);
           dynamic find=search.Find;
           find.ClearFormatting();
@@ -209,7 +241,7 @@ namespace RadiologyAgent {
           doc.Comments.Add(search,comment);
           added++;
         }
-        status.Text="Finished: "+added+" comments, "+skipped+" skipped.";
+        status.Text="Haronex: sent "+outcome.SentCharacters+" characters / "+outcome.Requests+" requests; received "+outcome.ReceivedIssues+" issues; applied "+added+"; unmatched "+skipped+"; rejected "+outcome.RejectedIssues+".";
       } catch(Exception ex) { status.Text="Error: "+ex.Message; }
       finally { review.Enabled=true; }
     }
