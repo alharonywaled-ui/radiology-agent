@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -14,6 +15,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
+    private const string ReviewAlgorithmVersion="haronex-web-review-v3.2-cache1";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=610; Height=250;
@@ -46,6 +48,39 @@ namespace RadiologyAgent {
         return key!=null&&Convert.ToString(key.GetValue("WebTransferAllowed",0))=="1";
       }
     }
+    private static string CachePath(string report,bool selection) {
+      string identity=ReviewAlgorithmVersion+"|"+(selection?"selection":"document")+"|"+report;
+      byte[] hash;
+      using(var sha=SHA256.Create())hash=sha.ComputeHash(Encoding.UTF8.GetBytes(identity));
+      string token=BitConverter.ToString(hash).Replace("-","").ToLowerInvariant();
+      string folder=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Haronex","ReviewCache");
+      return Path.Combine(folder,token+".dpapi");
+    }
+    private static string ReadCached(string path) {
+      try {
+        if(!File.Exists(path))return null;
+        if(DateTime.UtcNow-File.GetLastWriteTimeUtc(path)>TimeSpan.FromDays(30))return null;
+        byte[] encrypted=File.ReadAllBytes(path);
+        byte[] clear=ProtectedData.Unprotect(encrypted,null,DataProtectionScope.CurrentUser);
+        return Encoding.UTF8.GetString(clear);
+      } catch { return null; }
+    }
+    private static void SaveCached(string path,string response) {
+      try {
+        string directory=Path.GetDirectoryName(path);
+        Directory.CreateDirectory(directory);
+        byte[] encrypted=ProtectedData.Protect(Encoding.UTF8.GetBytes(response),null,DataProtectionScope.CurrentUser);
+        string temp=path+".tmp";
+        File.WriteAllBytes(temp,encrypted);
+        if(File.Exists(path))File.Delete(path);
+        File.Move(temp,path);
+        // Retain only the 30 newest encrypted results.
+        var entries=new DirectoryInfo(directory).GetFiles("*.dpapi");
+        Array.Sort(entries,(a,b)=>b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
+        for(int i=30;i<entries.Length;i++)try{entries[i].Delete();}catch{}
+      } catch { /* Cache write failures cannot block reviewing. */ }
+    }
     private async Task RunOnce() {
       if(running)return;
       running=true;
@@ -74,14 +109,22 @@ namespace RadiologyAgent {
         for(int i=0;i<chunks.Count;i++)prompts.Add(BuildPrompt(chunks[i],i,chunks.Count));
         var serializer=new JavaScriptSerializer{MaxJsonLength=2000000};
         var payload=serializer.Serialize(new Dictionary<string,object>{{"prompts",prompts}});
-        status.Text="Reviewing "+report.Length+" characters in "+chunks.Count+
-          " part(s) with Haronex Web. You may need to sign in once in Edge.";
-        var workerResult=await Task.Run(()=>CallBrowserWorker(payload,chunks.Count));
+        string cacheFile=CachePath(report,hasSelection);
+        string workerResult=ReadCached(cacheFile);
+        bool cached=workerResult!=null;
+        if(!cached) {
+          status.Text="Reviewing "+report.Length+" characters in "+chunks.Count+
+            " part(s) with Haronex Web. You may need to sign in once in Edge.";
+          workerResult=await Task.Run(()=>CallBrowserWorker(payload,chunks.Count));
+        } else {
+          status.Text="Reusing encrypted previous review for unchanged text…";
+        }
         var root=serializer.DeserializeObject(workerResult) as Dictionary<string,object>;
         if(root==null||!root.ContainsKey("ok")||!Convert.ToBoolean(root["ok"])) {
           string error=root!=null&&root.ContainsKey("error")?Convert.ToString(root["error"]):"No browser response.";
           throw new Exception("Web review did not complete: "+Safe(error,330));
         }
+        // Cache only completed, validated responses (never error pages or partial replies).
         var groups=root["groups"] as object[];
         if(groups==null||groups.Length!=chunks.Count)throw new Exception("Incomplete web response: no Word changes applied.");
         var valid=new List<Tuple<string,string,string,string>>();
@@ -101,6 +144,7 @@ namespace RadiologyAgent {
             valid.Add(Tuple.Create(quote,category,field("explanation"),field("suggestion")));
           }
         }
+        if(!cached)SaveCached(cacheFile,workerResult);
         // Apply only after all chunks have been checked. Word's COM objects are used on the UI STA thread.
         status.Text="Adding "+valid.Count+" Haronex Word annotations…";
         int applied=0,skipped=0;
@@ -124,9 +168,10 @@ namespace RadiologyAgent {
             applied++;
           } catch {skipped++;}
         }
-        status.Text="Haronex completed. "+report.Length+" chars, "+received+
-          " returned, "+applied+" applied, "+rejected+" rejected, "+skipped+
-          " skipped."+(received==0?" No issues returned; NOT clinical clearance.":"");
+        status.Text="Haronex completed"+(cached?" (same saved review)":"")+
+          ". "+report.Length+" chars, "+received+" returned, "+applied+
+          " applied, "+rejected+" rejected, "+skipped+" skipped."+
+          (received==0?" No issues returned; NOT clinical clearance.":"");
       }
       catch(Exception ex) {status.Text="Haronex: "+Safe(ex.Message,420);}
       finally {running=false;}
