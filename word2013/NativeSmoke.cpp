@@ -24,7 +24,9 @@ int main(){
   BSTR xml=nullptr;
   hr=ribbon->GetCustomUI(id,&xml);
   SysFreeString(id);
-  if(FAILED(hr)||!xml||!wcsstr(xml,L"Radiology Agent")||!wcsstr(xml,L"ReviewTextClick")) {
+  if(FAILED(hr)||!xml||!wcsstr(xml,L"Radiology Agent")||!wcsstr(xml,L"ReviewTextClick")||
+     !wcsstr(xml,L"DeleteAllCommentsClick")||!wcsstr(xml,L"ClearRedYellowClick")||
+     !wcsstr(xml,L"Clear Comments")||!wcsstr(xml,L"Clear Highlights")) {
     wprintf(L"RIBBON_CHECK_FAILED 0x%08x\n",static_cast<unsigned>(hr));
     if(xml)SysFreeString(xml);
     ribbon->Release();CoUninitialize();return 30;
