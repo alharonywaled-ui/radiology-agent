@@ -95,6 +95,32 @@ inline HRESULT SetNumber(IDispatch* d,const wchar_t* name,long value) {
   return d->Invoke(id,IID_NULL,LOCALE_USER_DEFAULT,DISPATCH_PROPERTYPUT,&params,
                    nullptr,nullptr,nullptr);
 }
+inline HRESULT SetText(IDispatch* d,const wchar_t* name,const wchar_t* value) {
+  DISPID id;
+  HRESULT hr=Member(d,name,id);
+  if(FAILED(hr))return hr;
+  VARIANT arg;VariantInit(&arg);arg.vt=VT_BSTR;arg.bstrVal=SysAllocString(value);
+  if(!arg.bstrVal)return E_OUTOFMEMORY;
+  DISPID named=DISPID_PROPERTYPUT;
+  DISPPARAMS params={&arg,&named,1,1};
+  hr=d->Invoke(id,IID_NULL,LOCALE_USER_DEFAULT,DISPATCH_PROPERTYPUT,
+               &params,nullptr,nullptr,nullptr);
+  VariantClear(&arg);
+  return hr;
+}
+inline bool ExecuteFind(IDispatch* find) {
+  DISPID id;
+  if(FAILED(Member(find,L"Execute",id)))return false;
+  DISPPARAMS params={nullptr,nullptr,0,0};
+  VARIANT result;VariantInit(&result);
+  HRESULT hr=find->Invoke(id,IID_NULL,LOCALE_USER_DEFAULT,DISPATCH_METHOD,
+                           &params,&result,nullptr,nullptr);
+  VARIANT answer;VariantInit(&answer);
+  bool found=SUCCEEDED(hr)&&SUCCEEDED(VariantChangeType(&answer,&result,0,VT_BOOL))
+             &&answer.boolVal==VARIANT_TRUE;
+  VariantClear(&answer);VariantClear(&result);
+  return found;
+}
 inline void Alert(const wchar_t* message,UINT flags=MB_OK|MB_ICONINFORMATION) {
   MessageBoxW(nullptr,message,L"Haronex - Local Word Tools",flags|MB_TOPMOST);
 }
@@ -122,10 +148,9 @@ inline void DeleteAllComments(IDispatch* word) {
   wsprintfW(buffer,L"Deleted %ld of %ld comments from the current document.",deleted,count);
   Alert(buffer,deleted==count?MB_OK|MB_ICONINFORMATION:MB_OK|MB_ICONWARNING);
 }
-// Word WdColorIndex: wdNoHighlight=0, wdRed=6, wdYellow=7.
-// Examine individual character ranges; this preserves other highlight colors,
-// and does not remove font colors or shading. Covers main text, headers/footers,
-// text boxes and linked story ranges through Word's StoryRanges collection.
+// Use Word's formatting-aware Find instead of iterating over every character.
+// Finds only highlighted segments, then modifies red/yellow portions; other
+// highlight colors are unchanged. All processing is local to Word.
 inline void RemoveRedYellowHighlights(IDispatch* word) {
   Obj doc=ActiveDocument(word);
   if(!doc){Alert(L"Open a Word report before removing highlights.",MB_OK|MB_ICONWARNING);return;}
@@ -133,37 +158,96 @@ inline void RemoveRedYellowHighlights(IDispatch* word) {
       L"Highlights manually applied by other people will also be removed.\n"
       L"Other colors, font colors and text will be preserved.",
       L"Haronex - Clear Highlights",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2|MB_TOPMOST)!=IDYES)return;
+
   Obj stories=PropertyObject(doc.p,L"StoryRanges");
   if(!stories){Alert(L"Unable to access document content.",MB_OK|MB_ICONWARNING);return;}
   long changed=0;
-  bool errors=false;
-  // Word story IDs are 1..17, with some unavailable in a given document.
-  for(long type=1;type<=17;++type) {
+  bool errors=false,limitReached=false;
+  long scanned=0;
+  // Hard limit prevents runaway loops on corrupted/complex Word documents.
+  static const long MaxMatches=3000;
+  // Word story type IDs 1..17; unavailable types are skipped.
+  for(long type=1;type<=17&&!limitReached;++type) {
     Obj story=IndexedObject(stories.p,type);
     int linked=0;
-    while(story&&linked++<200) {
-      Obj characters=PropertyObject(story.p,L"Characters");
-      long length=0;
-      if(characters&&PropertyNumber(characters.p,L"Count",length)) {
-        for(long i=1;i<=length;++i) {
-          Obj ch=IndexedObject(characters.p,i);
-          if(!ch){errors=true;continue;}
-          long color=-1;
-          if(!PropertyNumber(ch.p,L"HighlightColorIndex",color)){errors=true;continue;}
-          if(color==6||color==7) {
-            if(SUCCEEDED(SetNumber(ch.p,L"HighlightColorIndex",0)))++changed;
-            else errors=true;
-          }
+    while(story&&linked++<100&&!limitReached) {
+      long start=0,stop=0;
+      if(!PropertyNumber(story.p,L"Start",start)||
+         !PropertyNumber(story.p,L"End",stop)||stop<=start) {
+        Obj next=PropertyObject(story.p,L"NextStoryRange");
+        story=static_cast<Obj&&>(next);
+        continue;
+      }
+      Obj search=PropertyObject(story.p,L"Duplicate");
+      if(!search){errors=true;break;}
+      long cursor=start;
+      while(cursor<stop&&!limitReached) {
+        if(++scanned>MaxMatches){limitReached=true;break;}
+        if(FAILED(SetNumber(search.p,L"Start",cursor))||
+           FAILED(SetNumber(search.p,L"End",stop))) {
+          errors=true;break;
         }
-      } else errors=true;
+        Obj find=PropertyObject(search.p,L"Find");
+        if(!find){errors=true;break;}
+        // A blank find text plus formatting finds highlighted segments.
+        if(FAILED(Method(find.p,L"ClearFormatting"))||
+           FAILED(SetText(find.p,L"Text",L""))||
+           FAILED(SetNumber(find.p,L"Format",1))||
+           FAILED(SetNumber(find.p,L"Highlight",1))||
+           FAILED(SetNumber(find.p,L"Forward",1))||
+           FAILED(SetNumber(find.p,L"Wrap",0))) {
+          errors=true;break;
+        }
+        if(!ExecuteFind(find.p))break;
+        long hitStart=-1,hitEnd=-1,color=-1;
+        if(!PropertyNumber(search.p,L"Start",hitStart)||
+           !PropertyNumber(search.p,L"End",hitEnd)||
+           hitEnd<=cursor||hitEnd<=hitStart) {
+          errors=true;break;
+        }
+        if(PropertyNumber(search.p,L"HighlightColorIndex",color)) {
+          if(color==6||color==7) {
+            if(SUCCEEDED(SetNumber(search.p,L"HighlightColorIndex",0)))++changed;
+            else errors=true;
+          } else if(color!=0&&color!=1&&color!=2&&color!=3&&
+                    color!=4&&color!=5&&color!=8&&color!=9&&color!=10&&
+                    color!=11&&color!=12&&color!=13&&color!=14&&color!=15&&
+                    color!=16) {
+            // Mixed colors (wdUndefined). Inspect only this highlighted hit.
+            // Bound expensive work to prevent Word UI lockups.
+            Obj chars=PropertyObject(search.p,L"Characters");
+            long count=0;
+            if(chars&&PropertyNumber(chars.p,L"Count",count)) {
+              if(count>5000){limitReached=true;break;}
+              for(long c=1;c<=count;++c) {
+                Obj item=IndexedObject(chars.p,c);
+                long itemColor=-1;
+                if(item&&PropertyNumber(item.p,L"HighlightColorIndex",itemColor)&&
+                   (itemColor==6||itemColor==7)) {
+                  if(SUCCEEDED(SetNumber(item.p,L"HighlightColorIndex",0)))++changed;
+                  else errors=true;
+                }
+              }
+            } else errors=true;
+          }
+        } else errors=true;
+        cursor=hitEnd;
+      }
       Obj next=PropertyObject(story.p,L"NextStoryRange");
       story=static_cast<Obj&&>(next);
     }
-    if(linked>=200)errors=true;
+    if(linked>=100)limitReached=true;
   }
-  wchar_t buffer[200];
-  wsprintfW(buffer,L"Cleared red/yellow highlights from %ld characters.%s",
-           changed,errors?L"\nSome protected or unavailable ranges could not be processed.":L"");
-  Alert(buffer,errors?MB_OK|MB_ICONWARNING:MB_OK|MB_ICONINFORMATION);
+  wchar_t buffer[256];
+  if(limitReached) {
+    wsprintfW(buffer,L"Stopped safely after %ld highlighted segments.\n"
+      L"%ld red/yellow highlights cleared.\nSave the report and retry if needed.",
+      scanned,changed);
+    Alert(buffer,MB_OK|MB_ICONWARNING);
+  } else {
+    wsprintfW(buffer,L"Cleared %ld red/yellow highlighted segments.%s",
+      changed,errors?L"\nSome protected ranges could not be processed.":L"");
+    Alert(buffer,errors?MB_OK|MB_ICONWARNING:MB_OK|MB_ICONINFORMATION);
+  }
 }
 } // namespace LocalCleanup
