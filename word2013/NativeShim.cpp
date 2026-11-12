@@ -94,6 +94,48 @@ static HRESULT CreateReviewIcon(DWORD state,VARIANT* out) {
 }
 
 
+static HRESULT CreateCleanupIcon(bool comments, VARIANT* out) {
+  if(!out)return E_POINTER;
+  HDC screen=GetDC(nullptr);
+  if(!screen)return E_FAIL;
+  HDC dc=CreateCompatibleDC(screen);
+  HBITMAP bmp=CreateCompatibleBitmap(screen,32,32);
+  ReleaseDC(nullptr,screen);
+  if(!dc||!bmp){if(dc)DeleteDC(dc);if(bmp)DeleteObject(bmp);return E_OUTOFMEMORY;}
+  HGDIOBJ oldBmp=SelectObject(dc,bmp);
+  RECT all={0,0,32,32};HBRUSH bg=CreateSolidBrush(RGB(255,255,255));
+  FillRect(dc,&all,bg);DeleteObject(bg);
+  COLORREF accent=comments?RGB(207,55,63):RGB(240,181,36);
+  HBRUSH brush=CreateSolidBrush(accent);
+  HGDIOBJ oldBrush=SelectObject(dc,brush);
+  HPEN outline=CreatePen(PS_SOLID,1,comments?RGB(161,35,41):RGB(173,114,12));
+  HGDIOBJ oldPen=SelectObject(dc,outline);
+  RoundRect(dc,3,4,29,27,7,7);
+  SelectObject(dc,oldPen);DeleteObject(outline);
+  SelectObject(dc,oldBrush);DeleteObject(brush);
+  HPEN stroke=CreatePen(PS_SOLID,3,comments?RGB(255,255,255):RGB(55,55,55));
+  oldPen=SelectObject(dc,stroke);
+  if(comments){
+    MoveToEx(dc,11,11,nullptr);LineTo(dc,21,20);
+    MoveToEx(dc,21,11,nullptr);LineTo(dc,11,20);
+  }else{
+    MoveToEx(dc,8,18,nullptr);LineTo(dc,24,18);
+    MoveToEx(dc,8,22,nullptr);LineTo(dc,24,22);
+    MoveToEx(dc,10,10,nullptr);LineTo(dc,22,24);
+  }
+  SelectObject(dc,oldPen);DeleteObject(stroke);
+  SelectObject(dc,oldBmp);DeleteDC(dc);
+  PICTDESC desc={};desc.cbSizeofstruct=sizeof(desc);desc.picType=PICTYPE_BITMAP;
+  desc.bmp.hbitmap=bmp;desc.bmp.hpal=nullptr;
+  IPictureDisp* picture=nullptr;
+  HRESULT hr=OleCreatePictureIndirect(&desc,IID_IPictureDisp,TRUE,
+      reinterpret_cast<void**>(&picture));
+  if(FAILED(hr)){DeleteObject(bmp);return hr;}
+  VariantInit(out);out->vt=VT_DISPATCH;out->pdispVal=picture;
+  return S_OK;
+}
+
+
 struct IExtensibility2 : IDispatch {
   virtual HRESULT STDMETHODCALLTYPE OnConnection(IDispatch*, LONG, IDispatch*, SAFEARRAY**) = 0;
   virtual HRESULT STDMETHODCALLTYPE OnDisconnection(LONG, SAFEARRAY**) = 0;
@@ -216,8 +258,8 @@ public:
     if(id==102)return CreateReviewIcon(ReadReviewResult(),result);
     if(id==103){LocalCleanup::DeleteAllComments(wordApplication_);return S_OK;}
     if(id==104){LocalCleanup::RemoveRedYellowHighlights(wordApplication_);return S_OK;}
-    if(id==105)return CreateReviewIcon(2,result);
-    if(id==106)return CreateReviewIcon(0,result);
+    if(id==105)return CreateCleanupIcon(true,result);
+    if(id==106)return CreateCleanupIcon(false,result);
     if(id>=1&&id<=5)return S_OK;
     return DISP_E_MEMBERNOTFOUND;
   }
