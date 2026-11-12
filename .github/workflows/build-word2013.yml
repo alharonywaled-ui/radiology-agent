@@ -1,5 +1,10 @@
 name: Build Word 2013 x86 Native COM Installer
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'word2013/**'
+      - '.github/workflows/build-word2013.yml'
   push:
     branches: [main]
     paths:
@@ -60,13 +65,27 @@ jobs:
           @echo off
           call "$vs\Common7\Tools\VsDevCmd.bat" -arch=x86 -host_arch=x64
           if errorlevel 1 exit /b 12
-          cl /nologo /LD /std:c++17 /EHsc /W3 /DUNICODE /D_UNICODE /Fe:"$root\word2013\bin\RadiologyAgent.NativeShim.dll" "$root\word2013\NativeShim.cpp" /link /DEF:"$root\word2013\NativeShim.def" ole32.lib oleaut32.lib shell32.lib user32.lib gdi32.lib advapi32.lib
+          cl /nologo /LD /std:c++17 /EHsc /MT /W3 /DUNICODE /D_UNICODE /Fe:"$root\word2013\bin\RadiologyAgent.NativeShim.dll" "$root\word2013\NativeShim.cpp" /link /DEF:"$root\word2013\NativeShim.def" ole32.lib oleaut32.lib shell32.lib user32.lib gdi32.lib advapi32.lib
           if errorlevel 1 exit /b 13
-          cl /nologo /std:c++17 /EHsc /W3 /DUNICODE /D_UNICODE /Fe:"$root\word2013\bin\NativeSmoke.exe" "$root\word2013\NativeSmoke.cpp" ole32.lib oleaut32.lib
+          cl /nologo /std:c++17 /EHsc /MT /W3 /DUNICODE /D_UNICODE /Fe:"$root\word2013\bin\NativeSmoke.exe" "$root\word2013\NativeSmoke.cpp" ole32.lib oleaut32.lib
           if errorlevel 1 exit /b 14
           "@ | Set-Content -LiteralPath $cmdPath -Encoding ASCII
           & cmd.exe /c $cmdPath
           if ($LASTEXITCODE -ne 0) { throw "Native x86 compilation failed: $LASTEXITCODE" }
+      - name: Bundle official Microsoft .NET Framework 4.8 offline prerequisite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $url='https://download.microsoft.com/download/f/3/a/f3a6af84-da23-40a5-8d1c-49cc10c8e76f/NDP48-x86-x64-AllOS-ENU.exe'
+          $dst='word2013/bin/NDP48-x86-x64-AllOS-ENU.exe'
+          Invoke-WebRequest -Uri $url -OutFile $dst -MaximumRedirection 5
+          $item=Get-Item $dst
+          if($item.Length -lt 80MB) { throw "Bundled .NET offline installer is unexpectedly small: $($item.Length)" }
+          $signature=Get-AuthenticodeSignature $dst
+          if($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft') {
+            throw "Microsoft .NET offline installer signature is invalid: $($signature.Status) $($signature.SignerCertificate.Subject)"
+          }
+          Write-Host "BUNDLED_MICROSOFT_DOTNET_48_OFFLINE_VALIDATED"
       - name: Install Inno Setup
         shell: pwsh
         run: |
@@ -79,12 +98,12 @@ jobs:
           $compiler=Join-Path $env:SystemDrive 'Program Files (x86)\Inno Setup 6\ISCC.exe'
           & $compiler word2013/installer_setup.iss
           if ($LASTEXITCODE -ne 0) { throw "Installer compile failed" }
-          if (!(Test-Path word2013/output/Haronex_Word2013_Groq_Qwen38_V7_5_2_Setup.exe)) { throw "Setup missing" }
+          if (!(Test-Path word2013/output/Haronex_Word2013_Groq_Qwen38_V8_1_Setup.exe)) { throw "Setup missing" }
       - name: Smoke test Web Mode installer and native COM Ribbon
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $installer=(Resolve-Path word2013/output/Haronex_Word2013_Groq_Qwen38_V7_5_2_Setup.exe).Path
+          $installer=(Resolve-Path word2013/output/Haronex_Word2013_Groq_Qwen38_V8_1_Setup.exe).Path
           $p=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
           if($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
           $reg=Get-ItemProperty 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word2013.Safe'
@@ -102,6 +121,6 @@ jobs:
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: Haronex_Word2013_Groq_Qwen38_V7_5_2
-          path: word2013/output/Haronex_Word2013_Groq_Qwen38_V7_5_2_Setup.exe
+          name: Haronex_Word2013_Groq_Qwen38_V8_1
+          path: word2013/output/Haronex_Word2013_Groq_Qwen38_V8_1_Setup.exe
           if-no-files-found: error

@@ -1,5 +1,5 @@
 #define AppName "Haronex Radiology Agent for Word 2013"
-#define AppVersion "7.5.2"
+#define AppVersion "8.1.0"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
 DefaultGroupName=Haronex
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_Groq_Qwen38_V7_5_2_Setup
+OutputBaseFilename=Haronex_Word2013_Groq_Qwen38_V8_1_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -17,6 +17,7 @@ DisableProgramGroupPage=yes
 UninstallDisplayName=Haronex (Word 2013 x86)
 
 [Files]
+Source: "bin\NDP48-x86-x64-AllOS-ENU.exe"; Flags: dontcopy
 Source: "bin\RadiologyAgent.NativeShim.dll"; DestDir: "{app}"; Flags: ignoreversion regserver
 Source: "bin\RadiologyAgent.ReviewHost.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\HaronexGroqWorker.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -33,14 +34,61 @@ var
   KeyPage: TInputQueryWizardPage;
   ConsentPage: TInputOptionWizardPage;
 
-function InitializeSetup: Boolean;
+// Embedded official Microsoft .NET Framework 4.8 offline redistributable.
+// No Visual Studio or VC++ redistributable required: native DLL uses /MT.
+// The installer remains per-user; only a missing .NET prerequisite is elevated.
+function HasDotNet48: Boolean;
 var
   ReleaseNumber: Cardinal;
 begin
-  Result := RegQueryDWordValue(HKLM32, 'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full', 'Release', ReleaseNumber)
-    and (ReleaseNumber >= 528040);
-  if not Result then
-    MsgBox('Haronex requires Microsoft .NET Framework 4.8 or newer.', mbError, MB_OK);
+  Result := RegQueryDWordValue(HKLM, 'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full',
+    'Release', ReleaseNumber) and (ReleaseNumber >= 528040);
+end;
+
+function InitializeSetup: Boolean;
+begin
+  Result := True;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ExitCode: Integer;
+  Installer: String;
+  Launched: Boolean;
+begin
+  Result := '';
+  NeedsRestart := False;
+  if HasDotNet48 then Exit;
+  Log('Haronex: .NET Framework 4.8 missing; extracting bundled Microsoft offline installer.');
+  try
+    ExtractTemporaryFile('NDP48-x86-x64-AllOS-ENU.exe');
+  except
+    Result := 'Unable to extract the bundled .NET Framework 4.8 prerequisite.';
+    Exit;
+  end;
+  Installer := ExpandConstant('{tmp}\NDP48-x86-x64-AllOS-ENU.exe');
+  if WizardSilent then
+    Launched := ShellExec('runas', Installer, '/q /norestart', '',
+      SW_HIDE, ewWaitUntilTerminated, ExitCode)
+  else
+    Launched := ShellExec('runas', Installer, '/passive /norestart', '',
+      SW_SHOW, ewWaitUntilTerminated, ExitCode);
+  if not Launched then begin
+    Result := '.NET Framework 4.8 setup was cancelled or could not be started. Administrator approval is required only when .NET is missing.';
+    Exit;
+  end;
+  Log('Haronex: bundled .NET setup exit code ' + IntToStr(ExitCode));
+  if (ExitCode = 3010) or (ExitCode = 1641) then begin
+    NeedsRestart := True;
+    Result := '.NET Framework was installed, but Windows requires a restart. Restart Windows and rerun Haronex setup.';
+    Exit;
+  end;
+  if (ExitCode <> 0) and (not HasDotNet48) then begin
+    Result := '.NET Framework 4.8 installation failed (exit code ' + IntToStr(ExitCode) + ').';
+    Exit;
+  end;
+  if not HasDotNet48 then
+    Result := '.NET Framework 4.8 is not detected after prerequisite installation. Restart Windows and rerun setup.';
 end;
 
 procedure InitializeWizard;

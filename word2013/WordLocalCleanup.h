@@ -130,23 +130,35 @@ inline Obj ActiveDocument(IDispatch* word) {
 // Removing *all* comments is explicitly requested. Work backwards so indices do not shift.
 inline void DeleteAllComments(IDispatch* word) {
   Obj doc=ActiveDocument(word);
-  if(!doc) {Alert(L"Open a Word report before removing comments.",MB_OK|MB_ICONWARNING);return;}
+  if(!doc){Alert(L"Open a Word report before removing comments.",MB_OK|MB_ICONWARNING);return;}
   Obj comments=PropertyObject(doc.p,L"Comments");
   long count=0;
-  if(!comments||!PropertyNumber(comments.p,L"Count",count)) {
+  if(!comments||!PropertyNumber(comments.p,L"Count",count)){
     Alert(L"Unable to access comments in this document.",MB_OK|MB_ICONWARNING);return;
   }
   if(count==0){Alert(L"No comments were found in this report.");return;}
-  if(MessageBoxW(nullptr,L"Delete ALL comments from the current Word document?\nThis includes comments not created by Haronex.",L"Haronex - Delete Comments",
-      MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2|MB_TOPMOST)!=IDYES)return;
-  long deleted=0;
-  for(long i=count;i>=1;--i) {
-    Obj item=IndexedObject(comments.p,i);
-    if(item&&SUCCEEDED(Method(item.p,L"Delete")))++deleted;
+  if(MessageBoxW(nullptr,L"Delete ALL comments from the current Word document?\\nThis includes comments not created by Haronex.",
+      L"Haronex - Delete Comments",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2|MB_TOPMOST)!=IDYES)return;
+  // Word 2013 supports document-level batch deletion. This is much faster than
+  // deleting each COM comment; keep a bounded fallback for unusual documents.
+  HRESULT hr=Method(doc.p,L"DeleteAllComments");
+  if(SUCCEEDED(hr)){
+    Alert(L"All comments were removed from the current Word document.");
+    return;
   }
-  wchar_t buffer[160];
-  wsprintfW(buffer,L"Deleted %ld of %ld comments from the current document.",deleted,count);
-  Alert(buffer,deleted==count?MB_OK|MB_ICONINFORMATION:MB_OK|MB_ICONWARNING);
+  const DWORD started=GetTickCount();
+  const DWORD budgetMs=4000;
+  long removed=0,failed=0;
+  for(long i=count;i>=1;--i){
+    if(static_cast<DWORD>(GetTickCount()-started)>=budgetMs)break;
+    Obj item=IndexedObject(comments.p,i);
+    if(item&&SUCCEEDED(Method(item.p,L"Delete")))++removed;
+    else ++failed;
+  }
+  wchar_t buffer[256];
+  wsprintfW(buffer,L"Removed %ld of %ld comments.\\n%s",removed,count,
+    removed==count?L"Done.":L"Stopped after the safe time limit or an inaccessible comment. Click again to continue.");
+  Alert(buffer,removed==count&&failed==0?MB_OK|MB_ICONINFORMATION:MB_OK|MB_ICONWARNING);
 }
 // Use Word's formatting-aware Find instead of iterating over every character.
 // Finds only highlighted segments, then modifies red/yellow portions; other
@@ -165,12 +177,15 @@ inline void RemoveRedYellowHighlights(IDispatch* word) {
   bool errors=false,limitReached=false;
   long scanned=0;
   // Hard limit prevents runaway loops on corrupted/complex Word documents.
-  static const long MaxMatches=3000;
+  static const long MaxMatches=1500;
+  static const DWORD MaxElapsedMs=4000;
+  const DWORD cleanupStarted=GetTickCount();
   // Word story type IDs 1..17; unavailable types are skipped.
   for(long type=1;type<=17&&!limitReached;++type) {
     Obj story=IndexedObject(stories.p,type);
     int linked=0;
     while(story&&linked++<100&&!limitReached) {
+      if(static_cast<DWORD>(GetTickCount()-cleanupStarted)>=MaxElapsedMs){limitReached=true;break;}
       long start=0,stop=0;
       if(!PropertyNumber(story.p,L"Start",start)||
          !PropertyNumber(story.p,L"End",stop)||stop<=start) {
@@ -182,6 +197,7 @@ inline void RemoveRedYellowHighlights(IDispatch* word) {
       if(!search){errors=true;break;}
       long cursor=start;
       while(cursor<stop&&!limitReached) {
+        if(static_cast<DWORD>(GetTickCount()-cleanupStarted)>=MaxElapsedMs){limitReached=true;break;}
         if(++scanned>MaxMatches){limitReached=true;break;}
         if(FAILED(SetNumber(search.p,L"Start",cursor))||
            FAILED(SetNumber(search.p,L"End",stop))) {
@@ -218,8 +234,9 @@ inline void RemoveRedYellowHighlights(IDispatch* word) {
             Obj chars=PropertyObject(search.p,L"Characters");
             long count=0;
             if(chars&&PropertyNumber(chars.p,L"Count",count)) {
-              if(count>5000){limitReached=true;break;}
+              if(count>1000){limitReached=true;break;}
               for(long c=1;c<=count;++c) {
+                if(static_cast<DWORD>(GetTickCount()-cleanupStarted)>=MaxElapsedMs){limitReached=true;break;}
                 Obj item=IndexedObject(chars.p,c);
                 long itemColor=-1;
                 if(item&&PropertyNumber(item.p,L"HighlightColorIndex",itemColor)&&
