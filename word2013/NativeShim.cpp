@@ -12,6 +12,7 @@
 #include <string>
 #include <new>
 #include <cwchar>
+#include "WordLocalCleanup.h"
 
 static const wchar_t* PROGID = L"RadiologyAgent.Word2013.Safe";
 static const wchar_t* CLSID_TEXT = L"{7B918AD1-1C42-4B73-A4BB-9FC83743DD6E}";
@@ -159,9 +160,10 @@ static void RequestReview() {
 
 class Agent : public IExtensibility2, public IRibbonExtensibilityNative {
   LONG refs_;
+  IDispatch* wordApplication_=nullptr;
 public:
   Agent():refs_(1){InterlockedIncrement(&g_objects);}
-  ~Agent(){InterlockedDecrement(&g_objects);}
+  ~Agent(){if(wordApplication_)wordApplication_->Release();InterlockedDecrement(&g_objects);}
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid,void** ppv) override {
     if(!ppv)return E_POINTER;
     *ppv=nullptr;
@@ -187,6 +189,10 @@ public:
       else if(!_wcsicmp(n,L"ReviewTextClick")) ids[i]=100;
       else if(!_wcsicmp(n,L"RibbonLoaded")) ids[i]=101;
       else if(!_wcsicmp(n,L"ReviewIcon")) ids[i]=102;
+      else if(!_wcsicmp(n,L"DeleteAllCommentsClick")) ids[i]=103;
+      else if(!_wcsicmp(n,L"ClearRedYellowClick")) ids[i]=104;
+      else if(!_wcsicmp(n,L"DeleteCommentsIcon")) ids[i]=105;
+      else if(!_wcsicmp(n,L"ClearHighlightsIcon")) ids[i]=106;
       else return DISP_E_UNKNOWNNAME;
     }
     return S_OK;
@@ -208,11 +214,21 @@ public:
       return S_OK;
     }
     if(id==102)return CreateReviewIcon(ReadReviewResult(),result);
+    if(id==103){LocalCleanup::DeleteAllComments(wordApplication_);return S_OK;}
+    if(id==104){LocalCleanup::RemoveRedYellowHighlights(wordApplication_);return S_OK;}
+    if(id==105)return CreateReviewIcon(2,result);
+    if(id==106)return CreateReviewIcon(0,result);
     if(id>=1&&id<=5)return S_OK;
     return DISP_E_MEMBERNOTFOUND;
   }
-  HRESULT STDMETHODCALLTYPE OnConnection(IDispatch*,LONG,IDispatch*,SAFEARRAY**) override{StartLiveMonitor();return S_OK;}
+  HRESULT STDMETHODCALLTYPE OnConnection(IDispatch* app,LONG,IDispatch*,SAFEARRAY**) override{
+    if(wordApplication_)wordApplication_->Release();
+    wordApplication_=app;
+    if(wordApplication_)wordApplication_->AddRef();
+    StartLiveMonitor();return S_OK;
+  }
   HRESULT STDMETHODCALLTYPE OnDisconnection(LONG,SAFEARRAY**) override{
+    if(wordApplication_){wordApplication_->Release();wordApplication_=nullptr;}
     if(g_ribbonTimer){KillTimer(nullptr,g_ribbonTimer);g_ribbonTimer=0;}
     if(g_ribbonUi){g_ribbonUi->Release();g_ribbonUi=nullptr;}
     return S_OK;
@@ -228,6 +244,8 @@ public:
       LR"(<ribbon><tabs><tab id="RadiologyAgentTab" label="Radiology Agent">)"
       LR"(<group id="RadiologyAgentGroup" label="Report Review">)"
       LR"(<button id="RadiologyAgentReview" label="Review Text" size="large" getImage="ReviewIcon" onAction="ReviewTextClick"/>)"
+      LR"(<button id="RadiologyAgentDeleteComments" label="Clear Comments" size="large" getImage="DeleteCommentsIcon" onAction="DeleteAllCommentsClick" screentip="Remove all comments" supertip="Delete every Word comment in the active document locally. No API call." />)"
+      LR"(<button id="RadiologyAgentClearHighlights" label="Clear Highlights" size="large" getImage="ClearHighlightsIcon" onAction="ClearRedYellowClick" screentip="Remove red and yellow highlights" supertip="Remove red and yellow text highlighting from the active Word document, preserving other colors. Runs locally." />)"
       LR"(</group></tab></tabs></ribbon></customUI>)";
     *xml=SysAllocString(ui);
     return *xml?S_OK:E_OUTOFMEMORY;
