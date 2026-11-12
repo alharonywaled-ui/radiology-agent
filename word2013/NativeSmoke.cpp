@@ -26,7 +26,8 @@ int main(){
   SysFreeString(id);
   if(FAILED(hr)||!xml||!wcsstr(xml,L"Radiology Agent")||!wcsstr(xml,L"ReviewTextClick")||
      !wcsstr(xml,L"DeleteAllCommentsClick")||!wcsstr(xml,L"ClearRedYellowClick")||
-     !wcsstr(xml,L"Clear Comments")||!wcsstr(xml,L"Clear Highlights")) {
+     !wcsstr(xml,L"Clear Comments")||!wcsstr(xml,L"Clear Highlights")||
+     !wcsstr(xml,L"ClearBothClick")||!wcsstr(xml,L"Clear Both")) {
     wprintf(L"RIBBON_CHECK_FAILED 0x%08x\n",static_cast<unsigned>(hr));
     if(xml)SysFreeString(xml);
     ribbon->Release();CoUninitialize();return 30;
