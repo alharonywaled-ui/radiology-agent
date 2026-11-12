@@ -121,8 +121,12 @@ inline bool ExecuteFind(IDispatch* find) {
   VariantClear(&answer);VariantClear(&result);
   return found;
 }
-inline void Alert(const wchar_t* message,UINT flags=MB_OK|MB_ICONINFORMATION) {
-  MessageBoxW(nullptr,message,L"Haronex - Local Word Tools",flags|MB_TOPMOST);
+// V9: cleanup actions never display modal dialogs. Diagnostics can be viewed
+// with a debugger; no patient report text is logged.
+inline void Alert(const wchar_t* message,UINT = MB_OK) {
+  OutputDebugStringW(L"Haronex V9 cleanup: ");
+  OutputDebugStringW(message);
+  OutputDebugStringW(L"\n");
 }
 inline Obj ActiveDocument(IDispatch* word) {
   return PropertyObject(word,L"ActiveDocument");
@@ -137,8 +141,6 @@ inline void DeleteAllComments(IDispatch* word) {
     Alert(L"Unable to access comments in this document.",MB_OK|MB_ICONWARNING);return;
   }
   if(count==0){Alert(L"No comments were found in this report.");return;}
-  if(MessageBoxW(nullptr,L"Delete ALL comments from the current Word document?\\nThis includes comments not created by Haronex.",
-      L"Haronex - Delete Comments",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2|MB_TOPMOST)!=IDYES)return;
   // Word 2013 supports document-level batch deletion. This is much faster than
   // deleting each COM comment; keep a bounded fallback for unusual documents.
   HRESULT hr=Method(doc.p,L"DeleteAllComments");
@@ -166,19 +168,14 @@ inline void DeleteAllComments(IDispatch* word) {
 inline void RemoveRedYellowHighlights(IDispatch* word) {
   Obj doc=ActiveDocument(word);
   if(!doc){Alert(L"Open a Word report before removing highlights.",MB_OK|MB_ICONWARNING);return;}
-  if(MessageBoxW(nullptr,L"Remove ALL red and yellow text highlights in the current document?\n"
-      L"Highlights manually applied by other people will also be removed.\n"
-      L"Other colors, font colors and text will be preserved.",
-      L"Haronex - Clear Highlights",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2|MB_TOPMOST)!=IDYES)return;
-
   Obj stories=PropertyObject(doc.p,L"StoryRanges");
   if(!stories){Alert(L"Unable to access document content.",MB_OK|MB_ICONWARNING);return;}
   long changed=0;
   bool errors=false,limitReached=false;
   long scanned=0;
   // Hard limit prevents runaway loops on corrupted/complex Word documents.
-  static const long MaxMatches=1500;
-  static const DWORD MaxElapsedMs=4000;
+  static const long MaxMatches=10000;
+  static const DWORD MaxElapsedMs=12000;
   const DWORD cleanupStarted=GetTickCount();
   // Word story type IDs 1..17; unavailable types are skipped.
   for(long type=1;type<=17&&!limitReached;++type) {
@@ -266,5 +263,12 @@ inline void RemoveRedYellowHighlights(IDispatch* word) {
       changed,errors?L"\nSome protected ranges could not be processed.":L"");
     Alert(buffer,errors?MB_OK|MB_ICONWARNING:MB_OK|MB_ICONINFORMATION);
   }
+}
+// The two document-local operations run back to back on Word's Ribbon STA.
+// Neither action invokes a worker, network service, or modal confirmation.
+inline void ClearBoth(IDispatch* word) {
+  if(!ActiveDocument(word))return;
+  DeleteAllComments(word);
+  RemoveRedYellowHighlights(word);
 }
 } // namespace LocalCleanup
