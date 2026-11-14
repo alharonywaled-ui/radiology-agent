@@ -10,6 +10,9 @@ import datetime
 
 MODEL = "qwen/qwen3.8-27b"
 RETRY_DELAYS = (2, 5, 10)  # At most 3 retries; never retry generic HTTP 400.
+MAX_COMPLETION_TOKENS = 8192
+MIN_SPLIT_CHARS = 600
+MAX_SPLIT_DEPTH = 3
 
 ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 SYSTEM = (
@@ -148,14 +151,14 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep):
         "reasoning_effort": "low",
         "reasoning_format": "hidden",
         "temperature": 0.2,
-        "max_completion_tokens": 3200
+        "max_completion_tokens": MAX_COMPLETION_TOKENS
     }
     data = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(ENDPOINT, data=data, method="POST",
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json",
                  "Accept": "application/json",
-                 "User-Agent": "Haronex-Radiology-Agent/9.1"})
+                 "User-Agent": "Haronex-Radiology-Agent/9.2"})
     # Same payload and key on retries. No mutation of the medical report.
     for attempt in range(len(RETRY_DELAYS) + 1):
         try:
@@ -174,8 +177,13 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep):
         if not choices:
             raise ReviewFailure("GROQ_NO_CHOICES")
         choice = choices[0]
-        if choice.get("finish_reason") != "stop":
-            raise ReviewFailure("GROQ_TRUNCATED")
+        finish = choice.get("finish_reason")
+        if finish == "length":
+            raise ReviewFailure("GROQ_TRUNCATED_LENGTH")
+        if finish == "content_filter":
+            raise ReviewFailure("GROQ_CONTENT_FILTER")
+        if finish != "stop":
+            raise ReviewFailure("GROQ_FINISH_OTHER")
         message = choice.get("message") or {}
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
@@ -192,6 +200,41 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep):
     except (ValueError, TypeError, KeyError, AttributeError):
         raise ReviewFailure("GROQ_INVALID_RESPONSE")
 
+def split_report_text(text):
+    """Lossless, bounded split, prefer paragraph boundary, never strip characters."""
+    if len(text) < MIN_SPLIT_CHARS * 2:
+        return None
+    mid = len(text) // 2
+    search_low = max(MIN_SPLIT_CHARS, mid - len(text) // 6)
+    search_high = min(len(text) - MIN_SPLIT_CHARS, mid + len(text) // 6)
+    candidates = [x + 1 for x in range(search_low, search_high)
+                  if text[x] in "\\r\\n"]
+    boundary = min(candidates, key=lambda x: abs(x - mid)) if candidates else mid
+    if boundary < MIN_SPLIT_CHARS or len(text) - boundary < MIN_SPLIT_CHARS:
+        return None
+    left, right = text[:boundary], text[boundary:]
+    assert left + right == text
+    return left, right
+
+
+def review_with_recovery(key, text, review=api_review, depth=0):
+    """On finish_reason=length, split only the affected chunk; never use partial JSON.
+    Aggregation is transactional: exception from any child discards all results.
+    """
+    try:
+        return review(key, text)
+    except ReviewFailure as exc:
+        if exc.code != "GROQ_TRUNCATED_LENGTH" or depth >= MAX_SPLIT_DEPTH:
+            raise
+        pieces = split_report_text(text)
+        if pieces is None:
+            raise
+        all_issues = []
+        for part in pieces:
+            all_issues.extend(review_with_recovery(key, part, review, depth + 1))
+        # Validate against original text and deduplicate repeated anchored quotes.
+        return normalize(text, all_issues)
+
 def main():
     try:
         incoming = json.loads(sys.stdin.read())
@@ -200,13 +243,13 @@ def main():
         version = incoming.get("review_version")
         if not isinstance(key, str) or not key.startswith("gsk_") or len(key) < 20 or len(key) > 256:
             raise ValueError("Missing or invalid Groq API key")
-        if not isinstance(texts, list) or not 1 <= len(texts) <= 20:
+        if not isinstance(texts, list) or not 1 <= len(texts) <= 40:
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 12000 for x in texts):
             raise ValueError("Invalid report text")
         if version != "haronex-groq-qwen38-v7-6":
             raise ValueError("Unsupported review version")
-        groups = [api_review(key, text) for text in texts]
+        groups = [review_with_recovery(key, text) for text in texts]
         print(json.dumps({"ok": True, "mode": "groq", "passes": 1,
                           "review_version": version, "groups": groups},
                          ensure_ascii=False))
@@ -215,7 +258,8 @@ def main():
         # Emit only fixed error categories; never expose raw server response or report.
         message = str(exc)
         safe_codes = {"GROQ_AUTH_401", "GROQ_FORBIDDEN_403", "GROQ_MODEL_404",
-                      "GROQ_NETWORK", "GROQ_TRUNCATED", "GROQ_EMPTY_RESPONSE",
+                      "GROQ_NETWORK", "GROQ_TRUNCATED_LENGTH", "GROQ_FINISH_OTHER",
+                      "GROQ_CONTENT_FILTER", "GROQ_EMPTY_RESPONSE",
                       "GROQ_INVALID_JSON", "GROQ_INVALID_STRUCTURE",
                       "GROQ_INVALID_RESPONSE", "GROQ_NO_CHOICES",
                       "GROQ_HTTP_408", "GROQ_HTTP_429", "GROQ_HTTP_500",
@@ -234,7 +278,8 @@ def self_test():
         def read(self, limit):
             return b'{"error":{"message":"unsupported reasoning effort"}}'
     assert classify_http_400(FakeError()) == "GROQ_REQUEST_400_REASONING"
-    assert "Haronex-Radiology-Agent/9.1" in str(api_review.__code__.co_consts)
+    assert "Haronex-Radiology-Agent/9.2" in str(api_review.__code__.co_consts)
+    assert MAX_COMPLETION_TOKENS == 8192
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
     except ValueError:
@@ -274,6 +319,36 @@ def self_test():
     except ReviewFailure:
         assert len(called) == 4 and delays == [4, 5, 10]
     assert retry_after_seconds({"Retry-After": "999"}) == 30
+    # Adaptive split: failed parent, two successful halves. Preserve exact text.
+    long_sample = ("FINDINGS: Normal right kidney.\\n" * 70) + "IMPRESSION: Normal right kidney."
+    seen = []
+    def truncate_then_recover(key, segment):
+        seen.append(segment)
+        if len(segment) > 1200:
+            raise ReviewFailure("GROQ_TRUNCATED_LENGTH")
+        return []
+    assert review_with_recovery("gsk_dummy", long_sample, truncate_then_recover) == []
+    assert seen[0] == long_sample and len(seen) > 1
+    assert split_report_text(long_sample)[0] + split_report_text(long_sample)[1] == long_sample
+    def always_truncate(key, segment):
+        raise ReviewFailure("GROQ_TRUNCATED_LENGTH")
+    try:
+        review_with_recovery("gsk_dummy", long_sample, always_truncate)
+        raise AssertionError("Truncation must not be marked successful")
+    except ReviewFailure as exc:
+        assert exc.code == "GROQ_TRUNCATED_LENGTH"
+    def fail_second_half(key, segment):
+        if len(segment) > 1200:
+            raise ReviewFailure("GROQ_TRUNCATED_LENGTH")
+        if "IMPRESSION:" in segment:
+            raise ReviewFailure("GROQ_AUTH_401")
+        return []
+    try:
+        review_with_recovery("gsk_dummy", long_sample, fail_second_half)
+        raise AssertionError("Partial results must not count as success")
+    except ReviewFailure as exc:
+        assert exc.code == "GROQ_AUTH_401"
+    assert split_report_text("Tiny sample") is None
     print(json.dumps({"ok": True, "test": "groq_parser_offline"}))
 
 if __name__ == "__main__":
