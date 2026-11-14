@@ -262,7 +262,9 @@ namespace RadiologyAgent {
         // Read output asynchronously so an unresponsive browser cannot block timeout handling.
         var outputTask=process.StandardOutput.ReadToEndAsync();
         var watch=Stopwatch.StartNew();
-        int maxMs=Math.Max(65000,count*65000);
+        // Four transport attempts (45 seconds each) plus 2/5/10 second backoff.
+        // Longer documents may have multiple chunks. Keep a finite upper bound.
+        int maxMs=(int)Math.Min(900000L,Math.Max(215000L,(long)count*215000L));
         while(!process.WaitForExit(250)) {
           if(cancellation.IsCancellationRequested) {
             KillWorkerTree(process);

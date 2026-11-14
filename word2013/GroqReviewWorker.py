@@ -4,8 +4,13 @@ import json
 import sys
 import urllib.request
 import urllib.error
+import time
+import email.utils
+import datetime
 
 MODEL = "qwen/qwen3.8-27b"
+RETRY_DELAYS = (2, 5, 10)  # At most 3 retries; never retry generic HTTP 400.
+
 ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 SYSTEM = (
     "You are Haronex, a careful English radiology report proofreader. "
@@ -86,11 +91,59 @@ def classify_http_400(exc):
     return "GROQ_REQUEST_400_OTHER"
 
 
-def api_review(key, text):
+class ReviewFailure(Exception):
+    """Safe machine-readable category. No report, key, headers or server body."""
+    def __init__(self, code, retryable=False, retry_after=None):
+        super().__init__(code)
+        self.code = code
+        self.retryable = retryable
+        self.retry_after = retry_after
+
+
+def retry_after_seconds(headers):
+    """Honor short rate-limit Retry-After without waiting unboundedly."""
+    try:
+        value = headers.get("Retry-After")
+        if not value:
+            return None
+        try:
+            return max(0, min(30, float(value)))
+        except (ValueError, TypeError):
+            when = email.utils.parsedate_to_datetime(value)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            return max(0, min(30, (when - now).total_seconds()))
+    except Exception:
+        return None
+
+
+def transport_request(req, open_url=urllib.request.urlopen):
+    try:
+        with open_url(req, timeout=45) as response:
+            return response.read(3 * 1024 * 1024)
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+        if code == 400:
+            raise ReviewFailure(classify_http_400(exc))
+        if code == 401:
+            raise ReviewFailure("GROQ_AUTH_401")
+        if code == 403:
+            raise ReviewFailure("GROQ_FORBIDDEN_403")
+        if code == 404:
+            raise ReviewFailure("GROQ_MODEL_404")
+        if code == 408 or code == 429:
+            raise ReviewFailure("GROQ_HTTP_" + str(code), True, retry_after_seconds(exc.headers))
+        if code in (500, 502, 503, 504):
+            raise ReviewFailure("GROQ_HTTP_" + str(code), True, retry_after_seconds(exc.headers))
+        raise ReviewFailure("GROQ_HTTP_" + str(code))
+    except (urllib.error.URLError, TimeoutError, ConnectionError):
+        raise ReviewFailure("GROQ_NETWORK", True)
+
+
+def api_review(key, text, requester=transport_request, sleeper=time.sleep):
     request_body = {
         "model": MODEL,
         "messages": [{"role": "system", "content": SYSTEM},
-                     {"role": "user", "content": "Review this report completely:\n\n" + text}],
+                     {"role": "user", "content": "Review this report completely:\\n\\n" + text}],
         "response_format": {"type": "json_object"},
         "reasoning_effort": "low",
         "reasoning_format": "hidden",
@@ -102,46 +155,42 @@ def api_review(key, text):
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json",
                  "Accept": "application/json",
-                 "User-Agent": "Haronex-Radiology-Agent/7.2"})
+                 "User-Agent": "Haronex-Radiology-Agent/9.1"})
+    # Same payload and key on retries. No mutation of the medical report.
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        try:
+            raw = requester(req)
+            break
+        except ReviewFailure as exc:
+            if not exc.retryable or attempt >= len(RETRY_DELAYS):
+                raise
+            pause = RETRY_DELAYS[attempt]
+            if exc.retry_after is not None:
+                pause = max(pause, exc.retry_after)
+            sleeper(pause)
     try:
-        with urllib.request.urlopen(req, timeout=45) as response:
-            raw = response.read(3 * 1024 * 1024)
-    except urllib.error.HTTPError as exc:
-        # Avoid logging response headers/body or access credentials.
-        code = exc.code
-        if code == 401:
-            raise RuntimeError("GROQ_AUTH_401")
-        if code == 403:
-            raise RuntimeError("GROQ_FORBIDDEN_403")
-        if code == 404:
-            raise RuntimeError("GROQ_MODEL_404")
-        if code == 429:
-            raise RuntimeError("GROQ_LIMIT_429")
-        if code == 400:
-            raise RuntimeError(classify_http_400(exc))
-        if code >= 500:
-            raise RuntimeError("GROQ_SERVER_5XX")
-        raise RuntimeError("GROQ_HTTP_" + str(code))
-    except urllib.error.URLError:
-        raise RuntimeError("GROQ_NETWORK")
-    obj = json.loads(raw.decode("utf-8"))
-    choices = obj.get("choices", [])
-    if not choices:
-        raise ValueError("Groq returned no choices")
-    choice = choices[0]
-    if choice.get("finish_reason") not in ("stop",):
-        raise ValueError("GROQ_TRUNCATED")
-    message = choice.get("message") or {}
-    content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
-        raise ValueError("GROQ_EMPTY_RESPONSE")
-    try:
-        parsed = json.loads(content)
-    except (ValueError, TypeError):
-        raise ValueError("GROQ_INVALID_JSON")
-    if not isinstance(parsed, dict):
-        raise ValueError("Groq returned invalid structure")
-    return normalize(text, parsed.get("issues"))
+        obj = json.loads(raw.decode("utf-8"))
+        choices = obj.get("choices", [])
+        if not choices:
+            raise ReviewFailure("GROQ_NO_CHOICES")
+        choice = choices[0]
+        if choice.get("finish_reason") != "stop":
+            raise ReviewFailure("GROQ_TRUNCATED")
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ReviewFailure("GROQ_EMPTY_RESPONSE")
+        try:
+            parsed = json.loads(content)
+        except (ValueError, TypeError):
+            raise ReviewFailure("GROQ_INVALID_JSON")
+        if not isinstance(parsed, dict):
+            raise ReviewFailure("GROQ_INVALID_STRUCTURE")
+        return normalize(text, parsed.get("issues"))
+    except ReviewFailure:
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise ReviewFailure("GROQ_INVALID_RESPONSE")
 
 def main():
     try:
@@ -166,9 +215,11 @@ def main():
         # Emit only fixed error categories; never expose raw server response or report.
         message = str(exc)
         safe_codes = {"GROQ_AUTH_401", "GROQ_FORBIDDEN_403", "GROQ_MODEL_404",
-                      "GROQ_LIMIT_429", "GROQ_REQUEST_400", "GROQ_SERVER_5XX",
                       "GROQ_NETWORK", "GROQ_TRUNCATED", "GROQ_EMPTY_RESPONSE",
-                      "GROQ_INVALID_JSON"}
+                      "GROQ_INVALID_JSON", "GROQ_INVALID_STRUCTURE",
+                      "GROQ_INVALID_RESPONSE", "GROQ_NO_CHOICES",
+                      "GROQ_HTTP_408", "GROQ_HTTP_429", "GROQ_HTTP_500",
+                      "GROQ_HTTP_502", "GROQ_HTTP_503", "GROQ_HTTP_504"}
         code = message if (message in safe_codes or message.startswith("GROQ_REQUEST_400_")) else "WORKER_" + type(exc).__name__.upper()
         print(json.dumps({"ok": False, "error": code}))
 
@@ -183,13 +234,46 @@ def self_test():
         def read(self, limit):
             return b'{"error":{"message":"unsupported reasoning effort"}}'
     assert classify_http_400(FakeError()) == "GROQ_REQUEST_400_REASONING"
-    assert "User-Agent" in api_review.__code__.co_consts or "Haronex-Radiology-Agent/7.2" in str(api_review.__code__.co_consts)
+    assert "Haronex-Radiology-Agent/9.1" in str(api_review.__code__.co_consts)
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
     except ValueError:
         pass
     else:
         raise AssertionError("Invalid exact quotation was not rejected")
+    # Offline regression: success after two transient failures and no 400 retry.
+    import io
+    from email.message import Message
+    fake_response = json.dumps({"choices": [{"finish_reason": "stop", "message": {
+        "content": json.dumps({"issues": []})}}]}).encode("utf-8")
+    called, delays = [], []
+    def flaky(request):
+        called.append(1)
+        if len(called) < 3:
+            raise ReviewFailure("GROQ_HTTP_503", True)
+        return fake_response
+    assert api_review("gsk_dummy", sample, flaky, delays.append) == []
+    assert len(called) == 3 and delays == [2, 5]
+    called.clear()
+    def invalid(request):
+        called.append(1)
+        raise ReviewFailure("GROQ_REQUEST_400_INVALID")
+    try:
+        api_review("gsk_dummy", sample, invalid, delays.append)
+        raise AssertionError("400 error was silently swallowed")
+    except ReviewFailure as exc:
+        assert exc.code == "GROQ_REQUEST_400_INVALID" and len(called) == 1
+    called.clear()
+    def limited(request):
+        called.append(1)
+        raise ReviewFailure("GROQ_HTTP_429", True, 4)
+    delays.clear()
+    try:
+        api_review("gsk_dummy", sample, limited, delays.append)
+        raise AssertionError("retry limit was not enforced")
+    except ReviewFailure:
+        assert len(called) == 4 and delays == [4, 5, 10]
+    assert retry_after_seconds({"Retry-After": "999"}) == 30
     print(json.dumps({"ok": True, "test": "groq_parser_offline"}))
 
 if __name__ == "__main__":
