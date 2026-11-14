@@ -231,7 +231,7 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep):
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json",
                  "Accept": "application/json",
-                 "User-Agent": "Haronex-Radiology-Agent/9.3"})
+                 "User-Agent": "Haronex-Radiology-Agent/9.4"})
     # Semantic format errors get only one additional fresh response.
     # HTTP 400/auth/content filtering or clinical safety failures are never retried.
     recoverable_formats = {
@@ -309,7 +309,7 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v9-3":
+        if version != "haronex-groq-qwen38-v9-4":
             raise ValueError("Unsupported review version")
         groups = [review_with_recovery(key, text) for text in texts]
         print(json.dumps({"ok": True, "mode": "groq", "passes": 1,
@@ -344,7 +344,7 @@ def self_test():
         def read(self, limit):
             return b'{"error":{"message":"unsupported reasoning effort"}}'
     assert classify_http_400(FakeError()) == "GROQ_REQUEST_400_REASONING"
-    assert "Haronex-Radiology-Agent/9.3" in str(api_review.__code__.co_consts)
+    assert "Haronex-Radiology-Agent/9.4" in str(api_review.__code__.co_consts)
     assert MAX_COMPLETION_TOKENS == 8192
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
