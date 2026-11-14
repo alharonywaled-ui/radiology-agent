@@ -313,7 +313,8 @@ def main():
             raise ValueError("Unsupported review version")
         groups = [review_with_recovery(key, text) for text in texts]
         print(json.dumps({"ok": True, "mode": "groq", "passes": 1,
-                          "review_version": version, "groups": groups,\n                          "discarded_issues": DISCARDED_ISSUES["count"]},
+                          "review_version": version, "groups": groups,
+                          "discarded_issues": DISCARDED_ISSUES["count"]},
                          ensure_ascii=False))
     except Exception as exc:
         # No error bodies, secrets or reports in stdout.
