@@ -13,6 +13,8 @@ RETRY_DELAYS = (2, 5, 10)  # At most 3 retries; never retry generic HTTP 400.
 MAX_COMPLETION_TOKENS = 8192
 MIN_SPLIT_CHARS = 600
 MAX_SPLIT_DEPTH = 3
+FORMAT_RETRIES = 1
+DISCARDED_ISSUES = {"count": 0}
 
 ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 SYSTEM = (
@@ -62,6 +64,77 @@ def normalize(text, issues):
         output.append({"quote": quote, "category": category,
                        "explanation": explanation[:500], "suggestion": suggestion[:250]})
     return sorted(output, key=lambda x: (text.find(x["quote"]), x["category"]))
+
+def normalize_response(text, issues):
+    """Tolerate bad individual rows, but never turn an entirely invalid review into success.
+
+    Quotes must be exact substrings. No autocorrection, case folding, invented
+    text, or modifications to clinical statements. Only fixed diagnostic codes.
+    """
+    if not isinstance(issues, list):
+        raise ReviewFailure("GROQ_ISSUES_NOT_ARRAY")
+    clean, seen = [], set()
+    invalid = []
+    for item in issues:
+        if not isinstance(item, dict):
+            invalid.append("GROQ_INVALID_ITEM")
+            continue
+        quote, category = item.get("quote"), item.get("category")
+        if not isinstance(quote, str) or not 2 <= len(quote) <= 500 or quote not in text:
+            invalid.append("GROQ_INVALID_QUOTE")
+            continue
+        if category not in ("logic", "language"):
+            invalid.append("GROQ_INVALID_CATEGORY")
+            continue
+        explanation, suggestion = item.get("explanation", ""), item.get("suggestion", "")
+        if not isinstance(explanation, str) or not isinstance(suggestion, str):
+            invalid.append("GROQ_INVALID_WORDING")
+            continue
+        key = (quote, category)
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append({"quote": quote, "category": category,
+                      "explanation": explanation[:500], "suggestion": suggestion[:250]})
+    # Empty issues [] is a valid review response. Nonempty but entirely invalid is not.
+    if issues and not clean:
+        raise ReviewFailure(invalid[0] if invalid else "GROQ_ALL_ISSUES_INVALID")
+    DISCARDED_ISSUES["count"] += len(invalid)
+    return sorted(clean, key=lambda x: (text.find(x["quote"]), x["category"]))
+
+
+def parse_review_response(raw, text):
+    """Classify API envelope, truncation, JSON and schema without logging raw data."""
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeError, AttributeError):
+        raise ReviewFailure("GROQ_INVALID_ENVELOPE")
+    if not isinstance(obj, dict) or not isinstance(obj.get("choices"), list) or not obj["choices"]:
+        raise ReviewFailure("GROQ_NO_CHOICES")
+    choice = obj["choices"][0]
+    if not isinstance(choice, dict):
+        raise ReviewFailure("GROQ_INVALID_ENVELOPE")
+    finish = choice.get("finish_reason")
+    if finish == "length":
+        raise ReviewFailure("GROQ_TRUNCATED_LENGTH")
+    if finish == "content_filter":
+        raise ReviewFailure("GROQ_CONTENT_FILTER")
+    if finish != "stop":
+        raise ReviewFailure("GROQ_FINISH_OTHER")
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise ReviewFailure("GROQ_INVALID_ENVELOPE")
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ReviewFailure("GROQ_EMPTY_RESPONSE")
+    try:
+        parsed = json.loads(content)
+    except ValueError:
+        raise ReviewFailure("GROQ_INVALID_JSON")
+    if not isinstance(parsed, dict):
+        raise ReviewFailure("GROQ_INVALID_STRUCTURE")
+    return normalize_response(text, parsed.get("issues"))
+
 
 def classify_http_400(exc):
     # Groq may return descriptions containing a user's report excerpt.
@@ -158,47 +231,36 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep):
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json",
                  "Accept": "application/json",
-                 "User-Agent": "Haronex-Radiology-Agent/9.2"})
-    # Same payload and key on retries. No mutation of the medical report.
-    for attempt in range(len(RETRY_DELAYS) + 1):
+                 "User-Agent": "Haronex-Radiology-Agent/9.3"})
+    # Semantic format errors get only one additional fresh response.
+    # HTTP 400/auth/content filtering or clinical safety failures are never retried.
+    recoverable_formats = {
+        "GROQ_INVALID_ENVELOPE", "GROQ_INVALID_JSON",
+        "GROQ_INVALID_STRUCTURE", "GROQ_ISSUES_NOT_ARRAY",
+        "GROQ_INVALID_QUOTE", "GROQ_INVALID_CATEGORY",
+        "GROQ_INVALID_WORDING", "GROQ_INVALID_ITEM",
+        "GROQ_ALL_ISSUES_INVALID", "GROQ_EMPTY_RESPONSE",
+        "GROQ_NO_CHOICES"
+    }
+    for format_attempt in range(FORMAT_RETRIES + 1):
+        for attempt in range(len(RETRY_DELAYS) + 1):
+            try:
+                raw = requester(req)
+                break
+            except ReviewFailure as exc:
+                if not exc.retryable or attempt >= len(RETRY_DELAYS):
+                    raise
+                delay = RETRY_DELAYS[attempt]
+                if exc.retry_after is not None:
+                    delay = max(delay, exc.retry_after)
+                sleeper(delay)
         try:
-            raw = requester(req)
-            break
+            return parse_review_response(raw, text)
         except ReviewFailure as exc:
-            if not exc.retryable or attempt >= len(RETRY_DELAYS):
+            if exc.code not in recoverable_formats or format_attempt >= FORMAT_RETRIES:
                 raise
-            pause = RETRY_DELAYS[attempt]
-            if exc.retry_after is not None:
-                pause = max(pause, exc.retry_after)
-            sleeper(pause)
-    try:
-        obj = json.loads(raw.decode("utf-8"))
-        choices = obj.get("choices", [])
-        if not choices:
-            raise ReviewFailure("GROQ_NO_CHOICES")
-        choice = choices[0]
-        finish = choice.get("finish_reason")
-        if finish == "length":
-            raise ReviewFailure("GROQ_TRUNCATED_LENGTH")
-        if finish == "content_filter":
-            raise ReviewFailure("GROQ_CONTENT_FILTER")
-        if finish != "stop":
-            raise ReviewFailure("GROQ_FINISH_OTHER")
-        message = choice.get("message") or {}
-        content = message.get("content")
-        if not isinstance(content, str) or not content.strip():
-            raise ReviewFailure("GROQ_EMPTY_RESPONSE")
-        try:
-            parsed = json.loads(content)
-        except (ValueError, TypeError):
-            raise ReviewFailure("GROQ_INVALID_JSON")
-        if not isinstance(parsed, dict):
-            raise ReviewFailure("GROQ_INVALID_STRUCTURE")
-        return normalize(text, parsed.get("issues"))
-    except ReviewFailure:
-        raise
-    except (ValueError, TypeError, KeyError, AttributeError):
-        raise ReviewFailure("GROQ_INVALID_RESPONSE")
+            sleeper(1)
+    raise ReviewFailure("GROQ_INVALID_RESPONSE")
 
 def split_report_text(text):
     """Lossless, bounded split, prefer paragraph boundary, never strip characters."""
@@ -247,11 +309,11 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v9-2":
+        if version != "haronex-groq-qwen38-v9-3":
             raise ValueError("Unsupported review version")
         groups = [review_with_recovery(key, text) for text in texts]
         print(json.dumps({"ok": True, "mode": "groq", "passes": 1,
-                          "review_version": version, "groups": groups},
+                          "review_version": version, "groups": groups,\n                          "discarded_issues": DISCARDED_ISSUES["count"]},
                          ensure_ascii=False))
     except Exception as exc:
         # No error bodies, secrets or reports in stdout.
@@ -261,7 +323,7 @@ def main():
                       "GROQ_NETWORK", "GROQ_TRUNCATED_LENGTH", "GROQ_FINISH_OTHER",
                       "GROQ_CONTENT_FILTER", "GROQ_EMPTY_RESPONSE",
                       "GROQ_INVALID_JSON", "GROQ_INVALID_STRUCTURE",
-                      "GROQ_INVALID_RESPONSE", "GROQ_NO_CHOICES",
+                      "GROQ_INVALID_RESPONSE", "GROQ_NO_CHOICES", "GROQ_INVALID_ENVELOPE",\n                      "GROQ_ISSUES_NOT_ARRAY", "GROQ_INVALID_ITEM",\n                      "GROQ_INVALID_QUOTE", "GROQ_INVALID_CATEGORY",\n                      "GROQ_INVALID_WORDING", "GROQ_ALL_ISSUES_INVALID",
                       "GROQ_HTTP_408", "GROQ_HTTP_429", "GROQ_HTTP_500",
                       "GROQ_HTTP_502", "GROQ_HTTP_503", "GROQ_HTTP_504"}
         code = message if (message in safe_codes or message.startswith("GROQ_REQUEST_400_")) else "WORKER_" + type(exc).__name__.upper()
@@ -278,7 +340,7 @@ def self_test():
         def read(self, limit):
             return b'{"error":{"message":"unsupported reasoning effort"}}'
     assert classify_http_400(FakeError()) == "GROQ_REQUEST_400_REASONING"
-    assert "Haronex-Radiology-Agent/9.2" in str(api_review.__code__.co_consts)
+    assert "Haronex-Radiology-Agent/9.3" in str(api_review.__code__.co_consts)
     assert MAX_COMPLETION_TOKENS == 8192
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
@@ -349,6 +411,57 @@ def self_test():
     except ReviewFailure as exc:
         assert exc.code == "GROQ_AUTH_401"
     assert split_report_text("Tiny sample") is None
+
+    # A valid issue survives a malformed neighbor; no fabricated corrections.
+    good = {"quote": "Mild fatty hepatomegaly", "category": "language",
+            "explanation": "Wording", "suggestion": "Consider style review"}
+    bad_quote = {"quote": "invented lesion", "category": "logic",
+                 "explanation": "Not in report", "suggestion": ""}
+    assert normalize_response(sample, [good, bad_quote]) == [good]
+    assert DISCARDED_ISSUES["count"] >= 1
+    assert normalize_response(sample, []) == []
+    for rejected, code in [
+        ([bad_quote], "GROQ_INVALID_QUOTE"),
+        ([{"quote": "Mild fatty hepatomegaly", "category": "unknown"}], "GROQ_INVALID_CATEGORY"),
+        ([{"quote": "Mild fatty hepatomegaly", "category": "language",
+           "explanation": []}], "GROQ_INVALID_WORDING"),
+        ([False], "GROQ_INVALID_ITEM")]:
+        try:
+            normalize_response(sample, rejected)
+            raise AssertionError("Invalid-only response marked successful")
+        except ReviewFailure as exc:
+            assert exc.code == code
+    for invalid_content, code in [
+        ('{"missing":[]}', "GROQ_ISSUES_NOT_ARRAY"),
+        ('{broken', "GROQ_INVALID_JSON")]:
+        packet = json.dumps({"choices":[{"finish_reason":"stop",
+            "message":{"content":invalid_content}}]}).encode("utf-8")
+        try:
+            parse_review_response(packet, sample)
+            raise AssertionError("Invalid API response marked successful")
+        except ReviewFailure as exc:
+            assert exc.code == code
+    packet = json.dumps({"choices":[{"finish_reason":"stop",
+        "message":{"content":json.dumps({"issues":[good,bad_quote]})}}]}).encode("utf-8")
+    assert parse_review_response(packet, sample) == [good]
+    # At most one retry for malformed JSON; no additional retry for an HTTP 400.
+    calls, waits = [], []
+    bad_packet = json.dumps({"choices":[{"finish_reason":"stop",
+        "message":{"content":"not-json"}}]}).encode("utf-8")
+    def repaired(req):
+        calls.append(1)
+        return bad_packet if len(calls) == 1 else packet
+    assert api_review("gsk_dummy", sample, repaired, waits.append) == [good]
+    assert len(calls) == 2 and waits == [1]
+    calls.clear()
+    def malformed(req):
+        calls.append(1)
+        return bad_packet
+    try:
+        api_review("gsk_dummy", sample, malformed, lambda _: None)
+        raise AssertionError("Repeated malformed API reply marked successful")
+    except ReviewFailure as exc:
+        assert exc.code == "GROQ_INVALID_JSON" and len(calls) == 2
     print(json.dumps({"ok": True, "test": "groq_parser_offline"}))
 
 if __name__ == "__main__":
