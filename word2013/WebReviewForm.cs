@@ -16,7 +16,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    internal const string ReviewAlgorithmVersion="haronex-groq-qwen38-v7-6";
+    internal const string ReviewAlgorithmVersion="haronex-groq-qwen38-v9-2";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=1; Height=1;
@@ -131,10 +131,10 @@ namespace RadiologyAgent {
         var chunks=new List<string>();
         int pos=0;
         while(pos<report.Length) {
-          int length=Math.Min(12000,report.Length-pos);
+          int length=Math.Min(6000,report.Length-pos);
           if(pos+length<report.Length) {
-            int boundary=report.LastIndexOf('\n',pos+length-1,length);
-            if(boundary>=pos+6000)length=boundary-pos+1;
+            int boundary=report.LastIndexOfAny(new char[]{'\r','\n'},pos+length-1,length);
+            if(boundary>=pos+4500)length=boundary-pos+1;
           }
           chunks.Add(report.Substring(pos,length));
           pos+=length;
@@ -264,7 +264,7 @@ namespace RadiologyAgent {
         var watch=Stopwatch.StartNew();
         // Four transport attempts (45 seconds each) plus 2/5/10 second backoff.
         // Longer documents may have multiple chunks. Keep a finite upper bound.
-        int maxMs=(int)Math.Min(900000L,Math.Max(215000L,(long)count*215000L));
+        int maxMs=(int)Math.Min(1800000L,Math.Max(215000L,(long)count*215000L));
         while(!process.WaitForExit(250)) {
           if(cancellation.IsCancellationRequested) {
             KillWorkerTree(process);
