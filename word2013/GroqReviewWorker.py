@@ -324,7 +324,10 @@ def main():
                       "GROQ_NETWORK", "GROQ_TRUNCATED_LENGTH", "GROQ_FINISH_OTHER",
                       "GROQ_CONTENT_FILTER", "GROQ_EMPTY_RESPONSE",
                       "GROQ_INVALID_JSON", "GROQ_INVALID_STRUCTURE",
-                      "GROQ_INVALID_RESPONSE", "GROQ_NO_CHOICES", "GROQ_INVALID_ENVELOPE",\n                      "GROQ_ISSUES_NOT_ARRAY", "GROQ_INVALID_ITEM",\n                      "GROQ_INVALID_QUOTE", "GROQ_INVALID_CATEGORY",\n                      "GROQ_INVALID_WORDING", "GROQ_ALL_ISSUES_INVALID",
+                      "GROQ_INVALID_RESPONSE", "GROQ_NO_CHOICES", "GROQ_INVALID_ENVELOPE",
+                      "GROQ_ISSUES_NOT_ARRAY", "GROQ_INVALID_ITEM",
+                      "GROQ_INVALID_QUOTE", "GROQ_INVALID_CATEGORY",
+                      "GROQ_INVALID_WORDING", "GROQ_ALL_ISSUES_INVALID",
                       "GROQ_HTTP_408", "GROQ_HTTP_429", "GROQ_HTTP_500",
                       "GROQ_HTTP_502", "GROQ_HTTP_503", "GROQ_HTTP_504"}
         code = message if (message in safe_codes or message.startswith("GROQ_REQUEST_400_")) else "WORKER_" + type(exc).__name__.upper()
