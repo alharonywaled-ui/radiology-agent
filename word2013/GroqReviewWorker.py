@@ -245,9 +245,9 @@ def main():
             raise ValueError("Missing or invalid Groq API key")
         if not isinstance(texts, list) or not 1 <= len(texts) <= 40:
             raise ValueError("Invalid report parts")
-        if any(not isinstance(x, str) or not x or len(x) > 12000 for x in texts):
+        if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v7-6":
+        if version != "haronex-groq-qwen38-v9-2":
             raise ValueError("Unsupported review version")
         groups = [review_with_recovery(key, text) for text in texts]
         print(json.dumps({"ok": True, "mode": "groq", "passes": 1,
