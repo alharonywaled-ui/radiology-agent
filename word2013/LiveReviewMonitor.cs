@@ -104,8 +104,9 @@ namespace RadiologyAgent {
       if(boundWordHwnd!=requested||boundWordWindow!=null||currentText!=null)ClearDocument();
       word=null;boundWordWindow=null;boundWordHwnd=0;
       object window;
-      if(!WordWindowBinding.TryGetWordWindow(requested,out window)) {
-        lastWordProblem="WORD_NATIVEOM_BIND_FAILED";
+      bool candidateFound;
+      if(!WordWindowBinding.TryGetWordWindow(requested,out window,out candidateFound)) {
+        lastWordProblem=candidateFound?"WORD_DOCUMENT_NOT_READY":"WORD_NATIVEOM_BIND_FAILED";
         return false;
       }
       try {
@@ -152,6 +153,9 @@ namespace RadiologyAgent {
         // startup, or protected view. Do not fall back to another document.
         lastWordProblem=boundWordWindow!=null?"WORD_DOCUMENT_NOT_READY":"WORD_NO_ACTIVE_DOCUMENT";
         if(documentId!=null)ClearDocument();
+        // A previously bound pane can become stale; re-enumerate the clicked
+        // window on the next tick rather than retrying the same broken RCW.
+        word=null;boundWordWindow=null;boundWordHwnd=0;
         return;
       }
       catch {
@@ -170,6 +174,8 @@ namespace RadiologyAgent {
         report=Convert.ToString(doc.Content.Text);
       } catch {
         lastWordProblem="WORD_DOCUMENT_READ_FAILED";
+        if(documentId!=null)ClearDocument();
+        word=null;boundWordWindow=null;boundWordHwnd=0;
         return;
       }
       if(String.IsNullOrWhiteSpace(report)) {
