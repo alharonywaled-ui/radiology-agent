@@ -20,12 +20,14 @@ namespace RadiologyAgent {
     private static extern int AccessibleObjectFromWindow(IntPtr hwnd,uint objectId,
       ref Guid iid,[MarshalAs(UnmanagedType.Interface)] out object result);
 
-    internal static bool TryGetWordWindow(uint wordRoot,out object nativeWordWindow) {
+    internal static bool TryGetWordWindow(uint wordRoot,out object nativeWordWindow,out bool foundNativeCandidate) {
       nativeWordWindow=null;
+      foundNativeCandidate=false;
       if(wordRoot==0)return false;
       IntPtr root=new IntPtr(unchecked((int)wordRoot));
       if(!IsWindow(root))return false;
       object found=null;
+      bool sawCandidate=false;
       EnumWindowsProc callback=(hwnd,arg)=>{
         var name=new StringBuilder(64);
         GetClassName(hwnd,name,name.Capacity);
@@ -35,14 +37,28 @@ namespace RadiologyAgent {
         try {
           int hr=AccessibleObjectFromWindow(hwnd,NativeOm,ref iid,out candidate);
           if(hr>=0&&candidate!=null) {
-            found=candidate;
-            return false;
+            sawCandidate=true;
+            // NativeOM can expose a transitioning or inactive pane.
+            // Verify Document before selecting an object from this exact root.
+            try {
+              dynamic win=candidate;
+              object doc=win.Document;
+              if(doc!=null) {
+                found=candidate;
+                return false;
+              }
+            } catch(COMException) {
+              // Try other panes of this same Word window, then poll again.
+            } catch {
+              // Invalid object. Never fall back to another Word instance.
+            }
           }
         } catch (COMException) {}
         return true;
       };
       EnumChildWindows(root,callback,IntPtr.Zero);
       GC.KeepAlive(callback);
+      foundNativeCandidate=sawCandidate;
       nativeWordWindow=found;
       return nativeWordWindow!=null;
     }
