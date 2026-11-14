@@ -90,45 +90,42 @@ namespace RadiologyAgent {
 
     private bool ConnectWord() {
       uint requested=ReadDword("WordWindowHwnd");
-      if(requested!=0&&requested!=boundWordHwnd) {
-        object window;
-        if(WordWindowBinding.TryGetWordWindow(requested,out window)) {
-          try {
-            dynamic activeWindow=window;
-            object owner=activeWindow.Application;
-            object document=activeWindow.Document;
-            if(owner!=null&&document!=null) {
-              word=owner;
-              boundWordWindow=window;
-              boundWordHwnd=requested;
-              lastWordProblem="WORD_DOCUMENT_READY";
-              missingWordTicks=0;
-              return true;
-            }
-          } catch {
-            lastWordProblem="WORD_NATIVEOM_DOCUMENT_ERROR";
-          }
-        }
-        // Never silently grab another Word process if a specific clicked
-        // window is known, as that can annotate the wrong patient's report.
-        word=null;
-        boundWordWindow=null;
-        boundWordHwnd=0;
-        if(lastWordProblem!="WORD_NATIVEOM_DOCUMENT_ERROR")
-          lastWordProblem="WORD_NATIVEOM_BIND_FAILED";
+      // Never substitute Marshal.GetActiveObject: it may belong to another
+      // instance or another patient's open document.
+      if(requested==0) {
+        lastWordProblem="WORD_WINDOW_NOT_IDENTIFIED";
+        if(boundWordWindow!=null||currentText!=null)ClearDocument();
+        word=null;boundWordWindow=null;boundWordHwnd=0;
         return false;
       }
-      if(boundWordWindow!=null&&word!=null)return true;
-      if(requested!=0)return false;
-      if(word!=null)return true;
-      try {
-        word=Marshal.GetActiveObject("Word.Application");
-        missingWordTicks=0;
-        lastWordProblem="WORD_NO_ACTIVE_DOCUMENT";
+      if(requested==boundWordHwnd&&boundWordWindow!=null&&word!=null)
         return true;
+      // A newly clicked Word window invalidates all previous document snapshots.
+      if(boundWordHwnd!=requested||boundWordWindow!=null||currentText!=null)ClearDocument();
+      word=null;boundWordWindow=null;boundWordHwnd=0;
+      object window;
+      if(!WordWindowBinding.TryGetWordWindow(requested,out window)) {
+        lastWordProblem="WORD_NATIVEOM_BIND_FAILED";
+        return false;
+      }
+      try {
+        dynamic activeWindow=window;
+        object owner=activeWindow.Application;
+        if(owner==null) {
+          lastWordProblem="WORD_NATIVEOM_APP_UNAVAILABLE";
+          return false;
+        }
+        // Document access can transiently fail while Word is loading.
+        // Preserve the window binding for the next 400ms poll.
+        word=owner;boundWordWindow=window;boundWordHwnd=requested;
+        lastWordProblem="WORD_DOCUMENT_LOADING";
+        missingWordTicks=0;
+        return true;
+      } catch(COMException) {
+        lastWordProblem="WORD_NATIVEOM_BUSY";
+        return false;
       } catch {
-        lastWordProblem="WORD_COM_UNAVAILABLE";
-        ++missingWordTicks;
+        lastWordProblem="WORD_NATIVEOM_DOCUMENT_ERROR";
         return false;
       }
     }
@@ -151,7 +148,9 @@ namespace RadiologyAgent {
       dynamic doc;
       try {doc=boundWordWindow!=null?((dynamic)boundWordWindow).Document:app.ActiveDocument;}
       catch (COMException) {
-        lastWordProblem="WORD_NO_ACTIVE_DOCUMENT";
+        // Document property can be temporarily unavailable during focus,
+        // startup, or protected view. Do not fall back to another document.
+        lastWordProblem=boundWordWindow!=null?"WORD_DOCUMENT_NOT_READY":"WORD_NO_ACTIVE_DOCUMENT";
         if(documentId!=null)ClearDocument();
         return;
       }
@@ -211,8 +210,13 @@ namespace RadiologyAgent {
       lastHandledCommand=command;
       WriteDword("LiveReviewHandled",command);
       // Rebind to the exact Word window that raised the Ribbon click.
-      if(ConnectWord())PollWord();
+      bool bound=ConnectWord();
+      if(bound)PollWord();
       if(!WebReviewForm.Approved()) {LogFailure("KEY_OR_CONSENT_MISSING");Notify(false);return;}
+      // Fail closed if the captured Word window cannot be verified. In
+      // particular, don't analyze a snapshot from a previously clicked window.
+      if(!bound||boundWordHwnd==0||boundWordHwnd!=ReadDword("WordWindowHwnd"))
+        ClearDocument();
       if(currentText==null) {
         // Word may be starting or its COM document snapshot not yet available.
         awaitingDocument=true;
@@ -243,7 +247,7 @@ namespace RadiologyAgent {
         else {pendingClick=true;if(!working)StartAnalysis();}
         return;
       }
-      if((DateTime.UtcNow-documentWaitStarted).TotalSeconds>=6) {
+      if((DateTime.UtcNow-documentWaitStarted).TotalSeconds>=12) {
         awaitingDocument=false;
         LogFailure(lastWordProblem);
         Notify(false);
@@ -360,6 +364,7 @@ namespace RadiologyAgent {
         };
         string json=parser.Serialize(response);
         return DebounceMilliseconds==1200
+          && PollMilliseconds==400
           && ValidateResponse(json,report)!=null
           && ValidateResponse(json,report.Replace("Left kidney","Spleen"))==null
           && ValidateResponse(json.Replace("\"groq\"","\"account\""),report)==null;
