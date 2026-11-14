@@ -177,7 +177,40 @@ static void StartLiveMonitor() {
   // The C# monitor enforces a per-Windows-user singleton and talks to Word on its STA.
   ShellExecuteW(nullptr,L"open",exe.c_str(),L"--monitor",nullptr,SW_HIDE);
 }
-static void RequestReview() {
+// Prefer the Word.Application instance that owns this ribbon callback, rather
+// than the process-wide foreground window (which may be another Word instance).
+static HWND ActiveWordWindowFromCom(IDispatch* application) {
+  if(!application)return nullptr;
+  LPOLESTR activeName=const_cast<LPOLESTR>(L"ActiveWindow");
+  DISPID activeId=0;
+  if(FAILED(application->GetIDsOfNames(IID_NULL,&activeName,1,LOCALE_USER_DEFAULT,&activeId)))return nullptr;
+  DISPPARAMS noArgs={nullptr,nullptr,0,0};
+  VARIANT window;VariantInit(&window);
+  if(FAILED(application->Invoke(activeId,IID_NULL,LOCALE_USER_DEFAULT,DISPATCH_PROPERTYGET,
+                                &noArgs,&window,nullptr,nullptr)))return nullptr;
+  IDispatch* dispatch=window.vt==VT_DISPATCH?window.pdispVal:nullptr;
+  HWND found=nullptr;
+  if(dispatch) {
+    LPOLESTR hwndName=const_cast<LPOLESTR>(L"Hwnd");
+    DISPID hwndId=0;
+    if(SUCCEEDED(dispatch->GetIDsOfNames(IID_NULL,&hwndName,1,LOCALE_USER_DEFAULT,&hwndId))) {
+      VARIANT value;VariantInit(&value);
+      if(SUCCEEDED(dispatch->Invoke(hwndId,IID_NULL,LOCALE_USER_DEFAULT,DISPATCH_PROPERTYGET,
+                                   &noArgs,&value,nullptr,nullptr))) {
+        VARIANT converted;VariantInit(&converted);
+        if(SUCCEEDED(VariantChangeType(&converted,&value,0,VT_I4))) {
+          found=reinterpret_cast<HWND>(static_cast<ULONG_PTR>(
+            static_cast<DWORD>(converted.lVal)));
+        }
+        VariantClear(&converted);
+      }
+      VariantClear(&value);
+    }
+  }
+  VariantClear(&window);
+  return found&&IsWindow(found)?GetAncestor(found,GA_ROOT):nullptr;
+}
+static void RequestReview(IDispatch* wordApplication) {
   const wchar_t* key=L"Software\\Haronex";
   HKEY h=nullptr;
   if(RegCreateKeyExW(HKEY_CURRENT_USER,key,0,nullptr,REG_OPTION_NON_VOLATILE,
@@ -185,8 +218,15 @@ static void RequestReview() {
     return;
   // Record the exact Word window that invoked the ribbon action. The monitor
   // must not blindly bind to a different Word.Application instance from ROT.
-  HWND clicked=GetForegroundWindow();
-  HWND root=clicked?GetAncestor(clicked,GA_ROOT):nullptr;
+  HWND root=ActiveWordWindowFromCom(wordApplication);
+  // A foreground fallback is allowed only when it belongs to this Word process.
+  if(!root) {
+    HWND clicked=GetForegroundWindow();
+    HWND candidate=clicked?GetAncestor(clicked,GA_ROOT):nullptr;
+    DWORD pid=0;
+    if(candidate)GetWindowThreadProcessId(candidate,&pid);
+    if(pid==GetCurrentProcessId())root=candidate;
+  }
   DWORD windowHandle=static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(root));
   RegSetValueExW(h,L"WordWindowHwnd",0,REG_DWORD,
     reinterpret_cast<const BYTE*>(&windowHandle),sizeof(windowHandle));
@@ -243,7 +283,7 @@ public:
   }
   HRESULT STDMETHODCALLTYPE Invoke(DISPID id,REFIID,LCID,WORD,DISPPARAMS* params,VARIANT* result,EXCEPINFO*,UINT*) override {
     if(result)VariantInit(result);
-    if(id==100){RequestReview();return S_OK;}
+    if(id==100){RequestReview(wordApplication_);return S_OK;}
     if(id==101) {
       if(params&&params->cArgs>=1) {
         VARIANTARG& arg=params->rgvarg[0];
