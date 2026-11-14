@@ -254,10 +254,10 @@ namespace RadiologyAgent {
       var result=new List<string>();
       int start=0;
       while(start<report.Length) {
-        int length=Math.Min(12000,report.Length-start);
+        int length=Math.Min(6000,report.Length-start);
         if(start+length<report.Length) {
-          int breakAt=report.LastIndexOf('\n',start+length-1,length);
-          if(breakAt>=start+6000)length=breakAt-start+1;
+          int breakAt=report.LastIndexOfAny(new char[]{'\r','\n'},start+length-1,length);
+          if(breakAt>=start+4500)length=breakAt-start+1;
         }
         result.Add(report.Substring(start,length));
         start+=length;
