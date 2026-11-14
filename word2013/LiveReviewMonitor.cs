@@ -221,9 +221,12 @@ namespace RadiologyAgent {
       }
       if(readyResponse!=null){ApplyReady();return;}
       if(failed) {
-        Notify(false);
+        // A new click after an exhausted attempt starts a fresh analysis
+        // immediately; never show a stale Retry popup for the old failure.
         failed=false;
-        lastChangeUtc=DateTime.UtcNow; // next click can reuse the new analysis
+        readyResponse=null;
+        pendingClick=true;
+        if(!working)StartAnalysis();
         return;
       }
       // The user clicked before review was ready. Show the final popup after the
