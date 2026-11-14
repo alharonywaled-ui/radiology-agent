@@ -208,7 +208,7 @@ def split_report_text(text):
     search_low = max(MIN_SPLIT_CHARS, mid - len(text) // 6)
     search_high = min(len(text) - MIN_SPLIT_CHARS, mid + len(text) // 6)
     candidates = [x + 1 for x in range(search_low, search_high)
-                  if text[x] in "\\r\\n"]
+                  if text[x] in "\r\n"]
     boundary = min(candidates, key=lambda x: abs(x - mid)) if candidates else mid
     if boundary < MIN_SPLIT_CHARS or len(text) - boundary < MIN_SPLIT_CHARS:
         return None
@@ -320,7 +320,7 @@ def self_test():
         assert len(called) == 4 and delays == [4, 5, 10]
     assert retry_after_seconds({"Retry-After": "999"}) == 30
     # Adaptive split: failed parent, two successful halves. Preserve exact text.
-    long_sample = ("FINDINGS: Normal right kidney.\\n" * 70) + "IMPRESSION: Normal right kidney."
+    long_sample = ("FINDINGS: Normal right kidney.\n" * 70) + "IMPRESSION: Normal right kidney."
     seen = []
     def truncate_then_recover(key, segment):
         seen.append(segment)
