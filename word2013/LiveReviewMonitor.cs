@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,6 +13,61 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 
 namespace RadiologyAgent {
+  // The native save/print sink independently recomputes these exact SHA-256
+  // digests on the Word event's Document. Never store report content or paths.
+  internal static class MandatoryApproval {
+    internal static string Digest(string text) {
+      if(String.IsNullOrEmpty(text))return null;
+      using(var sha=SHA256.Create()) {
+        var bytes=sha.ComputeHash(Encoding.UTF8.GetBytes(text));
+        return BitConverter.ToString(bytes).Replace("-","").ToLowerInvariant();
+      }
+    }
+    internal static string Identity(uint hwnd,string fullName) {
+      return Digest(hwnd.ToString()+"\u001f"+fullName);
+    }
+    internal static bool Approve(object document, string reviewedText, uint verifiedWindow) {
+      try {
+        dynamic doc=document;
+        string fullName=Convert.ToString(doc.FullName);
+        uint hwnd=verifiedWindow;
+        if(hwnd==0)return false;
+        string current=Convert.ToString(doc.Content.Text);
+        if(!String.Equals(current,reviewedText,StringComparison.Ordinal))return false;
+        string id=Identity(hwnd,fullName),hash=Digest(current);
+        if(String.IsNullOrEmpty(id)||String.IsNullOrEmpty(hash))return false;
+        using(var key=Registry.CurrentUser.CreateSubKey(
+                  @"Software\Haronex\MandatoryReviews\"+id)) {
+          if(key==null)return false;
+          key.SetValue("ApprovedHash",hash,RegistryValueKind.String);
+        }
+        return true;
+      } catch {return false;}
+    }
+    internal static void Invalidate(string oldId) {
+      if(String.IsNullOrEmpty(oldId))return;
+      int separator=oldId.IndexOf('|');
+      if(separator<=0)return;
+      int hwnd;
+      if(!Int32.TryParse(oldId.Substring(0,separator),out hwnd))return;
+      string id=Identity(unchecked((uint)hwnd),oldId.Substring(separator+1));
+      if(String.IsNullOrEmpty(id))return;
+      try {
+        using(var key=Registry.CurrentUser.OpenSubKey(
+                  @"Software\Haronex\MandatoryReviews\"+id,true)) {
+          if(key!=null)key.DeleteValue("ApprovedHash",false);
+        }
+      } catch {}
+    }
+    internal static bool SelfTest() {
+      return Digest("Text")==
+        "71988c4d8e0803ba4519f0b2864c1331c14a1890bf8694e251379177bfedb5c3"
+        && Identity(42,"Example.docx")!=Identity(43,"Example.docx")
+        && Identity(42,"Example.docx")!=Identity(42,"Other.docx")
+        && Digest("text")!=Digest("Text");
+    }
+  }
+
   // Persistent STA window receives Word COM calls ONLY on the UI thread.
   // Gemini browser work uses its own subprocess and is never allowed to modify Word.
   internal sealed class LiveReviewMonitor : Form {
@@ -190,7 +246,10 @@ namespace RadiologyAgent {
       }
       lastWordProblem="WORD_DOCUMENT_READY";
       bool changedDoc=!String.Equals(documentId,id,StringComparison.Ordinal);
-      if(changedDoc||!String.Equals(currentText,report,StringComparison.Ordinal)) {
+      bool changedText=!String.Equals(currentText,report,StringComparison.Ordinal);
+      if(changedDoc||changedText) {
+        // A previously approved revision must not survive any observed edit.
+        if(!changedDoc&&changedText)MandatoryApproval.Invalidate(documentId);
         // Preserve the click while the document becomes available.
         if(runningCancellation!=null)runningCancellation.Cancel();
         documentId=id;
@@ -369,7 +428,8 @@ namespace RadiologyAgent {
           {"groups",new object[]{new object[]{issue}}}
         };
         string json=parser.Serialize(response);
-        return DebounceMilliseconds==1200
+        return MandatoryApproval.SelfTest()
+          && DebounceMilliseconds==1200
           && PollMilliseconds==400
           && ValidateResponse(json,report)!=null
           && ValidateResponse(json,report.Replace("Left kidney","Spleen"))==null
@@ -449,6 +509,10 @@ namespace RadiologyAgent {
             doc.Comments.Add(region,comment);
             existing.Add(anchorId);
           } catch {}
+        }
+        if(!MandatoryApproval.Approve(doc,currentText,unchecked((uint)hwnd))) {
+          LogFailure("MANDATORY_APPROVAL_NOT_STORED");
+          pendingClick=false;Notify(false);return;
         }
         pendingClick=false;
         Notify(true);

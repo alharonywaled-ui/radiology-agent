@@ -4,6 +4,7 @@
 #include <oleauto.h>
 #include <cwchar>
 #include <cstdio>
+#include "WordMandatoryGate.h"
 
 struct IRibbon : IDispatch {
  virtual HRESULT STDMETHODCALLTYPE GetCustomUI(BSTR,BSTR*)=0;
@@ -32,6 +33,10 @@ int main(){
     if(xml)SysFreeString(xml);
     ribbon->Release();CoUninitialize();return 30;
   }
-  wprintf(L"NATIVE_COM_AND_RIBBON_OK\n");
+  if(HaronexMandatory::Hash(L"Text")!=L"71988c4d8e0803ba4519f0b2864c1331c14a1890bf8694e251379177bfedb5c3") {
+    wprintf(L"MANDATORY_SHA256_INCOMPATIBLE\n");
+    SysFreeString(xml);ribbon->Release();CoUninitialize();return 35;
+  }
+  wprintf(L"NATIVE_COM_AND_RIBBON_AND_MANDATORY_HASH_OK\n");
   SysFreeString(xml);ribbon->Release();CoUninitialize();return 0;
 }

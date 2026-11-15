@@ -1,5 +1,5 @@
 #define AppName "Haronex Radiology Agent for Word 2013"
-#define AppVersion "9.5.0"
+#define AppVersion "10.0.0"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
 DefaultGroupName=Haronex
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_Groq_Qwen38_V9_5_Setup
+OutputBaseFilename=Haronex_Word2013_Groq_Qwen38_V10_0_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -91,6 +91,23 @@ begin
     Result := '.NET Framework 4.8 is not detected after prerequisite installation. Restart Windows and rerun setup.';
 end;
 
+function HasExistingHaronexAuthorization: Boolean;
+var
+  Allowed: Cardinal;
+begin
+  Result := FileExists(ExpandConstant('{localappdata}\RadiologyAgent\groq.key.dpapi'))
+    and RegQueryDWordValue(HKCU, 'Software\Haronex', 'WebTransferAllowed', Allowed)
+    and (Allowed = 1);
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  // An in-place upgrade does not request or overwrite the user's existing
+  // DPAPI-protected key and previously granted patient-data authorization.
+  Result := HasExistingHaronexAuthorization and
+    ((PageID = KeyPage.ID) or (PageID = ConsentPage.ID));
+end;
+
 procedure InitializeWizard;
 begin
   KeyPage := CreateInputQueryPage(wpSelectDir,
@@ -130,8 +147,17 @@ var
   StagingPath: String;
   ResultCode: Integer;
 begin
+  if CurStep = ssInstall then begin
+    // Shut down the per-user persistent review monitor from an older release.
+    // Word must be closed by the user before upgrading; a new monitor is
+    // started automatically by the updated Word native COM add-in.
+    Exec(ExpandConstant('{sys}\taskkill.exe'),
+         '/F /IM RadiologyAgent.ReviewHost.exe', '', SW_HIDE,
+         ewWaitUntilTerminated, ResultCode);
+    Exit;
+  end;
   if CurStep <> ssPostInstall then Exit;
-  if WizardSilent then Exit;
+  if WizardSilent or HasExistingHaronexAuthorization then Exit;
   StagingPath := ExpandConstant('{localappdata}\RadiologyAgent\pending-groq.key');
   ForceDirectories(ExtractFileDir(StagingPath));
   try

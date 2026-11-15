@@ -16,7 +16,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    internal const string ReviewAlgorithmVersion="haronex-groq-qwen38-v9-5";
+    internal const string ReviewAlgorithmVersion="haronex-groq-qwen38-v10-0";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=1; Height=1;
@@ -264,7 +264,7 @@ namespace RadiologyAgent {
         var watch=Stopwatch.StartNew();
         // Four transport attempts (45 seconds each) plus 2/5/10 second backoff.
         // Longer documents may have multiple chunks. Keep a finite upper bound.
-        int maxMs=(int)Math.Min(1800000L,Math.Max(215000L,(long)count*215000L));
+        int maxMs=(int)Math.Min(2400000L,Math.Max(340000L,(long)count*340000L));
         while(!process.WaitForExit(250)) {
           if(cancellation.IsCancellationRequested) {
             KillWorkerTree(process);

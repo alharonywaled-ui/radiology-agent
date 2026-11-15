@@ -13,6 +13,7 @@
 #include <new>
 #include <cwchar>
 #include "WordLocalCleanup.h"
+#include "WordMandatoryGate.h"
 
 static const wchar_t* PROGID = L"RadiologyAgent.Word2013.Safe";
 static const wchar_t* CLSID_TEXT = L"{7B918AD1-1C42-4B73-A4BB-9FC83743DD6E}";
@@ -243,9 +244,10 @@ static void RequestReview(IDispatch* wordApplication) {
 class Agent : public IExtensibility2, public IRibbonExtensibilityNative {
   LONG refs_;
   IDispatch* wordApplication_=nullptr;
+  HaronexMandatory::Gate* mandatoryGate_=nullptr;
 public:
   Agent():refs_(1){InterlockedIncrement(&g_objects);}
-  ~Agent(){if(wordApplication_)wordApplication_->Release();InterlockedDecrement(&g_objects);}
+  ~Agent(){if(mandatoryGate_){mandatoryGate_->Detach();mandatoryGate_->Release();}if(wordApplication_)wordApplication_->Release();InterlockedDecrement(&g_objects);}
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid,void** ppv) override {
     if(!ppv)return E_POINTER;
     *ppv=nullptr;
@@ -308,12 +310,16 @@ public:
     return DISP_E_MEMBERNOTFOUND;
   }
   HRESULT STDMETHODCALLTYPE OnConnection(IDispatch* app,LONG,IDispatch*,SAFEARRAY**) override{
+    if(mandatoryGate_){mandatoryGate_->Detach();mandatoryGate_->Release();mandatoryGate_=nullptr;}
     if(wordApplication_)wordApplication_->Release();
     wordApplication_=app;
     if(wordApplication_)wordApplication_->AddRef();
+    mandatoryGate_=new(std::nothrow) HaronexMandatory::Gate();
+    if(mandatoryGate_)mandatoryGate_->Attach(wordApplication_);
     StartLiveMonitor();return S_OK;
   }
   HRESULT STDMETHODCALLTYPE OnDisconnection(LONG,SAFEARRAY**) override{
+    if(mandatoryGate_){mandatoryGate_->Detach();mandatoryGate_->Release();mandatoryGate_=nullptr;}
     if(wordApplication_){wordApplication_->Release();wordApplication_=nullptr;}
     if(g_ribbonTimer){KillTimer(nullptr,g_ribbonTimer);g_ribbonTimer=0;}
     if(g_ribbonUi){g_ribbonUi->Release();g_ribbonUi=nullptr;}
