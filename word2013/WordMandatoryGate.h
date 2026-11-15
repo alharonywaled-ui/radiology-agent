@@ -126,6 +126,10 @@ inline bool MatchingApproval(HKEY key,const wchar_t* valueName,
 }
 // A review alone is not the final release: the user also acknowledges the
 // displayed suggestions by pressing Clear Both. No suggested edit is required.
+inline bool ApprovalReady(HKEY key,const std::wstring& digest) {
+  return MatchingApproval(key,L"ApprovedHash",digest)&&
+         MatchingApproval(key,L"ClearBothV102Hash",digest);
+}
 inline bool HasReviewedHash(IDispatch* doc) {
   std::wstring path,digest;
   if(!ApprovalIdentity(doc,path,digest))return false;
@@ -144,8 +148,7 @@ inline bool Approved(IDispatch* doc) {
     return false;
   // BOTH gates must match the current revision. An old V10.1 ClearBothHash
   // alone can no longer bypass Review Text.
-  bool pass=MatchingApproval(key,L"ApprovedHash",digest)&&
-            MatchingApproval(key,L"ClearBothHash",digest);
+  bool pass=ApprovalReady(key,digest);
   RegCloseKey(key);
   return pass;
 }
@@ -161,7 +164,7 @@ inline bool AcceptClearBoth(IDispatch* doc) {
     RegCloseKey(key);
     return false;
   }
-  LONG status=RegSetValueExW(key,L"ClearBothHash",0,REG_SZ,
+  LONG status=RegSetValueExW(key,L"ClearBothV102Hash",0,REG_SZ,
       reinterpret_cast<const BYTE*>(digest.c_str()),
       static_cast<DWORD>((digest.size()+1)*sizeof(wchar_t)));
   RegCloseKey(key);
