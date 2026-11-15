@@ -217,17 +217,21 @@ public:
     identity->Release();
     return yes;
   }
-  bool ReleaseAfterClearBoth(IDispatch* doc) {
-    if(!doc||!HasReviewedHash(doc))return false;
-    // No session approval unless the review hash matches the exact content
-    // at the time of Clear Both.
-    if(!AcceptClearBoth(doc))return false;
+  bool RememberReleasedDocument(IDispatch* doc) {
+    if(!doc)return false;
     if(IsReleased(doc))return true;
     IUnknown* identity=nullptr;
     if(FAILED(doc->QueryInterface(IID_IUnknown,
               reinterpret_cast<void**>(&identity)))||!identity)return false;
     released_.push_back(identity);
     return true;
+  }
+  bool ReleaseAfterClearBoth(IDispatch* doc) {
+    if(!doc||!HasReviewedHash(doc))return false;
+    // No session approval unless the review hash matches the exact content
+    // at the time of Clear Both.
+    if(!AcceptClearBoth(doc))return false;
+    return RememberReleasedDocument(doc);
   }
   ~Gate(){Detach();}
   void Detach(){
