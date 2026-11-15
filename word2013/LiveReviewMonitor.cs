@@ -26,11 +26,12 @@ namespace RadiologyAgent {
     internal static string Identity(uint hwnd,string fullName) {
       return Digest(hwnd.ToString()+"\u001f"+fullName);
     }
-    internal static bool Approve(object document, string reviewedText) {
+    internal static bool Approve(object document, string reviewedText, uint verifiedWindow) {
       try {
         dynamic doc=document;
         string fullName=Convert.ToString(doc.FullName);
-        uint hwnd=unchecked((uint)(int)doc.ActiveWindow.Hwnd);
+        uint hwnd=verifiedWindow;
+        if(hwnd==0)return false;
         string current=Convert.ToString(doc.Content.Text);
         if(!String.Equals(current,reviewedText,StringComparison.Ordinal))return false;
         string id=Identity(hwnd,fullName),hash=Digest(current);
@@ -509,7 +510,7 @@ namespace RadiologyAgent {
             existing.Add(anchorId);
           } catch {}
         }
-        if(!MandatoryApproval.Approve(doc,currentText)) {
+        if(!MandatoryApproval.Approve(doc,currentText,unchecked((uint)hwnd))) {
           LogFailure("MANDATORY_APPROVAL_NOT_STORED");
           pendingClick=false;Notify(false);return;
         }
