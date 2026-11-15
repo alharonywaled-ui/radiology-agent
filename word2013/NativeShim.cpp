@@ -305,31 +305,18 @@ public:
     if(id==105)return CreateCleanupIcon(true,result);
     if(id==106)return CreateCleanupIcon(false,result);
     if(id==107){
-      LocalCleanup::Obj before=LocalCleanup::ActiveDocument(wordApplication_);
-      if(!before)return S_OK;
-      if(!HaronexMandatory::HasReviewedHash(before.p)) {
-        MessageBoxW(nullptr,
-          L"Please click Review Text and complete Haronex review before Clear Both.\\n"
-          L"You are not required to accept or apply the suggested corrections.",
-          L"Haronex - Review Required",MB_OK|MB_ICONWARNING|MB_TOPMOST);
-        return S_OK;
-      }
-      std::wstring oldPath,oldDigest;
-      if(!HaronexMandatory::ApprovalIdentity(before.p,oldPath,oldDigest))return S_OK;
-      // Clear comments/highlights only, never edit report text.
+      LocalCleanup::Obj doc=LocalCleanup::ActiveDocument(wordApplication_);
+      if(!doc)return S_OK;
+      // Run local cleanup, then unlock only the Word document on which the
+      // command was invoked. No Groq response or current-text comparison.
       LocalCleanup::ClearBoth(wordApplication_);
-      LocalCleanup::Obj after=LocalCleanup::ActiveDocument(wordApplication_);
-      std::wstring newPath,newDigest;
-      if(after && HaronexMandatory::ApprovalIdentity(after.p,newPath,newDigest) &&
-         newPath==oldPath && newDigest==oldDigest) {
-        // Release this actual COM Document for the rest of its Word session.
-        // Later text edits, Save As and repeated Save/Print stay permitted.
-        if(!mandatoryGate_ || !mandatoryGate_->ReleaseAfterClearBoth(after.p)) {
-          MessageBoxW(nullptr,
-            L"Haronex was unable to release this document for Save/Print. "
-            L"Please reopen the report and retry Review Text and Clear Both.",
-            L"Haronex Save/Print",MB_OK|MB_ICONWARNING);
-        }
+      if(mandatoryGate_ && mandatoryGate_->ReleaseAfterClearBoth(doc.p)) {
+        // No popup: Save, Save As and Print work normally from now onward.
+      } else {
+        MessageBoxW(nullptr,
+          L"Could not unlock this Word document. You can still save safely "
+          L"using Yes on the Save safety prompt.",
+          L"Haronex",MB_OK|MB_ICONWARNING);
       }
       return S_OK;
     }
@@ -366,7 +353,7 @@ public:
       LR"(<button id="RadiologyAgentReview" label="Review Text" size="large" getImage="ReviewIcon" onAction="ReviewTextClick"/>)"
       LR"(<button id="RadiologyAgentDeleteComments" label="Clear Comments" size="large" getImage="DeleteCommentsIcon" onAction="DeleteAllCommentsClick" screentip="Remove all comments" supertip="Delete every Word comment in the active document locally. No API call." />)"
       LR"(<button id="RadiologyAgentClearHighlights" label="Clear Highlights" size="large" getImage="ClearHighlightsIcon" onAction="ClearRedYellowClick" screentip="Remove red and yellow highlights" supertip="Remove red and yellow text highlighting from the active Word document, preserving other colors. Runs locally." />)"
-      LR"(<button id="RadiologyAgentClearBoth" label="Clear Both" size="large" getImage="ClearBothIcon" onAction="ClearBothClick" screentip="Clear comments and red/yellow highlights" supertip="After successful Review Text, remove comments and highlights to unlock Save/Print for this open document. Later edits do not require another review." />)"
+      LR"(<button id="RadiologyAgentClearBoth" label="Clear Both" size="large" getImage="ClearBothIcon" onAction="ClearBothClick" screentip="Clear comments and red/yellow highlights" supertip="Clear comments and highlights, then unlock Save, Save As and Print for this open report. No repeated review after edits." />)"
       LR"(</group></tab></tabs></ribbon></customUI>)";
     *xml=SysAllocString(ui);
     return *xml?S_OK:E_OUTOFMEMORY;
