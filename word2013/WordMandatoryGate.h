@@ -24,6 +24,14 @@ inline void DiagnosticValue(const wchar_t* name,DWORD value) {
 // Only numeric event metadata, never report content or patient information.
 inline void BeginDiagnostics() {
   DiagnosticValue(L"SaveEventCount",0);
+  DiagnosticValue(L"SaveAllowedCount",0);
+  DiagnosticValue(L"SaveBlockedCount",0);
+  DiagnosticValue(L"SaveEmergencyCount",0);
+  DiagnosticValue(L"PrintAllowedCount",0);
+  DiagnosticValue(L"PrintBlockedCount",0);
+  DiagnosticValue(L"ClearBothUnlockCount",0);
+  DiagnosticValue(L"MalformedEventCount",0);
+  DiagnosticValue(L"MissingDocumentCount",0);
   DiagnosticValue(L"PrintEventCount",0);
   DiagnosticValue(L"OtherEventCount",0);
   DiagnosticValue(L"LastEventDispId",0);
@@ -271,7 +279,10 @@ public:
   bool ReleaseAfterClearBoth(IDispatch* doc) {
     // Clear Both is the explicit unlock. Review Text is available, but never
     // a prerequisite that could trap the user without Save/Print.
-    return RememberReleasedDocument(doc);
+    if(!doc)return false;
+    bool released=RememberReleasedDocument(doc);
+    if(released)IncrementDiagnostic(L"ClearBothUnlockCount");
+    return released;
   }
   ~Gate(){Detach();}
   void Detach(){
@@ -335,25 +346,69 @@ public:
   void ConfigureEventIdsForSmokeTest(DISPID saveEvent,DISPID printEvent){
     if(!point_){save_=saveEvent;print_=printEvent;}
   }
-  // Policy is deterministic and tested independently of Word's COM runtime.
-  // Save always offers an emergency escape so unsaved patient reports cannot
-  // become trapped by a mistaken document binding.
-  static bool ShouldCancel(bool released,bool saving,bool emergencySave) {
-    return !released && (!saving || !emergencySave);
+  // The safety policy can be tested without a Word installation.
+  // The Save dialog always offers a human-operated emergency escape.
+  static bool ShouldCancel(bool unlocked,bool isSave,bool emergencySave) {
+    return !unlocked && (!isSave || !emergencySave);
   }
-  // The event dispatch IDs are looked up from Word's actual type library.
-  // Never rely on hard-coded Office DISPIDs across versions.
-  static bool EnforcementEnabled(){return false;}
+  static bool EnforcementEnabled(){return true;}
+  static bool ValidCancel(VARIANTARG& arg) {
+    if(arg.vt==(VT_BYREF|VT_BOOL)&&arg.pboolVal)return true;
+    if(arg.vt==(VT_BYREF|VT_VARIANT)&&arg.pvarVal)
+      return arg.pvarVal->vt==(VT_BYREF|VT_BOOL)&&arg.pvarVal->pboolVal;
+    return false;
+  }
   HRESULT STDMETHODCALLTYPE Invoke(DISPID dispid,REFIID,LCID,WORD,
                                    DISPPARAMS* args,VARIANT*,EXCEPINFO*,UINT*) override {
-    // Diagnostic-only build. Never change Cancel. Counts from actual Word.
+    // Retain non-sensitive V10.6 diagnostics for on-device proof.
     DiagnosticValue(L"LastEventDispId",static_cast<DWORD>(dispid));
     DiagnosticValue(L"LastEventArgCount",args?args->cArgs:0);
     DiagnosticValue(L"LastCancelArgumentType",
       args&&args->rgvarg&&args->cArgs?args->rgvarg[0].vt:0);
-    if(dispid==save_)IncrementDiagnostic(L"SaveEventCount");
-    else if(dispid==print_)IncrementDiagnostic(L"PrintEventCount");
-    else IncrementDiagnostic(L"OtherEventCount");
+    const bool saving=dispid==save_,printing=dispid==print_;
+    if(saving)IncrementDiagnostic(L"SaveEventCount");
+    else if(printing)IncrementDiagnostic(L"PrintEventCount");
+    else {IncrementDiagnostic(L"OtherEventCount");return S_OK;}
+    const UINT required=saving?3:2;
+    // Missing, malformed, or unexpected COM data must NEVER trap a report.
+    if(!args||!args->rgvarg||args->cArgs<required||
+       !ValidCancel(args->rgvarg[0])) {
+      IncrementDiagnostic(L"MalformedEventCount");
+      return S_OK;
+    }
+    IDispatch* document=nullptr;
+    if(!AsDispatch(&args->rgvarg[saving?2:1],&document)||!document) {
+      IncrementDiagnostic(L"MissingDocumentCount");
+      return S_OK;
+    }
+    const bool unlocked=IsReleased(document);
+    document->Release();
+    if(unlocked) {
+      IncrementDiagnostic(saving?L"SaveAllowedCount":L"PrintAllowedCount");
+      return S_OK;
+    }
+    if(saving) {
+      // The Word save dialog is cancellable by default, but there is ALWAYS
+      // a user-visible emergency path to preserve otherwise unsaved work.
+      int choice=MessageBoxW(nullptr,
+        L"Clear Both has not yet been clicked for this report.\\n\\n"
+        L"YES: Save now to protect this report (emergency bypass).\\n"
+        L"NO: Cancel saving and return to Word to click Clear Both.",
+        L"Haronex - Save requires Clear Both",
+        MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2|MB_TOPMOST);
+      if(ShouldCancel(false,true,choice==IDYES)) {
+        SetCancel(args->rgvarg[0]);
+        IncrementDiagnostic(L"SaveBlockedCount");
+      } else {
+        IncrementDiagnostic(L"SaveEmergencyCount");
+      }
+    } else {
+      SetCancel(args->rgvarg[0]);
+      IncrementDiagnostic(L"PrintBlockedCount");
+      MessageBoxW(nullptr,
+        L"Printing is locked. Click Clear Both in the Radiology Agent ribbon.",
+        L"Haronex - Print requires Clear Both",MB_OK|MB_ICONINFORMATION);
+    }
     return S_OK;
   }
 };
