@@ -110,16 +110,16 @@ int main(){
     wprintf(L"MANDATORY_SESSION_RELEASE_TEST_FAILED\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 38;
   }
-  // V10.7 mandatory gate policy: Cancel before Clear Both, permit after
-  // release and ALWAYS allow an explicit emergency Save override.
+  // V10.9 strict policy: no Save Now bypass before Clear Both; after release
+  // Save, Save As and Print remain enabled.
   bool policy=HaronexMandatory::Gate::EnforcementEnabled() &&
     HaronexMandatory::Gate::ShouldCancel(false,true,false) &&
     HaronexMandatory::Gate::ShouldCancel(false,false,false) &&
-    !HaronexMandatory::Gate::ShouldCancel(false,true,true) &&
+    HaronexMandatory::Gate::ShouldCancel(false,true,true) &&
     !HaronexMandatory::Gate::ShouldCancel(true,true,false) &&
     !HaronexMandatory::Gate::ShouldCancel(true,false,false);
   if(!policy) {
-    wprintf(L"V107_CLEAR_BOTH_GATE_POLICY_FAILED\n");
+    wprintf(L"V109_STRICT_CLEAR_BOTH_POLICY_FAILED\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 39;
   }
   HaronexMandatory::Gate gate;
