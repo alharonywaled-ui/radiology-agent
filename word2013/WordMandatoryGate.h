@@ -351,8 +351,10 @@ public:
   }
   // The safety policy can be tested without a Word installation.
   // The Save dialog always offers a human-operated emergency escape.
-  static bool ShouldCancel(bool unlocked,bool isSave,bool emergencySave) {
-    return !unlocked && (!isSave || !emergencySave);
+  // Strict gate: native Save, Save As and Print are all blocked until
+  // this document's Clear Both action is accepted. No Save Now bypass.
+  static bool ShouldCancel(bool unlocked,bool,bool) {
+    return !unlocked;
   }
   static bool EnforcementEnabled(){return true;}
   static bool ValidCancel(VARIANTARG& arg) {
@@ -421,18 +423,12 @@ public:
       return S_OK;
     }
     if(saving) {
-      // Yes always preserves an otherwise unsaved report, even when Clear
-      // Both was not clicked. No means go back and click Clear Both.
-      const int choice=MessageBoxW(nullptr,
-        L"Clear Both has not been clicked for this report.\n\n"
-        L"YES: Save now to protect the report.\n"
-        L"NO: Return to Word and click Clear Both.",
-        L"Haronex - Save requires Clear Both",
-        MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2|MB_TOPMOST);
-      if(ShouldCancel(false,true,choice==IDYES)) {
-        SetCancel(*cancel);
-        IncrementDiagnostic(L"SaveBlockedCount");
-      } else IncrementDiagnostic(L"SaveEmergencyCount");
+      SetCancel(*cancel);
+      IncrementDiagnostic(L"SaveBlockedCount");
+      MessageBoxW(nullptr,
+        L"Saving is locked for this report. Click Clear Both in the "
+        L"Radiology Agent ribbon to enable Save and Save As.",
+        L"Haronex - Save locked",MB_OK|MB_ICONINFORMATION);
     } else {
       SetCancel(*cancel);
       IncrementDiagnostic(L"PrintBlockedCount");
