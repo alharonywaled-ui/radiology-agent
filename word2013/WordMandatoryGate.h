@@ -12,6 +12,37 @@ namespace HaronexMandatory {
 static const IID WordEvents4 =
   {0x00020A01,0x0000,0x0000,{0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
 
+inline void DiagnosticValue(const wchar_t* name,DWORD value) {
+  HKEY key=nullptr;
+  if(RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,nullptr,0,
+                     KEY_SET_VALUE,nullptr,&key,nullptr)==ERROR_SUCCESS) {
+    RegSetValueExW(key,name,0,REG_DWORD,
+      reinterpret_cast<const BYTE*>(&value),sizeof(value));
+    RegCloseKey(key);
+  }
+}
+// Only numeric event metadata, never report content or patient information.
+inline void BeginDiagnostics() {
+  DiagnosticValue(L"SaveEventCount",0);
+  DiagnosticValue(L"PrintEventCount",0);
+  DiagnosticValue(L"OtherEventCount",0);
+  DiagnosticValue(L"LastEventDispId",0);
+  DiagnosticValue(L"LastEventArgCount",0);
+  DiagnosticValue(L"LastCancelArgumentType",0);
+  DiagnosticValue(L"SaveEventDispId",0);
+  DiagnosticValue(L"PrintEventDispId",0);
+}
+inline void IncrementDiagnostic(const wchar_t* name) {
+  HKEY key=nullptr;
+  if(RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,nullptr,0,
+                     KEY_QUERY_VALUE|KEY_SET_VALUE,nullptr,&key,nullptr)!=ERROR_SUCCESS)return;
+  DWORD count=0,sz=sizeof(count),type=0;
+  RegQueryValueExW(key,name,nullptr,&type,reinterpret_cast<BYTE*>(&count),&sz);
+  if(count<0xFFFFFFFE)++count;
+  RegSetValueExW(key,name,0,REG_DWORD,
+            reinterpret_cast<const BYTE*>(&count),sizeof(count));
+  RegCloseKey(key);
+}
 inline void HookStatus(DWORD value) {
   HKEY key=nullptr;
   if(RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,nullptr,0,
@@ -252,6 +283,7 @@ public:
   }
   bool Attach(IDispatch* app) {
     Detach();
+    BeginDiagnostics();
     if(!app)return false;
     ITypeInfo* appInfo=nullptr;ITypeLib* typeLib=nullptr;
     UINT index=0;ITypeInfo* events=nullptr;
@@ -268,6 +300,8 @@ public:
     if(typeLib)typeLib->Release();
     if(appInfo)appInfo->Release();
     if(!types)return false;
+    DiagnosticValue(L"SaveEventDispId",static_cast<DWORD>(save_));
+    DiagnosticValue(L"PrintEventDispId",static_cast<DWORD>(print_));
     IConnectionPointContainer* container=nullptr;
     if(FAILED(app->QueryInterface(IID_IConnectionPointContainer,
                     reinterpret_cast<void**>(&container))))return false;
@@ -298,7 +332,6 @@ public:
   HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID,LPOLESTR*,UINT,LCID,DISPID*) override {
     return DISP_E_UNKNOWNNAME;
   }
-  static bool EnforcementEnabled(){return true;}
   void ConfigureEventIdsForSmokeTest(DISPID saveEvent,DISPID printEvent){
     if(!point_){save_=saveEvent;print_=printEvent;}
   }
@@ -310,34 +343,17 @@ public:
   }
   // The event dispatch IDs are looked up from Word's actual type library.
   // Never rely on hard-coded Office DISPIDs across versions.
-  HRESULT STDMETHODCALLTYPE Invoke(DISPID id,REFIID,LCID,WORD,DISPPARAMS* args,
-                                   VARIANT*,EXCEPINFO*,UINT*) override {
-    bool saving=(id==save_),printing=(id==print_);
-    if(!saving&&!printing)return S_OK;
-    const UINT required=saving?3:2;
-    // Fail open for malformed/unrecognized Office event arguments.
-    if(!args||args->cArgs<required||!args->rgvarg)return S_OK;
-    VARIANTARG& cancel=args->rgvarg[0];
-    VARIANTARG& argDoc=args->rgvarg[saving?2:1];
-    IDispatch* doc=nullptr;
-    if(!AsDispatch(&argDoc,&doc)||!doc)return S_OK;
-    bool released=IsReleased(doc);
-    doc->Release();
-    if(released)return S_OK;
-    if(saving) {
-      // Explicit recovery route: Yes saves immediately and keeps the report.
-      int choice=MessageBoxW(nullptr,
-        L"Haronex: Clear Both has not yet been clicked for this report.\n\n"
-        L"Choose YES to SAVE NOW and protect your work, or NO to return "
-        L"to the report and click Clear Both.",
-        L"Haronex - Save safety",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON1);
-      if(ShouldCancel(false,true,choice==IDYES))SetCancel(cancel);
-    } else {
-      SetCancel(cancel);
-      MessageBoxW(nullptr,
-        L"To print this report, click Clear Both in the Radiology Agent tab.",
-        L"Haronex - Printing locked",MB_OK|MB_ICONINFORMATION);
-    }
+  static bool EnforcementEnabled(){return false;}
+  HRESULT STDMETHODCALLTYPE Invoke(DISPID dispid,REFIID,LCID,WORD,
+                                   DISPPARAMS* args,VARIANT*,EXCEPINFO*,UINT*) override {
+    // Diagnostic-only build. Never change Cancel. Counts from actual Word.
+    DiagnosticValue(L"LastEventDispId",static_cast<DWORD>(dispid));
+    DiagnosticValue(L"LastEventArgCount",args?args->cArgs:0);
+    DiagnosticValue(L"LastCancelArgumentType",
+      args&&args->rgvarg&&args->cArgs?args->rgvarg[0].vt:0);
+    if(dispid==save_)IncrementDiagnostic(L"SaveEventCount");
+    else if(dispid==print_)IncrementDiagnostic(L"PrintEventCount");
+    else IncrementDiagnostic(L"OtherEventCount");
     return S_OK;
   }
 };
