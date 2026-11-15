@@ -91,6 +91,23 @@ begin
     Result := '.NET Framework 4.8 is not detected after prerequisite installation. Restart Windows and rerun setup.';
 end;
 
+function HasExistingHaronexAuthorization: Boolean;
+var
+  Allowed: Cardinal;
+begin
+  Result := FileExists(ExpandConstant('{localappdata}\RadiologyAgent\groq.key.dpapi'))
+    and RegQueryDWordValue(HKCU, 'Software\Haronex', 'WebTransferAllowed', Allowed)
+    and (Allowed = 1);
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  // An in-place upgrade does not request or overwrite the user's existing
+  // DPAPI-protected key and previously granted patient-data authorization.
+  Result := HasExistingHaronexAuthorization and
+    ((PageID = KeyPage.ID) or (PageID = ConsentPage.ID));
+end;
+
 procedure InitializeWizard;
 begin
   KeyPage := CreateInputQueryPage(wpSelectDir,
@@ -130,8 +147,17 @@ var
   StagingPath: String;
   ResultCode: Integer;
 begin
+  if CurStep = ssInstall then begin
+    // Shut down the per-user persistent review monitor from an older release.
+    // Word must be closed by the user before upgrading; a new monitor is
+    // started automatically by the updated Word native COM add-in.
+    Exec(ExpandConstant('{sys}\taskkill.exe'),
+         '/F /IM RadiologyAgent.ReviewHost.exe', '', SW_HIDE,
+         ewWaitUntilTerminated, ResultCode);
+    Exit;
+  end;
   if CurStep <> ssPostInstall then Exit;
-  if WizardSilent then Exit;
+  if WizardSilent or HasExistingHaronexAuthorization then Exit;
   StagingPath := ExpandConstant('{localappdata}\RadiologyAgent\pending-groq.key');
   ForceDirectories(ExtractFileDir(StagingPath));
   try
