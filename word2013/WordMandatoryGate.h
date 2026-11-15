@@ -37,6 +37,9 @@ inline void BeginDiagnostics() {
   DiagnosticValue(L"LastEventDispId",0);
   DiagnosticValue(L"LastEventArgCount",0);
   DiagnosticValue(L"LastCancelArgumentType",0);
+  DiagnosticValue(L"LastArg0Type",0);
+  DiagnosticValue(L"LastArg1Type",0);
+  DiagnosticValue(L"LastArg2Type",0);
   DiagnosticValue(L"SaveEventDispId",0);
   DiagnosticValue(L"PrintEventDispId",0);
 }
@@ -354,59 +357,87 @@ public:
   static bool EnforcementEnabled(){return true;}
   static bool ValidCancel(VARIANTARG& arg) {
     if(arg.vt==(VT_BYREF|VT_BOOL)&&arg.pboolVal)return true;
-    if(arg.vt==(VT_BYREF|VT_VARIANT)&&arg.pvarVal)
-      return arg.pvarVal->vt==(VT_BYREF|VT_BOOL)&&arg.pvarVal->pboolVal;
+    if(arg.vt==(VT_BYREF|VT_VARIANT)&&arg.pvarVal) {
+      VARIANT* nested=arg.pvarVal;
+      return nested->vt==(VT_BYREF|VT_BOOL)&&nested->pboolVal;
+    }
     return false;
+  }
+  // Word's actual COM event on the pilot PC passed VT_DISPATCH at argument
+  // zero; the prior implementation falsely assumed reverse argument order.
+  // Match arguments by COM VARTYPE instead, with exactly one Document and one
+  // writable byref BOOL (Cancel). Ambiguous events fail open.
+  static bool IdentifyEventArguments(DISPPARAMS* args,UINT expected,
+                                     VARIANTARG** cancel,IDispatch** doc) {
+    if(!cancel||!doc)return false;
+    *cancel=nullptr;*doc=nullptr;
+    if(!args||!args->rgvarg||args->cArgs!=expected)return false;
+    for(UINT i=0;i<args->cArgs;++i) {
+      VARIANTARG& arg=args->rgvarg[i];
+      if(ValidCancel(arg)) {
+        if(*cancel){if(*doc){(*doc)->Release();*doc=nullptr;}*cancel=nullptr;return false;}
+        *cancel=&arg;
+        continue;
+      }
+      // Only accept an actual dispatch for the Word Document, never infer
+      // the identity from an unrelated flag or other event data.
+      IDispatch* candidate=nullptr;
+      if(AsDispatch(&arg,&candidate)) {
+        if(*doc){candidate->Release();(*doc)->Release();*doc=nullptr;*cancel=nullptr;return false;}
+        *doc=candidate;
+      }
+    }
+    if(!*cancel||!*doc) {
+      if(*doc){(*doc)->Release();*doc=nullptr;}
+      *cancel=nullptr;
+      return false;
+    }
+    return true;
   }
   HRESULT STDMETHODCALLTYPE Invoke(DISPID dispid,REFIID,LCID,WORD,
                                    DISPPARAMS* args,VARIANT*,EXCEPINFO*,UINT*) override {
-    // Retain non-sensitive V10.6 diagnostics for on-device proof.
     DiagnosticValue(L"LastEventDispId",static_cast<DWORD>(dispid));
     DiagnosticValue(L"LastEventArgCount",args?args->cArgs:0);
     DiagnosticValue(L"LastCancelArgumentType",
       args&&args->rgvarg&&args->cArgs?args->rgvarg[0].vt:0);
+    // Record only COM argument types, not any contents of the report.
+    DiagnosticValue(L"LastArg0Type",args&&args->rgvarg&&args->cArgs>0?args->rgvarg[0].vt:0);
+    DiagnosticValue(L"LastArg1Type",args&&args->rgvarg&&args->cArgs>1?args->rgvarg[1].vt:0);
+    DiagnosticValue(L"LastArg2Type",args&&args->rgvarg&&args->cArgs>2?args->rgvarg[2].vt:0);
     const bool saving=dispid==save_,printing=dispid==print_;
     if(saving)IncrementDiagnostic(L"SaveEventCount");
     else if(printing)IncrementDiagnostic(L"PrintEventCount");
     else {IncrementDiagnostic(L"OtherEventCount");return S_OK;}
-    const UINT required=saving?3:2;
-    // Missing, malformed, or unexpected COM data must NEVER trap a report.
-    if(!args||!args->rgvarg||args->cArgs<required||
-       !ValidCancel(args->rgvarg[0])) {
+    VARIANTARG* cancel=nullptr;
+    IDispatch* document=nullptr;
+    if(!IdentifyEventArguments(args,saving?3:2,&cancel,&document)) {
       IncrementDiagnostic(L"MalformedEventCount");
       return S_OK;
     }
-    IDispatch* document=nullptr;
-    if(!AsDispatch(&args->rgvarg[saving?2:1],&document)||!document) {
-      IncrementDiagnostic(L"MissingDocumentCount");
-      return S_OK;
-    }
-    const bool unlocked=IsReleased(document);
+    bool unlocked=IsReleased(document);
     document->Release();
     if(unlocked) {
       IncrementDiagnostic(saving?L"SaveAllowedCount":L"PrintAllowedCount");
       return S_OK;
     }
     if(saving) {
-      // The Word save dialog is cancellable by default, but there is ALWAYS
-      // a user-visible emergency path to preserve otherwise unsaved work.
-      int choice=MessageBoxW(nullptr,
-        L"Clear Both has not yet been clicked for this report.\\n\\n"
-        L"YES: Save now to protect this report (emergency bypass).\\n"
-        L"NO: Cancel saving and return to Word to click Clear Both.",
+      // Yes always preserves an otherwise unsaved report, even when Clear
+      // Both was not clicked. No means go back and click Clear Both.
+      const int choice=MessageBoxW(nullptr,
+        L"Clear Both has not been clicked for this report.\n\n"
+        L"YES: Save now to protect the report.\n"
+        L"NO: Return to Word and click Clear Both.",
         L"Haronex - Save requires Clear Both",
         MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2|MB_TOPMOST);
       if(ShouldCancel(false,true,choice==IDYES)) {
-        SetCancel(args->rgvarg[0]);
+        SetCancel(*cancel);
         IncrementDiagnostic(L"SaveBlockedCount");
-      } else {
-        IncrementDiagnostic(L"SaveEmergencyCount");
-      }
+      } else IncrementDiagnostic(L"SaveEmergencyCount");
     } else {
-      SetCancel(args->rgvarg[0]);
+      SetCancel(*cancel);
       IncrementDiagnostic(L"PrintBlockedCount");
       MessageBoxW(nullptr,
-        L"Printing is locked. Click Clear Both in the Radiology Agent ribbon.",
+        L"Printing is locked until you click Clear Both in the Radiology Agent tab.",
         L"Haronex - Print requires Clear Both",MB_OK|MB_ICONINFORMATION);
     }
     return S_OK;
