@@ -296,10 +296,14 @@ public:
     if(!args||args->cArgs<needed)return S_OK;
     VARIANTARG& cancel=args->rgvarg[0];
     VARIANTARG& document=args->rgvarg[saving?2:1];
-    IDispatch* doc=nullptr;
-    bool pass=AsDispatch(&document,&doc)&&IsReleased(doc);
-    if(doc)doc->Release();
-    if(!pass){SetCancel(cancel);ShowBlocked();}
+    // EMERGENCY FAIL-OPEN (V10.4): never veto Word's native Save,
+    // Save As, AutoSave or Print operations. Real Word 2013 COM event
+    // routing has produced false negatives despite completed review.
+    // Data-loss prevention takes priority over unverified enforcement.
+    // No COM document lookup, registry access, modal dialog or network
+    // request is permitted inside Word's save/print event callback.
+    (void)cancel;
+    (void)document;
     return S_OK;
   }
 };
