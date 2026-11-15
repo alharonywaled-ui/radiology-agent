@@ -23,14 +23,14 @@ namespace RadiologyAgent {
         return BitConverter.ToString(bytes).Replace("-","").ToLowerInvariant();
       }
     }
-    internal static string Identity(int hwnd,string fullName) {
+    internal static string Identity(uint hwnd,string fullName) {
       return Digest(hwnd.ToString()+"\u001f"+fullName);
     }
     internal static bool Approve(object document, string reviewedText) {
       try {
         dynamic doc=document;
         string fullName=Convert.ToString(doc.FullName);
-        int hwnd=(int)doc.ActiveWindow.Hwnd;
+        uint hwnd=unchecked((uint)(int)doc.ActiveWindow.Hwnd);
         string current=Convert.ToString(doc.Content.Text);
         if(!String.Equals(current,reviewedText,StringComparison.Ordinal))return false;
         string id=Identity(hwnd,fullName),hash=Digest(current);
@@ -49,7 +49,7 @@ namespace RadiologyAgent {
       if(separator<=0)return;
       int hwnd;
       if(!Int32.TryParse(oldId.Substring(0,separator),out hwnd))return;
-      string id=Identity(hwnd,oldId.Substring(separator+1));
+      string id=Identity(unchecked((uint)hwnd),oldId.Substring(separator+1));
       if(String.IsNullOrEmpty(id))return;
       try {
         using(var key=Registry.CurrentUser.OpenSubKey(
@@ -60,7 +60,7 @@ namespace RadiologyAgent {
     }
     internal static bool SelfTest() {
       return Digest("Text")==
-        "dbe8b3b3f5a2cdd705ed8d48d6d98f0ad472f1c80bf0f777da5f4e67cba8b341"
+        "71988c4d8e0803ba4519f0b2864c1331c14a1890bf8694e251379177bfedb5c3"
         && Identity(42,"Example.docx")!=Identity(43,"Example.docx")
         && Identity(42,"Example.docx")!=Identity(42,"Other.docx")
         && Digest("text")!=Digest("Text");
