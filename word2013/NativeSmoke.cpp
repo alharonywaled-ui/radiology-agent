@@ -37,26 +37,34 @@ int main(){
     wprintf(L"MANDATORY_SHA256_INCOMPATIBLE\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 35;
   }
-  // Native COM gate must accept Clear Both only when text hash matches.
+  // Gate requires BOTH completed Review Text and Clear Both for same text.
   HKEY tempKey=nullptr;
-  const wchar_t* testPath=L"Software\\Haronex\\MandatoryReviews\\NativeSmokeV10_1";
+  const wchar_t* testPath=L"Software\\Haronex\\MandatoryReviews\\NativeSmokeV10_2";
   if(RegCreateKeyExW(HKEY_CURRENT_USER,testPath,0,nullptr,0,
                      KEY_SET_VALUE|KEY_QUERY_VALUE,nullptr,&tempKey,nullptr)!=ERROR_SUCCESS) {
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 36;
   }
-  std::wstring approval=HaronexMandatory::Hash(L"unchanged test report");
-  LONG written=RegSetValueExW(tempKey,L"ClearBothHash",0,REG_SZ,
-           reinterpret_cast<const BYTE*>(approval.c_str()),
-           static_cast<DWORD>((approval.size()+1)*sizeof(wchar_t)));
-  bool matches=written==ERROR_SUCCESS &&
-      HaronexMandatory::MatchingApproval(tempKey,L"ClearBothHash",approval) &&
-      !HaronexMandatory::MatchingApproval(tempKey,L"ClearBothHash",
-                       HaronexMandatory::Hash(L"changed test report")) &&
-      !HaronexMandatory::MatchingApproval(tempKey,L"ApprovedHash",approval);
+  std::wstring reviewHash=HaronexMandatory::Hash(L"original unchanged report");
+  std::wstring editedHash=HaronexMandatory::Hash(L"edited report");
+  auto setHash=[&](const wchar_t* name,const std::wstring& hash) -> bool {
+    return RegSetValueExW(tempKey,name,0,REG_SZ,
+             reinterpret_cast<const BYTE*>(hash.c_str()),
+             static_cast<DWORD>((hash.size()+1)*sizeof(wchar_t)))==ERROR_SUCCESS;
+  };
+  bool valid=!HaronexMandatory::ApprovalReady(tempKey,reviewHash);
+  valid=valid&&setHash(L"ClearBothHash",reviewHash);
+  valid=valid&&!HaronexMandatory::ApprovalReady(tempKey,reviewHash);
+  valid=valid&&setHash(L"ApprovedHash",reviewHash);
+  valid=valid&&!HaronexMandatory::ApprovalReady(tempKey,reviewHash);
+  valid=valid&&setHash(L"ClearBothV102Hash",reviewHash);
+  valid=valid&&HaronexMandatory::ApprovalReady(tempKey,reviewHash);
+  valid=valid&&!HaronexMandatory::ApprovalReady(tempKey,editedHash);
+  valid=valid&&setHash(L"ApprovedHash",editedHash);
+  valid=valid&&!HaronexMandatory::ApprovalReady(tempKey,editedHash);
   RegCloseKey(tempKey);
   RegDeleteKeyW(HKEY_CURRENT_USER,testPath);
-  if(!matches) {
-    wprintf(L"MANDATORY_CLEAR_BOTH_HASH_TEST_FAILED\n");
+  if(!valid) {
+    wprintf(L"MANDATORY_REVIEW_THEN_CLEAR_BOTH_TEST_FAILED\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 37;
   }
   wprintf(L"NATIVE_COM_AND_RIBBON_AND_MANDATORY_HASH_OK\n");
