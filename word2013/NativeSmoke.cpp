@@ -110,25 +110,43 @@ int main(){
     wprintf(L"MANDATORY_SESSION_RELEASE_TEST_FAILED\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 38;
   }
-  // The diagnostic release must not veto Save, Save As or Print.
-  // Verify the event handler increments numeric counters but never sets Cancel.
+  // V10.7 mandatory gate policy: Cancel before Clear Both, permit after
+  // release and ALWAYS allow an explicit emergency Save override.
+  bool policy=HaronexMandatory::Gate::EnforcementEnabled() &&
+    HaronexMandatory::Gate::ShouldCancel(false,true,false) &&
+    HaronexMandatory::Gate::ShouldCancel(false,false,false) &&
+    !HaronexMandatory::Gate::ShouldCancel(false,true,true) &&
+    !HaronexMandatory::Gate::ShouldCancel(true,true,false) &&
+    !HaronexMandatory::Gate::ShouldCancel(true,false,false);
+  if(!policy) {
+    wprintf(L"V107_CLEAR_BOTH_GATE_POLICY_FAILED\n");
+    SysFreeString(xml);ribbon->Release();CoUninitialize();return 39;
+  }
   HaronexMandatory::Gate gate;
   gate.ConfigureEventIdsForSmokeTest(101,102);
+  FakeDoc* reviewed=new FakeDoc();
+  FakeDoc* other=new FakeDoc();
+  bool separated=gate.ReleaseAfterClearBoth(reviewed) &&
+    gate.IsReleased(reviewed) && !gate.IsReleased(other);
   VARIANT_BOOL cancel=VARIANT_FALSE;
   VARIANTARG argv[3];for(int i=0;i<3;++i)VariantInit(&argv[i]);
   argv[0].vt=VT_BYREF|VT_BOOL;argv[0].pboolVal=&cancel;
-  DISPPARAMS args={argv,nullptr,3,0};
-  bool diagnostic=!HaronexMandatory::Gate::EnforcementEnabled() &&
-    SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
-                          &args,nullptr,nullptr,nullptr)) &&
-    cancel==VARIANT_FALSE;
-  diagnostic=diagnostic&&
-    SUCCEEDED(gate.Invoke(102,IID_NULL,0,DISPATCH_METHOD,
-                          &args,nullptr,nullptr,nullptr)) &&
-    cancel==VARIANT_FALSE;
-  if(!diagnostic) {
-    wprintf(L"WORD_EVENT_DIAGNOSTIC_FAILOPEN_TEST_FAILED\n");
-    SysFreeString(xml);ribbon->Release();CoUninitialize();return 39;
+  argv[1].vt=VT_BOOL;argv[1].boolVal=VARIANT_FALSE;
+  argv[2].vt=VT_DISPATCH;argv[2].pdispVal=reviewed;
+  DISPPARAMS saveArgs={argv,nullptr,3,0};
+  bool saved=SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
+                      &saveArgs,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
+  argv[1].vt=VT_DISPATCH;argv[1].pdispVal=reviewed;
+  DISPPARAMS printArgs={argv,nullptr,2,0};
+  bool printed=SUCCEEDED(gate.Invoke(102,IID_NULL,0,DISPATCH_METHOD,
+                      &printArgs,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
+  DISPPARAMS malformed={nullptr,nullptr,0,0};
+  bool safe=SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
+                      &malformed,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
+  gate.Detach();reviewed->Release();other->Release();
+  if(!separated||!saved||!printed||!safe) {
+    wprintf(L"V107_WORD_EVENT_RELEASE_FAILED\n");
+    SysFreeString(xml);ribbon->Release();CoUninitialize();return 40;
   }
   wprintf(L"NATIVE_COM_AND_RIBBON_AND_MANDATORY_HASH_OK\n");
   SysFreeString(xml);ribbon->Release();CoUninitialize();return 0;
