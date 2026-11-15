@@ -349,7 +349,7 @@ def self_test():
         def read(self, limit):
             return b'{"error":{"message":"unsupported reasoning effort"}}'
     assert classify_http_400(FakeError()) == "GROQ_REQUEST_400_REASONING"
-    assert "Haronex-Radiology-Agent/9.5" in str(api_review.__code__.co_consts)
+    assert "Haronex-Radiology-Agent/10.0" in str(api_review.__code__.co_consts)
     assert MAX_COMPLETION_TOKENS == 8192
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
