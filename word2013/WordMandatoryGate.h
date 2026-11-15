@@ -102,22 +102,51 @@ inline std::wstring Hash(const std::wstring& source) {
   for(BYTE x:digest){out+=digits[x>>4];out+=digits[x&15];}
   return out;
 }
-inline bool Approved(IDispatch* doc) {
+// Approval scope is the exact Word document/window + exact document text.
+// A Clear Both acceptance is explicitly distinguished from a Groq review.
+inline bool ApprovalIdentity(IDispatch* doc,std::wstring& registryPath,
+                            std::wstring& textDigest) {
   std::wstring name,text;
   DWORD hwnd=0;
   if(!ReadDocument(doc,name,text,hwnd)||text.empty())return false;
   std::wstring identity=std::to_wstring(hwnd)+L"\x001f"+name;
-  std::wstring keyDigest=Hash(identity),textDigest=Hash(text);
+  std::wstring keyDigest=Hash(identity);
+  textDigest=Hash(text);
   if(keyDigest.empty()||textDigest.empty())return false;
-  std::wstring path=L"Software\\Haronex\\MandatoryReviews\\"+keyDigest;
-  HKEY key=nullptr;
-  if(RegOpenKeyExW(HKEY_CURRENT_USER,path.c_str(),0,KEY_QUERY_VALUE,&key)!=ERROR_SUCCESS)
-    return false;
-  wchar_t result[80]={0};DWORD type=0,size=sizeof(result);
-  LONG status=RegQueryValueExW(key,L"ApprovedHash",nullptr,&type,
-                              reinterpret_cast<BYTE*>(result),&size);
-  RegCloseKey(key);
+  registryPath=L"Software\\Haronex\\MandatoryReviews\\"+keyDigest;
+  return true;
+}
+inline bool MatchingApproval(HKEY key,const wchar_t* valueName,
+                             const std::wstring& textDigest) {
+  wchar_t result[80]={0};
+  DWORD type=0,size=sizeof(result);
+  LONG status=RegQueryValueExW(key,valueName,nullptr,&type,
+                               reinterpret_cast<BYTE*>(result),&size);
   return status==ERROR_SUCCESS&&type==REG_SZ&&textDigest==result;
+}
+inline bool Approved(IDispatch* doc) {
+  std::wstring registryPath,textDigest;
+  if(!ApprovalIdentity(doc,registryPath,textDigest))return false;
+  HKEY key=nullptr;
+  if(RegOpenKeyExW(HKEY_CURRENT_USER,registryPath.c_str(),0,KEY_QUERY_VALUE,&key)!=ERROR_SUCCESS)
+    return false;
+  bool pass=MatchingApproval(key,L"ApprovedHash",textDigest)||
+            MatchingApproval(key,L"ClearBothHash",textDigest);
+  RegCloseKey(key);
+  return pass;
+}
+inline bool AcceptClearBoth(IDispatch* doc) {
+  std::wstring registryPath,textDigest;
+  if(!ApprovalIdentity(doc,registryPath,textDigest))return false;
+  HKEY key=nullptr;
+  if(RegCreateKeyExW(HKEY_CURRENT_USER,registryPath.c_str(),0,nullptr,0,
+                     KEY_SET_VALUE,nullptr,&key,nullptr)!=ERROR_SUCCESS)return false;
+  // Clear Both grants Save/Print only for the unmodified current text.
+  LONG status=RegSetValueExW(key,L"ClearBothHash",0,REG_SZ,
+      reinterpret_cast<const BYTE*>(textDigest.c_str()),
+      static_cast<DWORD>((textDigest.size()+1)*sizeof(wchar_t)));
+  RegCloseKey(key);
+  return status==ERROR_SUCCESS;
 }
 inline void SetCancel(VARIANTARG& arg) {
   if(arg.vt==(VT_BYREF|VT_BOOL)&&arg.pboolVal)
