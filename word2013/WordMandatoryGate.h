@@ -6,6 +6,7 @@
 #include <ocidl.h>
 #include <wincrypt.h>
 #include <string>
+#include <vector>
 
 namespace HaronexMandatory {
 static const IID WordEvents4 =
@@ -106,10 +107,17 @@ inline std::wstring Hash(const std::wstring& source) {
 // A Clear Both acceptance is explicitly distinguished from a Groq review.
 inline bool ApprovalIdentity(IDispatch* doc,std::wstring& registryPath,
                             std::wstring& textDigest) {
+  // Document.ActiveWindow.Hwnd is unreliable and caused false Save/Print
+  // rejections. Bind the initial review to the Word process and FullName,
+  // validating the exact current text on the Review/Clear Both handshake.
   std::wstring name,text;
-  DWORD hwnd=0;
-  if(!ReadDocument(doc,name,text,hwnd)||text.empty())return false;
-  std::wstring identity=std::to_wstring(hwnd)+L"\x001f"+name;
+  if(!ReadString(doc,L"FullName",name)||name.empty())return false;
+  IDispatch* range=nullptr;
+  if(!ReadDispatch(doc,L"Content",&range))return false;
+  bool read=ReadString(range,L"Text",text);
+  range->Release();
+  if(!read||text.empty())return false;
+  std::wstring identity=std::to_wstring(GetCurrentProcessId())+L"\x001f"+name;
   std::wstring keyDigest=Hash(identity);
   textDigest=Hash(text);
   if(keyDigest.empty()||textDigest.empty())return false;
@@ -128,7 +136,7 @@ inline bool MatchingApproval(HKEY key,const wchar_t* valueName,
 // displayed suggestions by pressing Clear Both. No suggested edit is required.
 inline bool ApprovalReady(HKEY key,const std::wstring& digest) {
   return MatchingApproval(key,L"ApprovedHash",digest)&&
-         MatchingApproval(key,L"ClearBothV102Hash",digest);
+         MatchingApproval(key,L"ClearBothV103Hash",digest);
 }
 inline bool HasReviewedHash(IDispatch* doc) {
   std::wstring path,digest;
@@ -164,7 +172,7 @@ inline bool AcceptClearBoth(IDispatch* doc) {
     RegCloseKey(key);
     return false;
   }
-  LONG status=RegSetValueExW(key,L"ClearBothV102Hash",0,REG_SZ,
+  LONG status=RegSetValueExW(key,L"ClearBothV103Hash",0,REG_SZ,
       reinterpret_cast<const BYTE*>(digest.c_str()),
       static_cast<DWORD>((digest.size()+1)*sizeof(wchar_t)));
   RegCloseKey(key);
@@ -183,8 +191,8 @@ inline void SetCancel(VARIANTARG& arg) {
 inline void ShowBlocked() {
   MessageBoxW(nullptr,
       L"Haronex: Complete Review Text, then click Clear Both before Save or Print.\n"
-      L"Correcting suggestions is optional; changes require another Review Text.\n"
-      L"Review Text must succeed for the current report revision.",
+      L"Corrections are optional. After Review Text and Clear Both, editing is allowed.\n"
+      L"Once unlocked, this open document can be saved and printed normally.",
       L"Haronex Mandatory Review",MB_OK|MB_ICONWARNING|MB_TOPMOST);
 }
 
@@ -194,9 +202,41 @@ class Gate : public IDispatch {
   IConnectionPoint* point_=nullptr;
   DWORD cookie_=0;
   DISPID save_=-1,print_=-1;
+  // Canonical COM IUnknown identity is stable across document edits and
+  // Save As. These are in-memory, per-Word-instance approvals; never persisted
+  // or shared with another open document.
+  std::vector<IUnknown*> released_;
 public:
+  bool IsReleased(IDispatch* doc) const {
+    if(!doc)return false;
+    IUnknown* identity=nullptr;
+    if(FAILED(doc->QueryInterface(IID_IUnknown,
+              reinterpret_cast<void**>(&identity)))||!identity)return false;
+    bool yes=false;
+    for(auto* item:released_)if(item==identity){yes=true;break;}
+    identity->Release();
+    return yes;
+  }
+  bool RememberReleasedDocument(IDispatch* doc) {
+    if(!doc)return false;
+    if(IsReleased(doc))return true;
+    IUnknown* identity=nullptr;
+    if(FAILED(doc->QueryInterface(IID_IUnknown,
+              reinterpret_cast<void**>(&identity)))||!identity)return false;
+    released_.push_back(identity);
+    return true;
+  }
+  bool ReleaseAfterClearBoth(IDispatch* doc) {
+    if(!doc||!HasReviewedHash(doc))return false;
+    // No session approval unless the review hash matches the exact content
+    // at the time of Clear Both.
+    if(!AcceptClearBoth(doc))return false;
+    return RememberReleasedDocument(doc);
+  }
   ~Gate(){Detach();}
   void Detach(){
+    for(auto* item:released_)if(item)item->Release();
+    released_.clear();
     if(point_){if(cookie_)point_->Unadvise(cookie_);point_->Release();}
     point_=nullptr;cookie_=0;HookStatus(0);
   }
@@ -257,7 +297,7 @@ public:
     VARIANTARG& cancel=args->rgvarg[0];
     VARIANTARG& document=args->rgvarg[saving?2:1];
     IDispatch* doc=nullptr;
-    bool pass=AsDispatch(&document,&doc)&&Approved(doc);
+    bool pass=AsDispatch(&document,&doc)&&IsReleased(doc);
     if(doc)doc->Release();
     if(!pass){SetCancel(cancel);ShowBlocked();}
     return S_OK;

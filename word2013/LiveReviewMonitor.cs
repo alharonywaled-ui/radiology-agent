@@ -23,18 +23,22 @@ namespace RadiologyAgent {
         return BitConverter.ToString(bytes).Replace("-","").ToLowerInvariant();
       }
     }
-    internal static string Identity(uint hwnd,string fullName) {
-      return Digest(hwnd.ToString()+"\u001f"+fullName);
+    [DllImport("user32.dll", SetLastError=true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint processId);
+    internal static string Identity(uint processId,string fullName) {
+      return Digest(processId.ToString()+"\u001f"+fullName);
     }
     internal static bool Approve(object document, string reviewedText, uint verifiedWindow) {
       try {
         dynamic doc=document;
         string fullName=Convert.ToString(doc.FullName);
-        uint hwnd=verifiedWindow;
-        if(hwnd==0)return false;
+        if(verifiedWindow==0)return false;
+        uint processId;
+        if(GetWindowThreadProcessId(new IntPtr(unchecked((int)verifiedWindow)),out processId)==0
+            ||processId==0)return false;
         string current=Convert.ToString(doc.Content.Text);
         if(!String.Equals(current,reviewedText,StringComparison.Ordinal))return false;
-        string id=Identity(hwnd,fullName),hash=Digest(current);
+        string id=Identity(processId,fullName),hash=Digest(current);
         if(String.IsNullOrEmpty(id)||String.IsNullOrEmpty(hash))return false;
         using(var key=Registry.CurrentUser.CreateSubKey(
                   @"Software\Haronex\MandatoryReviews\"+id)) {
@@ -42,28 +46,17 @@ namespace RadiologyAgent {
           // Each new successful review needs a subsequent Clear Both action.
           key.DeleteValue("ClearBothHash",false);
           key.DeleteValue("ClearBothV102Hash",false);
+          key.DeleteValue("ClearBothV103Hash",false);
           key.SetValue("ApprovedHash",hash,RegistryValueKind.String);
         }
         return true;
       } catch {return false;}
     }
+    // A successful review is a one-time gate for the open document. We do
+    // not revoke access on subsequent edits. Native Word COM session tracks
+    // the released document after Clear Both, even across Save As.
     internal static void Invalidate(string oldId) {
-      if(String.IsNullOrEmpty(oldId))return;
-      int separator=oldId.IndexOf('|');
-      if(separator<=0)return;
-      int hwnd;
-      if(!Int32.TryParse(oldId.Substring(0,separator),out hwnd))return;
-      string id=Identity(unchecked((uint)hwnd),oldId.Substring(separator+1));
-      if(String.IsNullOrEmpty(id))return;
-      try {
-        using(var key=Registry.CurrentUser.OpenSubKey(
-                  @"Software\Haronex\MandatoryReviews\"+id,true)) {
-          if(key!=null) {
-            key.DeleteValue("ApprovedHash",false);
-            key.DeleteValue("ClearBothHash",false);
-          }
-        }
-      } catch {}
+      // Intentional no-op: text edits must never re-lock an approved document.
     }
     internal static bool SelfTest() {
       return Digest("Text")==
