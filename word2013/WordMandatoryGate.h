@@ -299,6 +299,9 @@ public:
     return DISP_E_UNKNOWNNAME;
   }
   static bool EnforcementEnabled(){return true;}
+  void ConfigureEventIdsForSmokeTest(DISPID saveEvent,DISPID printEvent){
+    if(!point_){save_=saveEvent;print_=printEvent;}
+  }
   // Policy is deterministic and tested independently of Word's COM runtime.
   // Save always offers an emergency escape so unsaved patient reports cannot
   // become trapped by a mistaken document binding.
