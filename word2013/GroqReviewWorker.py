@@ -9,7 +9,7 @@ import email.utils
 import datetime
 
 MODEL = "qwen/qwen3.8-27b"
-RETRY_DELAYS = (2, 5, 10)  # At most 3 retries; never retry generic HTTP 400.
+RETRY_DELAYS = (2, 6, 15)  # Bounded exponential backoff, four total HTTP attempts.
 MAX_COMPLETION_TOKENS = 8192
 MIN_SPLIT_CHARS = 600
 MAX_SPLIT_DEPTH = 3
@@ -194,7 +194,7 @@ def retry_after_seconds(headers):
 
 def transport_request(req, open_url=urllib.request.urlopen):
     try:
-        with open_url(req, timeout=45) as response:
+        with open_url(req, timeout=70) as response:
             return response.read(3 * 1024 * 1024)
     except urllib.error.HTTPError as exc:
         code = exc.code
@@ -206,9 +206,13 @@ def transport_request(req, open_url=urllib.request.urlopen):
             raise ReviewFailure("GROQ_FORBIDDEN_403")
         if code == 404:
             raise ReviewFailure("GROQ_MODEL_404")
+        if code == 499:
+            raise ReviewFailure("GROQ_CLIENT_DISCONNECTED", True)
         if code == 408 or code == 429:
             raise ReviewFailure("GROQ_HTTP_" + str(code), True, retry_after_seconds(exc.headers))
-        if code in (500, 502, 503, 504):
+        if code == 503:
+            raise ReviewFailure("GROQ_SERVER_OVER_CAPACITY", True, retry_after_seconds(exc.headers))
+        if code in (500, 502, 504):
             raise ReviewFailure("GROQ_HTTP_" + str(code), True, retry_after_seconds(exc.headers))
         raise ReviewFailure("GROQ_HTTP_" + str(code))
     except (urllib.error.URLError, TimeoutError, ConnectionError):
@@ -231,7 +235,7 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep):
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json",
                  "Accept": "application/json",
-                 "User-Agent": "Haronex-Radiology-Agent/9.5"})
+                 "User-Agent": "Haronex-Radiology-Agent/10.0"})
     # Semantic format errors get only one additional fresh response.
     # HTTP 400/auth/content filtering or clinical safety failures are never retried.
     recoverable_formats = {
@@ -309,7 +313,7 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v9-5":
+        if version != "haronex-groq-qwen38-v10-0":
             raise ValueError("Unsupported review version")
         groups = [review_with_recovery(key, text) for text in texts]
         print(json.dumps({"ok": True, "mode": "groq", "passes": 1,
@@ -329,7 +333,8 @@ def main():
                       "GROQ_INVALID_QUOTE", "GROQ_INVALID_CATEGORY",
                       "GROQ_INVALID_WORDING", "GROQ_ALL_ISSUES_INVALID",
                       "GROQ_HTTP_408", "GROQ_HTTP_429", "GROQ_HTTP_500",
-                      "GROQ_HTTP_502", "GROQ_HTTP_503", "GROQ_HTTP_504"}
+                      "GROQ_HTTP_502", "GROQ_HTTP_503", "GROQ_HTTP_504",
+                      "GROQ_SERVER_OVER_CAPACITY", "GROQ_CLIENT_DISCONNECTED"}
         code = message if (message in safe_codes or message.startswith("GROQ_REQUEST_400_")) else "WORKER_" + type(exc).__name__.upper()
         print(json.dumps({"ok": False, "error": code}))
 
@@ -364,7 +369,7 @@ def self_test():
             raise ReviewFailure("GROQ_HTTP_503", True)
         return fake_response
     assert api_review("gsk_dummy", sample, flaky, delays.append) == []
-    assert len(called) == 3 and delays == [2, 5]
+    assert len(called) == 3 and delays == [2, 6]
     called.clear()
     def invalid(request):
         called.append(1)
@@ -383,8 +388,28 @@ def self_test():
         api_review("gsk_dummy", sample, limited, delays.append)
         raise AssertionError("retry limit was not enforced")
     except ReviewFailure:
-        assert len(called) == 4 and delays == [4, 5, 10]
+        assert len(called) == 4 and delays == [4, 6, 15]
     assert retry_after_seconds({"Retry-After": "999"}) == 30
+    from io import BytesIO
+    class Http503(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__(ENDPOINT, 503, "Service unavailable", {}, BytesIO(b'{"error":{"message":"over capacity"}}'))
+    def capacity_url(req, timeout=70):
+        assert timeout == 70
+        raise Http503()
+    try:
+        transport_request(None, capacity_url)
+        raise AssertionError("503 treated as successful")
+    except ReviewFailure as exc:
+        assert exc.code == "GROQ_SERVER_OVER_CAPACITY" and exc.retryable
+    class Http499(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__(ENDPOINT, 499, "Client disconnected", {}, BytesIO(b'{}'))
+    try:
+        transport_request(None, lambda req, timeout=70: (_ for _ in ()).throw(Http499()))
+        raise AssertionError("499 treated as success")
+    except ReviewFailure as exc:
+        assert exc.code == "GROQ_CLIENT_DISCONNECTED" and exc.retryable
     # Adaptive split: failed parent, two successful halves. Preserve exact text.
     long_sample = ("FINDINGS: Normal right kidney.\n" * 70) + "IMPRESSION: Normal right kidney."
     seen = []
