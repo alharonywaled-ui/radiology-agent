@@ -110,20 +110,44 @@ int main(){
     wprintf(L"MANDATORY_SESSION_RELEASE_TEST_FAILED\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 38;
   }
-  // Regression: even a malformed or unknown Word Save/Print event MUST NOT
-  // toggle Cancel or block the user's unsaved document.
+  // Mandatory policy: before Clear Both printing is locked. Saving is
+  // locked by default but has a YES emergency escape for unsaved reports.
+  bool policy=HaronexMandatory::Gate::EnforcementEnabled() &&
+    HaronexMandatory::Gate::ShouldCancel(false,false,false) &&
+    HaronexMandatory::Gate::ShouldCancel(false,true,false) &&
+    !HaronexMandatory::Gate::ShouldCancel(false,true,true) &&
+    !HaronexMandatory::Gate::ShouldCancel(true,true,false) &&
+    !HaronexMandatory::Gate::ShouldCancel(true,false,false);
+  if(!policy) {
+    wprintf(L"MANDATORY_CLEAR_BOTH_POLICY_FAILED\n");
+    SysFreeString(xml);ribbon->Release();CoUninitialize();return 39;
+  }
+  // Released actual Word document event must pass through without any popup.
+  // A missing/corrupted Word event argument also fails open (no data loss).
   HaronexMandatory::Gate gate;
+  gate.ConfigureEventIdsForSmokeTest(101,102);
+  FakeDoc* releasedDoc=new FakeDoc();
+  FakeDoc* otherDoc=new FakeDoc();
+  bool isolated=gate.RememberReleasedDocument(releasedDoc) &&
+      gate.IsReleased(releasedDoc) && !gate.IsReleased(otherDoc);
   VARIANT_BOOL cancel=VARIANT_FALSE;
   VARIANTARG argv[3];for(int i=0;i<3;++i)VariantInit(&argv[i]);
   argv[0].vt=VT_BYREF|VT_BOOL;argv[0].pboolVal=&cancel;
-  DISPPARAMS eventArgs={argv,nullptr,3,0};
-  bool failOpen=!HaronexMandatory::Gate::EnforcementEnabled() &&
-      SUCCEEDED(gate.Invoke(1,IID_NULL,0,DISPATCH_METHOD,
-                            &eventArgs,nullptr,nullptr,nullptr)) &&
-      cancel==VARIANT_FALSE;
-  if(!failOpen) {
-    wprintf(L"SAVE_PRINT_FAILOPEN_TEST_FAILED\n");
-    SysFreeString(xml);ribbon->Release();CoUninitialize();return 39;
+  argv[1].vt=VT_BOOL;argv[1].boolVal=VARIANT_FALSE;
+  argv[2].vt=VT_DISPATCH;argv[2].pdispVal=releasedDoc;
+  DISPPARAMS saveArgs={argv,nullptr,3,0};
+  bool saved=SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
+                     &saveArgs,nullptr,nullptr,nullptr)) && cancel==VARIANT_FALSE;
+  argv[1].vt=VT_DISPATCH;argv[1].pdispVal=releasedDoc;
+  DISPPARAMS printArgs={argv,nullptr,2,0};
+  bool printed=SUCCEEDED(gate.Invoke(102,IID_NULL,0,DISPATCH_METHOD,
+                     &printArgs,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
+  bool failOpen=SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
+                     nullptr,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
+  gate.Detach();releasedDoc->Release();otherDoc->Release();
+  if(!isolated||!saved||!printed||!failOpen) {
+    wprintf(L"MANDATORY_CLEAR_BOTH_EVENT_TEST_FAILED\n");
+    SysFreeString(xml);ribbon->Release();CoUninitialize();return 40;
   }
   wprintf(L"NATIVE_COM_AND_RIBBON_AND_MANDATORY_HASH_OK\n");
   SysFreeString(xml);ribbon->Release();CoUninitialize();return 0;

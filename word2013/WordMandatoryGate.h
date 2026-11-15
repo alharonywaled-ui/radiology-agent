@@ -206,6 +206,7 @@ class Gate : public IDispatch {
   // Save As. These are in-memory, per-Word-instance approvals; never persisted
   // or shared with another open document.
   std::vector<IUnknown*> released_;
+  std::vector<std::wstring> releasedNames_;
 public:
   bool IsReleased(IDispatch* doc) const {
     if(!doc)return false;
@@ -215,6 +216,13 @@ public:
     bool yes=false;
     for(auto* item:released_)if(item==identity){yes=true;break;}
     identity->Release();
+    if(!yes) {
+      std::wstring name;
+      if(ReadString(doc,L"FullName",name)&&!name.empty()) {
+        for(const auto& item:releasedNames_)
+          if(_wcsicmp(item.c_str(),name.c_str())==0){yes=true;break;}
+      }
+    }
     return yes;
   }
   bool RememberReleasedDocument(IDispatch* doc) {
@@ -224,19 +232,21 @@ public:
     if(FAILED(doc->QueryInterface(IID_IUnknown,
               reinterpret_cast<void**>(&identity)))||!identity)return false;
     released_.push_back(identity);
+    std::wstring name;
+    if(ReadString(doc,L"FullName",name)&&!name.empty())
+      releasedNames_.push_back(name);
     return true;
   }
   bool ReleaseAfterClearBoth(IDispatch* doc) {
-    if(!doc||!HasReviewedHash(doc))return false;
-    // No session approval unless the review hash matches the exact content
-    // at the time of Clear Both.
-    if(!AcceptClearBoth(doc))return false;
+    // Clear Both is the explicit unlock. Review Text is available, but never
+    // a prerequisite that could trap the user without Save/Print.
     return RememberReleasedDocument(doc);
   }
   ~Gate(){Detach();}
   void Detach(){
     for(auto* item:released_)if(item)item->Release();
     released_.clear();
+    releasedNames_.clear();
     if(point_){if(cookie_)point_->Unadvise(cookie_);point_->Release();}
     point_=nullptr;cookie_=0;HookStatus(0);
   }
@@ -288,12 +298,46 @@ public:
   HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID,LPOLESTR*,UINT,LCID,DISPID*) override {
     return DISP_E_UNKNOWNNAME;
   }
-  static bool EnforcementEnabled(){return false;}
-  HRESULT STDMETHODCALLTYPE Invoke(DISPID,REFIID,LCID,WORD,DISPPARAMS*,
+  static bool EnforcementEnabled(){return true;}
+  void ConfigureEventIdsForSmokeTest(DISPID saveEvent,DISPID printEvent){
+    if(!point_){save_=saveEvent;print_=printEvent;}
+  }
+  // Policy is deterministic and tested independently of Word's COM runtime.
+  // Save always offers an emergency escape so unsaved patient reports cannot
+  // become trapped by a mistaken document binding.
+  static bool ShouldCancel(bool released,bool saving,bool emergencySave) {
+    return !released && (!saving || !emergencySave);
+  }
+  // The event dispatch IDs are looked up from Word's actual type library.
+  // Never rely on hard-coded Office DISPIDs across versions.
+  HRESULT STDMETHODCALLTYPE Invoke(DISPID id,REFIID,LCID,WORD,DISPPARAMS* args,
                                    VARIANT*,EXCEPINFO*,UINT*) override {
-    // V10.4 emergency data-preservation mode: NEVER set Word's Cancel.
-    // Save, Save As and Print events are advisory only until a real Word
-    // integration suite validates reliable document association.
+    bool saving=(id==save_),printing=(id==print_);
+    if(!saving&&!printing)return S_OK;
+    const UINT required=saving?3:2;
+    // Fail open for malformed/unrecognized Office event arguments.
+    if(!args||args->cArgs<required||!args->rgvarg)return S_OK;
+    VARIANTARG& cancel=args->rgvarg[0];
+    VARIANTARG& argDoc=args->rgvarg[saving?2:1];
+    IDispatch* doc=nullptr;
+    if(!AsDispatch(&argDoc,&doc)||!doc)return S_OK;
+    bool released=IsReleased(doc);
+    doc->Release();
+    if(released)return S_OK;
+    if(saving) {
+      // Explicit recovery route: Yes saves immediately and keeps the report.
+      int choice=MessageBoxW(nullptr,
+        L"Haronex: Clear Both has not yet been clicked for this report.\n\n"
+        L"Choose YES to SAVE NOW and protect your work, or NO to return "
+        L"to the report and click Clear Both.",
+        L"Haronex - Save safety",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON1);
+      if(ShouldCancel(false,true,choice==IDYES))SetCancel(cancel);
+    } else {
+      SetCancel(cancel);
+      MessageBoxW(nullptr,
+        L"To print this report, click Clear Both in the Radiology Agent tab.",
+        L"Haronex - Printing locked",MB_OK|MB_ICONINFORMATION);
+    }
     return S_OK;
   }
 };
