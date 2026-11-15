@@ -124,26 +124,26 @@ int main(){
   }
   HaronexMandatory::Gate gate;
   gate.ConfigureEventIdsForSmokeTest(101,102);
-  FakeDoc* reviewed=new FakeDoc();
+  FakeDoc* releasedForTest=new FakeDoc();
   FakeDoc* other=new FakeDoc();
-  bool separated=gate.ReleaseAfterClearBoth(reviewed) &&
-    gate.IsReleased(reviewed) && !gate.IsReleased(other);
+  bool separated=gate.ReleaseAfterClearBoth(releasedForTest) &&
+    gate.IsReleased(releasedForTest) && !gate.IsReleased(other);
   VARIANT_BOOL cancel=VARIANT_FALSE;
   VARIANTARG argv[3];for(int i=0;i<3;++i)VariantInit(&argv[i]);
   argv[0].vt=VT_BYREF|VT_BOOL;argv[0].pboolVal=&cancel;
   argv[1].vt=VT_BOOL;argv[1].boolVal=VARIANT_FALSE;
-  argv[2].vt=VT_DISPATCH;argv[2].pdispVal=reviewed;
+  argv[2].vt=VT_DISPATCH;argv[2].pdispVal=releasedForTest;
   DISPPARAMS saveArgs={argv,nullptr,3,0};
   bool saved=SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
                       &saveArgs,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
-  argv[1].vt=VT_DISPATCH;argv[1].pdispVal=reviewed;
+  argv[1].vt=VT_DISPATCH;argv[1].pdispVal=releasedForTest;
   DISPPARAMS printArgs={argv,nullptr,2,0};
   bool printed=SUCCEEDED(gate.Invoke(102,IID_NULL,0,DISPATCH_METHOD,
                       &printArgs,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
   DISPPARAMS malformed={nullptr,nullptr,0,0};
   bool safe=SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
                       &malformed,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
-  gate.Detach();reviewed->Release();other->Release();
+  gate.Detach();releasedForTest->Release();other->Release();
   if(!separated||!saved||!printed||!safe) {
     wprintf(L"V107_WORD_EVENT_RELEASE_FAILED\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 40;
