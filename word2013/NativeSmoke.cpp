@@ -37,6 +37,28 @@ int main(){
     wprintf(L"MANDATORY_SHA256_INCOMPATIBLE\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 35;
   }
+  // Native COM gate must accept Clear Both only when text hash matches.
+  HKEY tempKey=nullptr;
+  const wchar_t* testPath=L"Software\\Haronex\\MandatoryReviews\\NativeSmokeV10_1";
+  if(RegCreateKeyExW(HKEY_CURRENT_USER,testPath,0,nullptr,0,
+                     KEY_SET_VALUE|KEY_QUERY_VALUE,nullptr,&tempKey,nullptr)!=ERROR_SUCCESS) {
+    SysFreeString(xml);ribbon->Release();CoUninitialize();return 36;
+  }
+  std::wstring approval=HaronexMandatory::Hash(L"unchanged test report");
+  LONG written=RegSetValueExW(tempKey,L"ClearBothHash",0,REG_SZ,
+           reinterpret_cast<const BYTE*>(approval.c_str()),
+           static_cast<DWORD>((approval.size()+1)*sizeof(wchar_t)));
+  bool matches=written==ERROR_SUCCESS &&
+      HaronexMandatory::MatchingApproval(tempKey,L"ClearBothHash",approval) &&
+      !HaronexMandatory::MatchingApproval(tempKey,L"ClearBothHash",
+                       HaronexMandatory::Hash(L"changed test report")) &&
+      !HaronexMandatory::MatchingApproval(tempKey,L"ApprovedHash",approval);
+  RegCloseKey(tempKey);
+  RegDeleteKeyW(HKEY_CURRENT_USER,testPath);
+  if(!matches) {
+    wprintf(L"MANDATORY_CLEAR_BOTH_HASH_TEST_FAILED\n");
+    SysFreeString(xml);ribbon->Release();CoUninitialize();return 37;
+  }
   wprintf(L"NATIVE_COM_AND_RIBBON_AND_MANDATORY_HASH_OK\n");
   SysFreeString(xml);ribbon->Release();CoUninitialize();return 0;
 }

@@ -304,7 +304,18 @@ public:
     if(id==104){LocalCleanup::RemoveRedYellowHighlights(wordApplication_);return S_OK;}
     if(id==105)return CreateCleanupIcon(true,result);
     if(id==106)return CreateCleanupIcon(false,result);
-    if(id==107){LocalCleanup::ClearBoth(wordApplication_);return S_OK;}
+    if(id==107){
+      // Clear comments and red/yellow highlights locally first.
+      // Then accept the exact current report text for Save/Print, without
+      // marking it as AI-reviewed. Any subsequent text edit invalidates it.
+      LocalCleanup::Obj before=LocalCleanup::ActiveDocument(wordApplication_);
+      if(before) {
+        LocalCleanup::ClearBoth(wordApplication_);
+        LocalCleanup::Obj after=LocalCleanup::ActiveDocument(wordApplication_);
+        if(after)HaronexMandatory::AcceptClearBoth(after.p);
+      }
+      return S_OK;
+    }
     if(id==108)return CreateCleanupIcon(false,result);
     if(id>=1&&id<=5)return S_OK;
     return DISP_E_MEMBERNOTFOUND;
@@ -338,7 +349,7 @@ public:
       LR"(<button id="RadiologyAgentReview" label="Review Text" size="large" getImage="ReviewIcon" onAction="ReviewTextClick"/>)"
       LR"(<button id="RadiologyAgentDeleteComments" label="Clear Comments" size="large" getImage="DeleteCommentsIcon" onAction="DeleteAllCommentsClick" screentip="Remove all comments" supertip="Delete every Word comment in the active document locally. No API call." />)"
       LR"(<button id="RadiologyAgentClearHighlights" label="Clear Highlights" size="large" getImage="ClearHighlightsIcon" onAction="ClearRedYellowClick" screentip="Remove red and yellow highlights" supertip="Remove red and yellow text highlighting from the active Word document, preserving other colors. Runs locally." />)"
-      LR"(<button id="RadiologyAgentClearBoth" label="Clear Both" size="large" getImage="ClearBothIcon" onAction="ClearBothClick" screentip="Clear comments and red/yellow highlights" supertip="One click removes all comments and red/yellow highlighting locally, with no confirmation dialogs." />)"
+      LR"(<button id="RadiologyAgentClearBoth" label="Clear Both" size="large" getImage="ClearBothIcon" onAction="ClearBothClick" screentip="Clear comments and red/yellow highlights" supertip="Remove comments and red/yellow highlighting, then allow Save/Print for this unchanged report. Editing text requires a new review or Clear Both." />)"
       LR"(</group></tab></tabs></ribbon></customUI>)";
     *xml=SysAllocString(ui);
     return *xml?S_OK:E_OUTOFMEMORY;

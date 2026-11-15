@@ -55,7 +55,10 @@ namespace RadiologyAgent {
       try {
         using(var key=Registry.CurrentUser.OpenSubKey(
                   @"Software\Haronex\MandatoryReviews\"+id,true)) {
-          if(key!=null)key.DeleteValue("ApprovedHash",false);
+          if(key!=null) {
+            key.DeleteValue("ApprovedHash",false);
+            key.DeleteValue("ClearBothHash",false);
+          }
         }
       } catch {}
     }
