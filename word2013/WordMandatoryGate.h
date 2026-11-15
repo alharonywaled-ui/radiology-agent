@@ -124,27 +124,46 @@ inline bool MatchingApproval(HKEY key,const wchar_t* valueName,
                                reinterpret_cast<BYTE*>(result),&size);
   return status==ERROR_SUCCESS&&type==REG_SZ&&textDigest==result;
 }
-inline bool Approved(IDispatch* doc) {
-  std::wstring registryPath,textDigest;
-  if(!ApprovalIdentity(doc,registryPath,textDigest))return false;
+// A review alone is not the final release: the user also acknowledges the
+// displayed suggestions by pressing Clear Both. No suggested edit is required.
+inline bool HasReviewedHash(IDispatch* doc) {
+  std::wstring path,digest;
+  if(!ApprovalIdentity(doc,path,digest))return false;
   HKEY key=nullptr;
-  if(RegOpenKeyExW(HKEY_CURRENT_USER,registryPath.c_str(),0,KEY_QUERY_VALUE,&key)!=ERROR_SUCCESS)
+  if(RegOpenKeyExW(HKEY_CURRENT_USER,path.c_str(),0,KEY_QUERY_VALUE,&key)!=ERROR_SUCCESS)
     return false;
-  bool pass=MatchingApproval(key,L"ApprovedHash",textDigest)||
-            MatchingApproval(key,L"ClearBothHash",textDigest);
+  bool reviewed=MatchingApproval(key,L"ApprovedHash",digest);
+  RegCloseKey(key);
+  return reviewed;
+}
+inline bool Approved(IDispatch* doc) {
+  std::wstring path,digest;
+  if(!ApprovalIdentity(doc,path,digest))return false;
+  HKEY key=nullptr;
+  if(RegOpenKeyExW(HKEY_CURRENT_USER,path.c_str(),0,KEY_QUERY_VALUE,&key)!=ERROR_SUCCESS)
+    return false;
+  // BOTH gates must match the current revision. An old V10.1 ClearBothHash
+  // alone can no longer bypass Review Text.
+  bool pass=MatchingApproval(key,L"ApprovedHash",digest)&&
+            MatchingApproval(key,L"ClearBothHash",digest);
   RegCloseKey(key);
   return pass;
 }
 inline bool AcceptClearBoth(IDispatch* doc) {
-  std::wstring registryPath,textDigest;
-  if(!ApprovalIdentity(doc,registryPath,textDigest))return false;
+  std::wstring path,digest;
+  if(!ApprovalIdentity(doc,path,digest))return false;
   HKEY key=nullptr;
-  if(RegCreateKeyExW(HKEY_CURRENT_USER,registryPath.c_str(),0,nullptr,0,
-                     KEY_SET_VALUE,nullptr,&key,nullptr)!=ERROR_SUCCESS)return false;
-  // Clear Both grants Save/Print only for the unmodified current text.
+  if(RegOpenKeyExW(HKEY_CURRENT_USER,path.c_str(),0,KEY_QUERY_VALUE|KEY_SET_VALUE,
+                   &key)!=ERROR_SUCCESS)return false;
+  // Never grant access unless a successful Review Text approval for this
+  // exact content has been saved. Cleanup is not itself an AI review.
+  if(!MatchingApproval(key,L"ApprovedHash",digest)) {
+    RegCloseKey(key);
+    return false;
+  }
   LONG status=RegSetValueExW(key,L"ClearBothHash",0,REG_SZ,
-      reinterpret_cast<const BYTE*>(textDigest.c_str()),
-      static_cast<DWORD>((textDigest.size()+1)*sizeof(wchar_t)));
+      reinterpret_cast<const BYTE*>(digest.c_str()),
+      static_cast<DWORD>((digest.size()+1)*sizeof(wchar_t)));
   RegCloseKey(key);
   return status==ERROR_SUCCESS;
 }
@@ -160,9 +179,9 @@ inline void SetCancel(VARIANTARG& arg) {
 }
 inline void ShowBlocked() {
   MessageBoxW(nullptr,
-      L"Haronex: Review Text must finish successfully before Save or Print.\n"
-      L"Any change to the report text requires a new review.\n"
-      L"Please click Review Text in the Radiology Agent ribbon.",
+      L"Haronex: Complete Review Text, then click Clear Both before Save or Print.\n"
+      L"Correcting suggestions is optional; changes require another Review Text.\n"
+      L"Review Text must succeed for the current report revision.",
       L"Haronex Mandatory Review",MB_OK|MB_ICONWARNING|MB_TOPMOST);
 }
 
