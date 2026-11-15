@@ -35,6 +35,11 @@ inline bool AsDispatch(VARIANT* item,IDispatch** object) {
   if(item->vt==VT_DISPATCH&&item->pdispVal) {
     *object=item->pdispVal;(*object)->AddRef();return true;
   }
+  if(item->vt==(VT_BYREF|VT_DISPATCH)&&item->ppdispVal&&*item->ppdispVal) {
+    *object=*item->ppdispVal;(*object)->AddRef();return true;
+  }
+  if(item->vt==(VT_BYREF|VT_VARIANT)&&item->pvarVal)
+    return AsDispatch(item->pvarVal,object);
   if(item->vt==VT_UNKNOWN&&item->punkVal)
     return SUCCEEDED(item->punkVal->QueryInterface(IID_IDispatch,
                   reinterpret_cast<void**>(object)));
