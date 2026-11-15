@@ -288,18 +288,12 @@ public:
   HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID,LPOLESTR*,UINT,LCID,DISPID*) override {
     return DISP_E_UNKNOWNNAME;
   }
-  HRESULT STDMETHODCALLTYPE Invoke(DISPID id,REFIID,LCID,WORD,DISPPARAMS* args,
+  static bool EnforcementEnabled(){return false;}
+  HRESULT STDMETHODCALLTYPE Invoke(DISPID,REFIID,LCID,WORD,DISPPARAMS*,
                                    VARIANT*,EXCEPINFO*,UINT*) override {
-    const bool saving=id==save_,printing=id==print_;
-    if(!saving&&!printing)return S_OK;
-    UINT needed=saving?3:2;
-    if(!args||args->cArgs<needed)return S_OK;
-    VARIANTARG& cancel=args->rgvarg[0];
-    VARIANTARG& document=args->rgvarg[saving?2:1];
-    IDispatch* doc=nullptr;
-    bool pass=AsDispatch(&document,&doc)&&IsReleased(doc);
-    if(doc)doc->Release();
-    if(!pass){SetCancel(cancel);ShowBlocked();}
+    // V10.4 emergency data-preservation mode: NEVER set Word's Cancel.
+    // Save, Save As and Print events are advisory only until a real Word
+    // integration suite validates reliable document association.
     return S_OK;
   }
 };

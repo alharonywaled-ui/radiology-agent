@@ -110,6 +110,21 @@ int main(){
     wprintf(L"MANDATORY_SESSION_RELEASE_TEST_FAILED\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 38;
   }
+  // Regression: even a malformed or unknown Word Save/Print event MUST NOT
+  // toggle Cancel or block the user's unsaved document.
+  HaronexMandatory::Gate gate;
+  VARIANT_BOOL cancel=VARIANT_FALSE;
+  VARIANTARG argv[3];for(int i=0;i<3;++i)VariantInit(&argv[i]);
+  argv[0].vt=VT_BYREF|VT_BOOL;argv[0].pboolVal=&cancel;
+  DISPPARAMS eventArgs={argv,nullptr,3,0};
+  bool failOpen=!HaronexMandatory::Gate::EnforcementEnabled() &&
+      SUCCEEDED(gate.Invoke(1,IID_NULL,0,DISPATCH_METHOD,
+                            &eventArgs,nullptr,nullptr,nullptr)) &&
+      cancel==VARIANT_FALSE;
+  if(!failOpen) {
+    wprintf(L"SAVE_PRINT_FAILOPEN_TEST_FAILED\n");
+    SysFreeString(xml);ribbon->Release();CoUninitialize();return 39;
+  }
   wprintf(L"NATIVE_COM_AND_RIBBON_AND_MANDATORY_HASH_OK\n");
   SysFreeString(xml);ribbon->Release();CoUninitialize();return 0;
 }
