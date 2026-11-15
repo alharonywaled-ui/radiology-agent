@@ -41,6 +41,7 @@ namespace RadiologyAgent {
           if(key==null)return false;
           // Each new successful review needs a subsequent Clear Both action.
           key.DeleteValue("ClearBothHash",false);
+          key.DeleteValue("ClearBothV102Hash",false);
           key.SetValue("ApprovedHash",hash,RegistryValueKind.String);
         }
         return true;
