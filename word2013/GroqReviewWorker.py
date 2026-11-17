@@ -69,14 +69,14 @@ CONCLUSION_SYSTEM = (
 # Word's Document.Content.Text uses CR-only paragraphs and 0x07 table-cell
 # boundaries. ^ with re.MULTILINE only handles LF, silently skipping a
 # Conclusion table in real Word reports. Recognize all three boundaries.
-WORD_BOUNDARY = r"(?:^|(?<=[\\r\\n\\x07]))"
+WORD_BOUNDARY = r"(?:^|(?<=[\r\n\x07]))"
 CONCLUSION_HEADING = re.compile(
     WORD_BOUNDARY +
-    r"[ \\t]*\\*{0,3}[ \\t]*(?:conclusion|impression)[ \\t]*\\*{0,3}[ \\t]*[:：]?[ \\t]*",
+    r"[ \t]*\*{0,3}[ \t]*(?:conclusion|impression)[ \t]*\*{0,3}[ \t]*[:：]?[ \t]*",
     re.IGNORECASE
 )
 CONCLUSION_END = re.compile(
-    WORD_BOUNDARY + r"[ \\t]*(?:thanks[;,.]?|dr\\.[ \\t]|signed[ \\t]*by)",
+    WORD_BOUNDARY + r"[ \t]*(?:thanks[;,.]?|dr\.[ \t]|signed[ \t]*by)",
     re.IGNORECASE
 )
 
@@ -519,11 +519,11 @@ def self_test():
     assert len(tagged[0]) == 1 and tagged[0][0]["category"] == "unrelated"
     assert normalize_response(off_topic, [outside])[0]["category"] == "unrelated"
     assert conclusion_section(
-        "Findings: Bilateral cysts.\\r\\x07Conclusion:\\r\\x07Haron work at dokki scan"
-        "\\r\\x07Thanks;") is not None
+        "Findings: Bilateral cysts.\r\x07Conclusion:\r\x07Haron work at dokki scan"
+        "\r\x07Thanks;") is not None
     assert obvious_nonmedical_conclusion_issues(
-        "Findings: Bilateral cysts.\\r\\x07Conclusion:\\r\\x07"
-        "o Haron work at dokki scan\\r\\x07Thanks;")
+        "Findings: Bilateral cysts.\r\x07Conclusion:\r\x07"
+        "o Haron work at dokki scan\r\x07Thanks;")
     assert obvious_nonmedical_conclusion_issues(
         "Findings: Bilateral renal cysts.\rConclusion:\r"
         "o Haron work at dokki scan\r"
