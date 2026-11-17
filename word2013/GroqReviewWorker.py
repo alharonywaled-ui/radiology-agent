@@ -89,6 +89,45 @@ CONCLUSION_SYSTEM = (
     "explanation, suggestion. If nothing is wrong return an empty issues array. "
     "Never repeat patient identifiers."
 )
+# Dedicated contextual audit: uncommon words are not errors by themselves.
+# The report must make the word/phrase visibly non-medical or incoherent.
+OFF_TOPIC_SYSTEM = (
+    "You are a focused radiology report context auditor. Examine EVERY "
+    "sentence in Findings, Conclusion and supporting report body. "
+    "Identify unmistakable accidental filler, nonsensical words, or phrases "
+    "whose meaning is completely incongruent with the specific medical "
+    "sentence, even when they are real English words, not just repetitive "
+    "keyboard patterns. Examples of the TYPE of error include an arbitrary "
+    "token inserted between a preposition and a diagnosis, or an unrelated "
+    "everyday activity described as an anatomical finding. "
+    "Only report a fragment as 'unrelated' when the text itself strongly "
+    "supports it. An unfamiliar medical term, recognized medical acronym, "
+    "local abbreviation, patient name, physician signature, dates (including "
+    "2026/2027), measurement, device, or anatomical variant is not automatically "
+    "unrelated. Do not invent medical evidence. "
+    "Return JSON ONLY in the form "
+    "{\"issues\":[{\"quote\":\"exact shortest matching report fragment\","
+    "\"category\":\"unrelated\",\"explanation\":\"why it is out of context\","
+    "\"suggestion\":\"verification or safe literal correction\"}]}. "
+    "Quote exact contiguous text, at most 500 characters. Never fabricate "
+    "a replacement when intent is uncertain. Empty issues list is fine."
+)
+
+def contextual_unrelated_groups(key, chunks, reviewer=None):
+    """Independent semantic audit for arbitrary off-topic language, every chunk."""
+    if reviewer is None:
+        reviewer = lambda chunk: api_review(
+            key, chunk, system_prompt=OFF_TOPIC_SYSTEM,
+            user_prefix="Audit this clinical text for ONLY clearly unrelated or "
+                        "nonsensical material in context:\n\n")
+    groups = []
+    for chunk in chunks:
+        found = reviewer(chunk)
+        groups.append([dict(issue, section="body") for issue in found
+                       if issue.get("category") == "unrelated"
+                       and issue.get("quote") in chunk])
+    return groups
+
 # Word's Document.Content.Text uses CR-only paragraphs and 0x07 table-cell
 # boundaries. ^ with re.MULTILINE only handles LF, silently skipping a
 # Conclusion table in real Word reports. Recognize all three boundaries.
@@ -508,18 +547,24 @@ def main():
             raise ValueError("Invalid report text")
         if version != "haronex-groq-qwen38-v11":
             raise ValueError("Unsupported review version")
-        # Two independent reviews run concurrently rather than sequentially.
-        # Both are still mandatory, and their results are combined only after
-        # successful completion. This reduces wall time, not model token usage.
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        # Three distinct checks run in parallel: language/logic, Conclusion
+        # consistency, and independently targeted context-incoherence audit.
+        # No partial responses are accepted if a required check fails.
+        with ThreadPoolExecutor(max_workers=3) as executor:
             general = executor.submit(
                 lambda: [review_with_recovery(key, text) for text in texts])
             clinical = executor.submit(conclusion_issue_groups, key, texts)
+            context_audit = executor.submit(contextual_unrelated_groups, key, texts)
             groups = general.result()
             independent_audit = clinical.result()
+            unrelated_audit = context_audit.result()
         local_offtopic = distribute_conclusion_issues(
             texts, obvious_nonmedical_conclusion_issues("".join(texts)))
         for i, added in enumerate(independent_audit):
+            existing = {(x["quote"], x["category"]) for x in groups[i]}
+            groups[i].extend(x for x in added
+                             if (x["quote"], x["category"]) not in existing)
+        for i, added in enumerate(unrelated_audit):
             existing = {(x["quote"], x["category"]) for x in groups[i]}
             groups[i].extend(x for x in added
                              if (x["quote"], x["category"]) not in existing)
@@ -629,6 +674,15 @@ def self_test():
     assert "category 'unrelated'" in SYSTEM
     assert "contextually absurd real words" in CONCLUSION_SYSTEM
     assert "genuine medical word merely" in SYSTEM
+    synthetic = "Findings: Element of essa urinary cystitis."
+    stub = lambda text: [{"quote": "essa", "category": "unrelated",
+                          "explanation": "Unrelated in context",
+                          "suggestion": "Verify intended wording."}]
+    assert contextual_unrelated_groups("offline", [synthetic], reviewer=stub) == [[
+        {"quote": "essa", "category": "unrelated", "explanation": "Unrelated in context",
+         "suggestion": "Verify intended wording.", "section": "body"}]]
+    assert "2026/2027" in OFF_TOPIC_SYSTEM
+    assert "EVERY" in OFF_TOPIC_SYSTEM
     assert MODEL == "qwen/qwen3.8-27b"
     class FakeError:
         def read(self, limit):
