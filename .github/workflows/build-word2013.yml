@@ -12,7 +12,7 @@ on:
       - '.github/workflows/build-word2013.yml'
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   build:
     runs-on: windows-2022
@@ -126,3 +126,21 @@ jobs:
           name: Haronex_Word2013_Groq_Qwen38_V11
           path: word2013/output/Haronex_Word2013_Groq_Qwen38_V11_Setup.exe
           if-no-files-found: error
+
+      - name: Publish direct-download EXE as GitHub Release
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $exe='word2013/output/Haronex_Word2013_Groq_Qwen38_V11_Setup.exe'
+          if (!(Test-Path $exe)) { throw 'Tested EXE missing' }
+          $tag='haronex-v11-interactive'
+          gh release view $tag --repo ${{ github.repository }} *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $exe --repo ${{ github.repository }} --clobber
+          } else {
+            gh release create $tag $exe --repo ${{ github.repository }} --title 'Haronex V11 Interactive' --notes 'Word 2013 x86 installer: context-aware review, inline suggestion popup, single-click Apply. Offline CI smoke tested; clinical and real Word end-to-end validation still required.'
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Direct EXE release publishing failed' }
