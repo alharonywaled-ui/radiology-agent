@@ -431,7 +431,12 @@ namespace RadiologyAgent {
         var tableExample="Findings: Bilateral renal cysts.\r\x07Conclusion:\r\x07o Haron work at dokki scan\r\x07Thanks;";
         var found=ObviousOffTopicInConclusion(tableExample);
         var control=ObviousOffTopicInConclusion("Findings: Patient works at refinery.\rConclusion:\rBilateral cysts.\rThanks;");
-        return found.Count==1&&found[0]=="Haron work at dokki scan"&&control.Count==0
+        // A quote inside a Word table is unique in this exact report snapshot,
+        // despite Word Find occasionally reporting a spurious second hit.
+        var duplicateCase=ObviousOffTopicInConclusion(
+          tableExample+"\rHaron work at dokki scan");
+        return duplicateCase.Count==1
+          && found.Count==1&&found[0]=="Haron work at dokki scan"&&control.Count==0
           && MandatoryApproval.SelfTest()
           && DebounceMilliseconds==1200
           && PollMilliseconds==400
@@ -473,8 +478,25 @@ namespace RadiologyAgent {
     // Only acts on a uniquely occurring literal quote from the current
     // Conclusion snapshot; never selects an approximate neighboring phrase.
     private static bool EnsureUnrelatedAnnotation(object document,string quote,
-                                                 int start,int end,out string reason) {
+                                                 string snapshot,int start,int end,out string reason) {
       reason="UNKNOWN";
+      // Word's Find.Execute can wrap or rescan the same table cell when a
+      // new range is constructed. Verify uniqueness from the report text
+      // snapshot instead; we NEVER assume that a second Find means duplicate.
+      if(String.IsNullOrEmpty(snapshot)||String.IsNullOrEmpty(quote)) {
+        reason="EMPTY_SNAPSHOT";return false;
+      }
+      int occurrence=snapshot.IndexOf(quote,StringComparison.Ordinal);
+      if(occurrence<0){reason="NOT_IN_SNAPSHOT";return false;}
+      if(snapshot.IndexOf(quote,occurrence+quote.Length,StringComparison.Ordinal)>=0) {
+        reason="DUPLICATE";return false;
+      }
+      var heading=Regex.Match(snapshot,
+        @"(?:^|[\r\n\x07])[ \t]*(?:Conclusion|Impression)[ \t]*:",
+        RegexOptions.IgnoreCase);
+      if(!heading.Success||occurrence<heading.Index+heading.Length) {
+        reason="OUTSIDE_CONCLUSION";return false;
+      }
       try {
         dynamic doc=document;
         dynamic match=doc.Range(start,end);
@@ -487,12 +509,6 @@ namespace RadiologyAgent {
           reason="RANGE_MISMATCH";return false;
         }
         int firstStart=(int)match.Start,firstEnd=(int)match.End;
-        dynamic remaining=doc.Range(firstEnd,end);
-        dynamic second=remaining.Find;
-        second.ClearFormatting();
-        second.Text=quote;second.Forward=true;second.Wrap=0;
-        second.MatchCase=true;second.MatchWildcards=false;
-        if((bool)second.Execute()){reason="DUPLICATE";return false;}
         // A prior annotation at this exact scope may already exist. It must
         // still be recolored violet rather than silently ignored.
         bool hasComment=false;
@@ -668,7 +684,7 @@ namespace RadiologyAgent {
         uint purpleApplied=0,purpleSkipped=0;
         foreach(string line in fallback) {
           string reason;
-          if(EnsureUnrelatedAnnotation(doc,line,start,end,out reason))purpleApplied++;
+          if(EnsureUnrelatedAnnotation(doc,line,currentText,start,end,out reason))purpleApplied++;
           else purpleSkipped++;
           WriteUnrelatedReason(reason);
         }
