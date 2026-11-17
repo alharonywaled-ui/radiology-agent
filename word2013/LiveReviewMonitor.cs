@@ -481,7 +481,7 @@ namespace RadiologyAgent {
       object c;
       if(!FindSidebarComment(doc,item,out c)) {
         RefreshSidebarAfterAction(doc);
-        sidebar.UpdateStatus("Word moved or removed this comment. Card locations refreshed; select the updated issue.");
+        sidebar.ShowIssueFeedback(item,"Comment location changed. Select the refreshed card and retry.");
         return;
       }
       try {
@@ -492,7 +492,7 @@ namespace RadiologyAgent {
         if(!String.Equals(quote,item.Quote,StringComparison.Ordinal)||
            !String.Equals(body,item.Body,StringComparison.Ordinal)) {
           RefreshSidebarAfterAction(doc);
-          sidebar.UpdateStatus("Original comment changed; cards updated from Word.");
+          sidebar.ShowIssueFeedback(item,"Original text changed. This correction was not applied; check the refreshed card.");
           return;
         }
         string snapshot=Convert.ToString(((dynamic)doc).Content.Text);
@@ -502,18 +502,21 @@ namespace RadiologyAgent {
            begin-contentStart,finish-contentStart,quote,replacement,
            out a,out b,out original,out safe)||
            String.IsNullOrWhiteSpace(safe)||safe!=replacement.Trim()) {
-          sidebar.UpdateStatus("Unsafe replacement: enter exact replacement for the shown phrase, or a matching full sentence.");
+          sidebar.ShowIssueFeedback(item,"AI suggestion does not safely match the highlighted text. Enter a short, exact replacement for this phrase.");
+          LogFailure("SIDEBAR_APPLY_UNSAFE_SCOPE");
           return;
         }
         bool ok=ApplyCommentSuggestion(doc,begin,finish,quote,body,
             contentStart+a,contentStart+b,original,replacement.Trim());
         RefreshSidebarAfterAction(doc);
-        sidebar.UpdateStatus(ok?"Applied. Every remaining comment is now linked to its CURRENT Word position.":
-          "No correction applied. Positions refreshed; review the suggestion.");
+        sidebar.UpdateStatus(ok?"Applied. All remaining comment locations refreshed.":
+          "Nothing changed; see this card for the reason.");
+        if(!ok)sidebar.ShowIssueFeedback(item,
+          "Word rejected this edit; its original text or comment did not match. No other text was changed.");
       } catch(Exception ex) {
         LogFailure("SIDEBAR_APPLY_"+ex.GetType().Name);
         RefreshSidebarAfterAction(doc);
-        sidebar.UpdateStatus("Apply failed; annotations refreshed safely.");
+        sidebar.ShowIssueFeedback(item,"Word could not apply this correction; no other card was intentionally modified.");
       }
     }
     private static void ClearIgnoredHighlight(object document,int begin,int finish,
