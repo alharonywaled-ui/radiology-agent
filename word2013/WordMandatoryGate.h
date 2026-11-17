@@ -40,6 +40,10 @@ inline void BeginDiagnostics() {
   DiagnosticValue(L"LastArg0Type",0);
   DiagnosticValue(L"LastArg1Type",0);
   DiagnosticValue(L"LastArg2Type",0);
+  DiagnosticValue(L"SaveArgCount",0);
+  DiagnosticValue(L"SaveArg0Type",0);
+  DiagnosticValue(L"SaveArg1Type",0);
+  DiagnosticValue(L"SaveArg2Type",0);
   DiagnosticValue(L"SaveEventDispId",0);
   DiagnosticValue(L"PrintEventDispId",0);
 }
@@ -365,36 +369,34 @@ public:
     }
     return false;
   }
-  // Word's actual COM event on the pilot PC passed VT_DISPATCH at argument
-  // zero; the prior implementation falsely assumed reverse argument order.
-  // Match arguments by COM VARTYPE instead, with exactly one Document and one
-  // writable byref BOOL (Cancel). Ambiguous events fail open.
+  // The actual Word 2013 Save event is [Document, SaveAsUI, Cancel]
+  // on the user's 32-bit COM sink: VT_DISPATCH, 0x400B, 0x400B.
+  // The two BYREF BOOLs are NOT ambiguous: the final one is Cancel.
+  // Also support a conventional reversed COM argument vector, explicitly.
   static bool IdentifyEventArguments(DISPPARAMS* args,UINT expected,
                                      VARIANTARG** cancel,IDispatch** doc) {
     if(!cancel||!doc)return false;
     *cancel=nullptr;*doc=nullptr;
     if(!args||!args->rgvarg||args->cArgs!=expected)return false;
-    for(UINT i=0;i<args->cArgs;++i) {
-      VARIANTARG& arg=args->rgvarg[i];
-      if(ValidCancel(arg)) {
-        if(*cancel){if(*doc){(*doc)->Release();*doc=nullptr;}*cancel=nullptr;return false;}
-        *cancel=&arg;
-        continue;
-      }
-      // Only accept an actual dispatch for the Word Document, never infer
-      // the identity from an unrelated flag or other event data.
-      IDispatch* candidate=nullptr;
-      if(AsDispatch(&arg,&candidate)) {
-        if(*doc){candidate->Release();(*doc)->Release();*doc=nullptr;*cancel=nullptr;return false;}
-        *doc=candidate;
-      }
-    }
-    if(!*cancel||!*doc) {
-      if(*doc){(*doc)->Release();*doc=nullptr;}
-      *cancel=nullptr;
+    VARIANTARG* v=args->rgvarg;
+    const bool forward=AsDispatch(&v[0],doc);
+    if(forward) {
+      const bool valid=expected==3 ?
+          (ValidCancel(v[1])&&ValidCancel(v[2])) :
+          ValidCancel(v[1]);
+      if(valid) {*cancel=&v[expected-1];return true;}
+      (*doc)->Release();*doc=nullptr;
       return false;
     }
-    return true;
+    // Reversed arguments: [Cancel, SaveAsUI, Document] on Save, or
+    // [Cancel, Document] on Print. Treat any other shape as malformed.
+    if(!AsDispatch(&v[expected-1],doc))return false;
+    const bool valid=expected==3 ?
+        (ValidCancel(v[0])&&ValidCancel(v[1])) :
+        ValidCancel(v[0]);
+    if(valid) {*cancel=&v[0];return true;}
+    (*doc)->Release();*doc=nullptr;
+    return false;
   }
   HRESULT STDMETHODCALLTYPE Invoke(DISPID dispid,REFIID,LCID,WORD,
                                    DISPPARAMS* args,VARIANT*,EXCEPINFO*,UINT*) override {
@@ -407,7 +409,13 @@ public:
     DiagnosticValue(L"LastArg1Type",args&&args->rgvarg&&args->cArgs>1?args->rgvarg[1].vt:0);
     DiagnosticValue(L"LastArg2Type",args&&args->rgvarg&&args->cArgs>2?args->rgvarg[2].vt:0);
     const bool saving=dispid==save_,printing=dispid==print_;
-    if(saving)IncrementDiagnostic(L"SaveEventCount");
+    if(saving) {
+      DiagnosticValue(L"SaveArgCount",args?args->cArgs:0);
+      DiagnosticValue(L"SaveArg0Type",args&&args->rgvarg&&args->cArgs>0?args->rgvarg[0].vt:0);
+      DiagnosticValue(L"SaveArg1Type",args&&args->rgvarg&&args->cArgs>1?args->rgvarg[1].vt:0);
+      DiagnosticValue(L"SaveArg2Type",args&&args->rgvarg&&args->cArgs>2?args->rgvarg[2].vt:0);
+      IncrementDiagnostic(L"SaveEventCount");
+    }
     else if(printing)IncrementDiagnostic(L"PrintEventCount");
     else {IncrementDiagnostic(L"OtherEventCount");return S_OK;}
     VARIANTARG* cancel=nullptr;
