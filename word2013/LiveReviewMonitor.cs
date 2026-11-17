@@ -346,12 +346,23 @@ namespace RadiologyAgent {
           string id=documentId+"|"+begin+":"+finish+"|"+commentText.GetHashCode();
           if(lastSuggestionAnchor==id)return; // Cancel means do not re-open until selection moves.
           lastSuggestionAnchor=id;
+          // Show the complete replacement scope before applying any edit.
+          string snapshot=Convert.ToString(doc.Content.Text);
+          int contentStart=(int)doc.Content.Start;
+          int replaceFrom,replaceTo;string visibleOriginal,safeSuggestion;
+          if(!SuggestionReplacementPlan.TryBuild(snapshot,begin-contentStart,
+              finish-contentStart,quote,suggestion,
+              out replaceFrom,out replaceTo,out visibleOriginal,out safeSuggestion))
+            continue;
           int expectedBegin=begin,expectedFinish=finish;
+          int replacementBegin=contentStart+replaceFrom;
+          int replacementFinish=contentStart+replaceTo;
           string expectedQuote=quote,expectedComment=commentText;
           object boundDocument=doc;
-          var popup=new SuggestionPopup(category,quote,suggestion,
+          var popup=new SuggestionPopup(category,visibleOriginal,safeSuggestion,
             replacement=>ApplyCommentSuggestion(boundDocument,
-              expectedBegin,expectedFinish,expectedQuote,expectedComment,replacement));
+              expectedBegin,expectedFinish,expectedQuote,expectedComment,
+              replacementBegin,replacementFinish,visibleOriginal,replacement));
           suggestionPopup=popup;
           popup.FormClosed+=(sender,args)=>{
             if(Object.ReferenceEquals(suggestionPopup,popup))suggestionPopup=null;
@@ -373,71 +384,64 @@ namespace RadiologyAgent {
 
     private bool ApplyCommentSuggestion(object document,int begin,int finish,
                                         string original,string expectedComment,
+                                        int replaceStart,int replaceEnd,
+                                        string expectedReplacementText,
                                         string replacement) {
-      if(String.IsNullOrWhiteSpace(replacement)||replacement==original||
-         replacement.Length>2000||replacement.IndexOf('\0')>=0)return false;
+      if(String.IsNullOrWhiteSpace(replacement)||replacement==expectedReplacementText||
+         replacement.Length>2000||replacement.IndexOf('\0')>=0||
+         replacement.IndexOf('\r')>=0||replacement.IndexOf('\n')>=0)return false;
       try {
         if(boundWordWindow==null||documentId==null)return false;
         dynamic doc=document;
-        // Confirm this *same* pinned open document, comment and exact range.
-        if(!Object.ReferenceEquals(document,((dynamic)boundWordWindow).Document)) {
-          // COM RCW identity can change: use name AND existing range checks below.
+        dynamic pinned=((dynamic)boundWordWindow).Document;
+        // Do not mistake another same-named document for the reviewed one.
+        if(!Object.ReferenceEquals(document,pinned)) {
           if(!String.Equals(Convert.ToString(doc.FullName),
-              documentId.Substring(documentId.IndexOf('|')+1),StringComparison.Ordinal))
+            Convert.ToString(pinned.FullName),StringComparison.Ordinal) ||
+            !String.Equals(Convert.ToString(doc.Content.Text),
+              Convert.ToString(pinned.Content.Text),StringComparison.Ordinal))
             return false;
         }
         if(!String.Equals(Convert.ToString(doc.FullName),
-            documentId.Substring(documentId.IndexOf('|')+1),StringComparison.Ordinal))
-          return false;
-        dynamic replacementRange=doc.Range(begin,finish);
-        if(!String.Equals(Convert.ToString(replacementRange.Text),original,
+          documentId.Substring(documentId.IndexOf('|')+1),
+          StringComparison.Ordinal))return false;
+        dynamic scope=doc.Range(begin,finish);
+        dynamic target=doc.Range(replaceStart,replaceEnd);
+        if(!String.Equals(Convert.ToString(scope.Text),original,
+                          StringComparison.Ordinal)||
+           !String.Equals(Convert.ToString(target.Text),expectedReplacementText,
                           StringComparison.Ordinal))return false;
+        if(replaceStart>begin||replaceEnd<finish)return false;
         dynamic targetComment=null;
         dynamic comments=doc.Comments;
         int count=(int)comments.Count;
         for(int i=1;i<=count;i++) {
-          dynamic c=comments.Item(i);
-          dynamic scope=c.Scope;
-          if((int)scope.Start!=begin||(int)scope.End!=finish)continue;
+          dynamic c=comments.Item(i),anchor=c.Scope;
+          if((int)anchor.Start!=begin||(int)anchor.End!=finish)continue;
           if(String.Equals(Convert.ToString(c.Range.Text),expectedComment,
-                           StringComparison.Ordinal)) {
-            targetComment=c;break;
-          }
+                           StringComparison.Ordinal)){targetComment=c;break;}
         }
         if(targetComment==null)return false;
-        // Formatting may span multiple character styles; capture the range's
-        // leading font and restore it after editing where Word permits.
-        string fontName="";float fontSize=0;
-        int bold=0,italic=0;
-        try {
-          dynamic font=replacementRange.Font;
-          fontName=Convert.ToString(font.Name);
-          fontSize=Convert.ToSingle(font.Size);
-          bold=Convert.ToInt32(font.Bold);
-          italic=Convert.ToInt32(font.Italic);
-        } catch {}
-        dynamic undo=null;bool undoStarted=false;
-        try {
-          undo=doc.Application.UndoRecord;
-          undo.StartCustomRecord("Haronex Apply Suggestion");
-          undoStarted=true;
-        } catch {}
+        // Delete only the selected comment, replace only the exact preview
+        // range; Word retains the paragraph style and supports normal Undo.
+        dynamic undo=null;bool started=false;
+        try {undo=doc.Application.UndoRecord;
+             undo.StartCustomRecord("Haronex Apply Suggestion");started=true;}catch{}
         try {
           targetComment.Delete();
-          replacementRange.Text=replacement;
-          dynamic inserted=doc.Range(begin,begin+replacement.Length);
+          dynamic region=doc.Range(replaceStart,replaceEnd);
+          if(!String.Equals(Convert.ToString(region.Text),
+                            expectedReplacementText,StringComparison.Ordinal))
+            return false;
+          region.Text=replacement;
           try {
-            if(!String.IsNullOrWhiteSpace(fontName))inserted.Font.Name=fontName;
-            if(fontSize>0)inserted.Font.Size=fontSize;
-            if(bold>=0)inserted.Font.Bold=bold;
-            if(italic>=0)inserted.Font.Italic=italic;
+            dynamic result=doc.Range(replaceStart,replaceStart+replacement.Length);
+            result.HighlightColorIndex=0;
           } catch {}
-          try {inserted.HighlightColorIndex=0;} catch {}
         } finally {
-          if(undoStarted)try {undo.EndCustomRecord();} catch {}
+          if(started)try {undo.EndCustomRecord();}catch{}
         }
         lastSuggestionAnchor=null;
-        // The existing monitor detects the changed document on the next poll.
         return true;
       } catch(Exception ex) {
         LogFailure("SUGGESTION_APPLY_"+ex.GetType().Name);
@@ -651,6 +655,7 @@ namespace RadiologyAgent {
           tableExample+"\rHaron work at dokki scan");
         return duplicateCase.Count==1
           && found.Count==1&&found[0]=="Haron work at dokki scan"&&control.Count==0
+          && SuggestionReplacementPlan.SelfTest()
           && MandatoryApproval.SelfTest()
           && DebounceMilliseconds==1200
           && PollMilliseconds==400
