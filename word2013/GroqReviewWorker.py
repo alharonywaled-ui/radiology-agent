@@ -33,14 +33,29 @@ SYSTEM = (
     "Medical abbreviations and acronyms (e.g. CT, MR, MRI, MRCP, IHBR, PET CT, BMD) "
     "are NOT automatically errors, even if uncommon. Do not flag dates or years "
     "such as 2026, 2027, or 2026/2027 merely for being recent or unexpected. "
+    "Independently inspect EVERY clinical sentence, finding, and impression for "
+    "contextually nonsensical or obviously unrelated inserted words, phrases, "
+    "and statements, including normal English words used in an absurd radiology "
+    "context and random strings that do not follow a repeated-character pattern. "
+    "Use category 'unrelated' only if the text is plainly extraneous or "
+    "semantically incoherent in the given report context. Quote the SMALLEST "
+    "exact offending token or phrase to avoid replacing a whole medical claim. "
+    "If the intended replacement is unclear, give verification advice, not "
+    "an invented replacement. Do not flag a genuine medical word merely "
+    "because it is uncommon, misspelled, unfamiliar, or clinically unexpected; "
+    "use language for supported spelling problems and logic for real internal "
+    "medical contradictions. Names, signature blocks, doctor credentials, "
+    "patient metadata, imaging protocols, devices, measurements, and abbreviations "
+    "must not be flagged as unrelated just because they are non-narrative. "
     "Then proofread spelling, grammar, punctuation and awkward constructions. "
     "Only flag well-supported errors. Never invent imaging findings or diagnoses. "
     "Quotes MUST be exact substrings of supplied report and no longer than 500 "
     "characters. Use category logic only for potentially clinically significant "
-    "internal contradictions, and language for wording concerns. "
+    "internal contradictions, language for wording concerns, and unrelated "
+    "for unmistakable contextual nonsense or off-topic fragments. "
     "Do not repeat patient identifiers in the explanation or suggestion. "
     "Return only JSON: {\"issues\":[{\"quote\":\"exact report text\","
-    "\"category\":\"logic or language\",\"explanation\":\"brief explanation\","
+    "\"category\":\"logic or language or unrelated\",\"explanation\":\"brief explanation\","
     "\"suggestion\":\"optional proposed wording\"}]}. "
     "Keep suggestions clinically conservative; if uncertain, recommend verification."
 )
@@ -64,9 +79,11 @@ CONCLUSION_SYSTEM = (
     "Do not regard every missing incidental finding as a contradiction. "
     "For each issue anchor an EXACT substring of the CONCLUSION (not Findings) "
     "up to 500 characters, preferably an entire unique sentence. "
-    "Use category 'unrelated' ONLY for an obvious non-medical statement or "
-    "off-topic material inside Conclusion (personal biography, employment, "
-    "greetings, unrelated filler). Do not use 'unrelated' for an unsupported "
+    "Use category 'unrelated' for high-confidence nonsense in Conclusion, "
+    "including contextually absurd real words, accidental filler, random "
+    "strings, non-medical statements, or off-topic material. Anchor the "
+    "smallest exact offending fragment if feasible. Never infer that an "
+    "unfamiliar valid medical term is gibberish. Do not use 'unrelated' for an unsupported "
     "but medically relevant statement; use 'logic' for that. "
     "Return only JSON with issues array; each item: quote, category='logic' or 'unrelated', "
     "explanation, suggestion. If nothing is wrong return an empty issues array. "
@@ -126,7 +143,7 @@ OFF_TOPIC_EMPLOYMENT = re.compile(
 # Narrow repeated-motif detector; not a dictionary and not a medical
 # spellchecker. Clinical abbreviations and unfamiliar real terms must never
 # be silently rewritten. Only transparent physician-verify annotations.
-REPEATED_GIBBERISH = re.compile(r"^([a-z]{2})\1(?:\1|[a-z])$")
+REPEATED_GIBBERISH = re.compile(r"^([a-z]{2})\1+[a-z]?$")
 
 def repeated_gibberish_tokens(line):
     return [m.group(0) for m in re.finditer(r"\b[A-Za-z]{5,12}\b", line)
@@ -411,7 +428,7 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep,
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json",
                  "Accept": "application/json",
-                 "User-Agent": "Haronex-Radiology-Agent/10.19"})
+                 "User-Agent": "Haronex-Radiology-Agent/11"})
     # Semantic format errors get only one additional fresh response.
     # HTTP 400/auth/content filtering or clinical safety failures are never retried.
     recoverable_formats = {
@@ -596,9 +613,22 @@ def self_test():
     assert repeated_gibberish_tokens("Bilateral renal cortical cysts.") == []
     assert repeated_gibberish_tokens("MRI MRCP IHBR PETCT BMD 2026/2027") == []
     assert repeated_gibberish_tokens("dsdsd") == ["dsdsd"]
+    assert repeated_gibberish_tokens("***sasasasas ***") == ["sasasasas"]
+    assert whole_report_gibberish_groups(["Findings: sasasasas"]) == [[{
+        "quote": "sasasasas", "category": "unrelated",
+        "explanation": "Unintelligible repeated-letter token in radiology report.",
+        "suggestion": "Verify intended wording with reporting radiologist.",
+        "section": "body",
+    }]]
     assert [i["quote"] for i in whole_report_gibberish_groups(
         ["Findings: ***dsdsd ***", "Conclusion:\\rElement of dsdsd urinary cystitis."])[0]] == ["dsdsd"]
     assert whole_report_gibberish_groups(["CT, MRCP, IHBR, MRI, 2026/2027."]) == [[]]
+    # Regression contract: model checks full-report semantics, not just regex.
+    assert "EVERY clinical sentence" in SYSTEM
+    assert "normal English words used in an absurd radiology" in SYSTEM
+    assert "category 'unrelated'" in SYSTEM
+    assert "contextually absurd real words" in CONCLUSION_SYSTEM
+    assert "genuine medical word merely" in SYSTEM
     assert MODEL == "qwen/qwen3.8-27b"
     class FakeError:
         def read(self, limit):
