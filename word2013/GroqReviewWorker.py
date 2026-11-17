@@ -439,7 +439,7 @@ def self_test():
             "explanation": "Contradicts the documented renal cysts",
             "suggestion": "Reconcile with Findings after physician verification."}
     assert conclusion_issue_groups("offline", [clinical],
-        reviewer=lambda context: [fake]) == [[fake]]
+        reviewer=lambda context: [fake]) == [[dict(fake, section="conclusion")]]
     assert conclusion_issue_groups("offline", ["Normal report."],
         reviewer=lambda context: [fake]) == [[]]
     assert MODEL == "qwen/qwen3.8-27b"
