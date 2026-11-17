@@ -102,6 +102,17 @@ namespace RadiologyAgent {
                   "diaphragmatic copula","Entirely unrelated replacement sentence about another organ.",
                   out start,out end,out original,out proposal)||
          original!="diaphragmatic copula"||proposal!="")return false;
+      // A Word Comment.Scope is the authoritative anchor, even when the
+      // document's formatted content has table cells, images or field codes.
+      if(!TryBuild("phleboli",0,"phleboli".Length,
+                  "phleboli","phleboliths",
+                  out start,out end,out original,out proposal)||
+         start!=0||end!=8||original!="phleboli"||
+         proposal!="phleboliths")return false;
+      if(!TryBuild("nor backpressure changes",0,"nor backpressure changes".Length,
+                  "nor backpressure changes","or backpressure changes",
+                  out start,out end,out original,out proposal)||
+         proposal!="or backpressure changes")return false;
       if(TryBuild(doc,at+1,at+3,"diaphragmatic copula",correction,
                   out start,out end,out original,out proposal))return false;
       return true;
