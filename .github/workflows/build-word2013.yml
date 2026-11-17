@@ -50,9 +50,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'PyInstaller dependencies failed' }
           python word2013/GroqReviewWorker.py --self-test
           if ($LASTEXITCODE -ne 0) { throw 'Offline retry/backoff regression tests failed' }
-          python -m PyInstaller --noconfirm --onefile --console --name HaronexGroqWorker --distpath word2013/bin --workpath word2013/pybuild/work --specpath word2013/pybuild word2013/GroqReviewWorker.py
+          python -m PyInstaller --noconfirm --onedir --console --contents-directory _HaronexRuntime --name HaronexGroqWorker --distpath word2013/bin --workpath word2013/pybuild/work --specpath word2013/pybuild word2013/GroqReviewWorker.py
           if ($LASTEXITCODE -ne 0) { throw 'Browser worker packaging failed' }
-          $test=& word2013/bin/HaronexGroqWorker.exe --self-test
+          $test=& word2013/bin/HaronexGroqWorker/HaronexGroqWorker.exe --self-test
           if ($LASTEXITCODE -ne 0 -or $test -notmatch '"ok": true') { throw "Groq review parser smoke test failed: $test" }
       - name: Compile native 32-bit COM Ribbon add-in and smoke-test binary
         shell: pwsh
