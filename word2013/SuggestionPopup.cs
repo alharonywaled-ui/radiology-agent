@@ -8,20 +8,16 @@ namespace RadiologyAgent {
   internal sealed class SuggestionPopup : Form {
     private readonly RichTextBox original;
     private readonly RichTextBox suggestion;
-    private readonly CheckBox physicianConfirmation;
     private readonly Button apply;
-    private readonly bool clinical;
     private readonly Func<string,bool> onApply;
 
     internal SuggestionPopup(string category,string quote,string advice,
                              Func<string,bool> applyAction) {
-      clinical=String.Equals(category,"logic",StringComparison.OrdinalIgnoreCase)
-            ||String.Equals(category,"unrelated",StringComparison.OrdinalIgnoreCase);
       onApply=applyAction;
       Text="Haronex - Apply Suggestion";
       Font=new Font("Segoe UI",9.5f);
-      Size=new Size(435,394);
-      MinimumSize=new Size(395,360);
+      Size=new Size(435,351);
+      MinimumSize=new Size(395,340);
       FormBorderStyle=FormBorderStyle.SizableToolWindow;
       StartPosition=FormStartPosition.Manual;
       ShowInTaskbar=false;
@@ -46,18 +42,13 @@ namespace RadiologyAgent {
         suggestedTitle.Text="Enter corrected report text (advice is not replacement)";
         suggestion.BackColor=Color.FromArgb(255,253,236);
       }
-      physicianConfirmation=new CheckBox {
-        Text="I am the reporting physician / authorized clinician and approve this clinical change",
-        Location=new Point(14,263),Size=new Size(402,39),Visible=clinical,
-        AutoSize=false
-      };
-      apply=new Button{Text="Apply Suggestion",Location=new Point(14,308),
+      apply=new Button{Text="Apply Suggestion",Location=new Point(14,269),
                        Size=new Size(210,33),BackColor=Color.FromArgb(22,132,64),
                        ForeColor=Color.White,FlatStyle=FlatStyle.Flat};
-      var cancel=new Button{Text="Cancel",Location=new Point(236,308),Size=new Size(171,33)};
+      var cancel=new Button{Text="Cancel",Location=new Point(236,269),Size=new Size(171,33)};
       Controls.Add(head);Controls.Add(originalTitle);Controls.Add(original);
       Controls.Add(suggestedTitle);Controls.Add(suggestion);
-      Controls.Add(physicianConfirmation);Controls.Add(apply);Controls.Add(cancel);
+      Controls.Add(apply);Controls.Add(cancel);
       cancel.Click+=(s,e)=>Close();
       apply.Click+=(s,e)=> {
         string replacement=suggestion.Text;
@@ -65,11 +56,6 @@ namespace RadiologyAgent {
            replacement==original.Text) {
           MessageBox.Show(this,"Enter a different, complete replacement text.",
                           "Haronex",MessageBoxButtons.OK,MessageBoxIcon.Information);
-          return;
-        }
-        if(clinical&&!physicianConfirmation.Checked) {
-          MessageBox.Show(this,"Clinical changes require explicit physician confirmation.",
-                          "Haronex",MessageBoxButtons.OK,MessageBoxIcon.Warning);
           return;
         }
         if(replacement.Length>2000||replacement.IndexOf('\0')>=0) {
@@ -83,7 +69,6 @@ namespace RadiologyAgent {
           "Haronex",MessageBoxButtons.OK,MessageBoxIcon.Warning);
       };
       suggestion.TextChanged+=(s,e)=>UpdateButton();
-      physicianConfirmation.CheckedChanged+=(s,e)=>UpdateButton();
       Resize+=(s,e)=>{
         int width=ClientSize.Width-28;
         original.Width=width;suggestion.Width=width;
@@ -113,7 +98,7 @@ namespace RadiologyAgent {
     private void UpdateButton() {
       apply.Enabled=!String.IsNullOrWhiteSpace(suggestion.Text)
           &&!String.Equals(suggestion.Text,original.Text,StringComparison.Ordinal)
-          &&(!clinical||physicianConfirmation.Checked);
+          ;
     }
 
     internal void PositionNearCursor() {
