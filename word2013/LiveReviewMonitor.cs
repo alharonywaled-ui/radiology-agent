@@ -510,6 +510,44 @@ namespace RadiologyAgent {
         sidebar.UpdateStatus("Apply failed; annotations refreshed safely.");
       }
     }
+    private static void ClearIgnoredHighlight(object document,int begin,int finish,
+                                               string category) {
+      // Only remove Haronex's expected colour, never another reviewer's
+      // manually-highlighted text or a surviving overlapping annotation.
+      int expected=category=="Logic"?6:category=="Unrelated"?12:7;
+      dynamic doc=document;
+      var protectedRanges=new List<Tuple<int,int>>();
+      dynamic notes=doc.Comments;
+      for(int i=1;i<=(int)notes.Count;i++) {
+        dynamic other=notes.Item(i),scope=other.Scope;
+        int a=(int)scope.Start,b=(int)scope.End;
+        if(a<finish&&b>begin)
+          protectedRanges.Add(Tuple.Create(Math.Max(a,begin),Math.Min(b,finish)));
+      }
+      // A comment may cover only part of the ignored phrase. Clear the rest
+      // while keeping all positions covered by a different comment untouched.
+      int last=Math.Max(begin,0);
+      protectedRanges.Sort((a,b)=>a.Item1.CompareTo(b.Item1));
+      foreach(var span in protectedRanges) {
+        int stop=Math.Min(finish,span.Item1);
+        if(stop>last)ClearOwnedHighlightSegment(doc,last,stop,expected);
+        last=Math.Max(last,span.Item2);
+      }
+      if(last<finish)ClearOwnedHighlightSegment(doc,last,finish,expected);
+    }
+    private static void ClearOwnedHighlightSegment(object document,int start,
+                                                    int end,int expected) {
+      dynamic doc=document;
+      // Mixed formatting returns wdUndefined for a larger range. Inspect
+      // individual characters so unrelated highlights are never removed.
+      for(int i=start;i<end;i++) {
+        try {
+          dynamic part=doc.Range(i,i+1);
+          if(Convert.ToInt32(part.HighlightColorIndex)==expected)
+            part.HighlightColorIndex=0; // wdNoHighlight
+        } catch { /* Keep remaining marks; log at the caller. */ }
+      }
+    }
     private void IgnoreSidebarIssue(HaronexReviewSidebar.Issue item) {
       object doc,c;
       if(!PinnedDocument(out doc)||item==null)return;
@@ -519,13 +557,30 @@ namespace RadiologyAgent {
         return;
       }
       try {
-        dynamic note=c;
-        note.Done=true;
+        dynamic note=c,scope=note.Scope;
+        int begin=(int)scope.Start,finish=(int)scope.End;
+        string currentQuote=Convert.ToString(scope.Text);
+        if(!String.Equals(currentQuote,item.Quote,StringComparison.Ordinal)||
+           !String.Equals(Convert.ToString(note.Range.Text),item.Body,
+                          StringComparison.Ordinal)) {
+          RefreshSidebarAfterAction(doc);
+          sidebar.UpdateStatus("Comment changed; nothing was removed.");
+          return;
+        }
+        // Ignore means remove this Haronex comment, not mark it Done.
+        // The Word report text itself is NEVER changed.
+        note.Delete();
+        try {
+          ClearIgnoredHighlight(doc,begin,finish,item.Category);
+        } catch(Exception clearError) {
+          LogFailure("SIDEBAR_IGNORE_HIGHLIGHT_"+clearError.GetType().Name);
+        }
         RefreshSidebarAfterAction(doc);
-        sidebar.UpdateStatus("Ignored. Other comments refreshed without re-review.");
+        sidebar.UpdateStatus("Ignored: comment and its non-overlapping Haronex highlight removed.");
       } catch(Exception ex) {
         LogFailure("SIDEBAR_IGNORE_"+ex.GetType().Name);
-        sidebar.UpdateStatus("Could not ignore this comment.");
+        RefreshSidebarAfterAction(doc);
+        sidebar.UpdateStatus("Ignore failed; comment locations refreshed.");
       }
     }
     private void LocateSidebarIssue(HaronexReviewSidebar.Issue item) {
