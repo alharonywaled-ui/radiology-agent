@@ -571,6 +571,42 @@ def review_with_recovery(key, text, review=api_review, depth=0):
         # Validate against original text and deduplicate repeated anchored quotes.
         return normalize(text, all_issues)
 
+def full_review_concurrently(key, texts, general_review=None,
+                             conclusion_review=None, unrelated_review=None,
+                             language_review=None):
+    """Execute exactly the same four passes on an immutable snapshot.
+
+    Every pass is mandatory; a failed future aborts the complete review.
+    Results are assembled in original chunk order regardless of completion
+    order, so Word quote anchoring and merge policy remain unchanged.
+    """
+    if not texts or len(texts) > 40:
+        raise ValueError("Invalid report parts")
+    if general_review is None:
+        general_review = lambda text: review_with_recovery(key, text)
+    if conclusion_review is None:
+        conclusion_review = lambda parts: conclusion_issue_groups(key, parts)
+    if unrelated_review is None:
+        unrelated_review = lambda text: contextual_unrelated_groups(key, [text])[0]
+    if language_review is None:
+        language_review = lambda text: language_audit_groups(key, [text])[0]
+    max_workers = min(6, max(4, len(texts) * 2))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        general = [pool.submit(general_review, t) for t in texts]
+        conclusion = pool.submit(conclusion_review, texts)
+        unrelated = [pool.submit(unrelated_review, t) for t in texts]
+        language = [pool.submit(language_review, t) for t in texts]
+        # Reading in index order does not block other submitted work.
+        general_groups = [f.result() for f in general]
+        clinical_groups = conclusion.result()
+        unrelated_groups = [f.result() for f in unrelated]
+        language_groups = [f.result() for f in language]
+    if not (len(general_groups) == len(clinical_groups) ==
+            len(unrelated_groups) == len(language_groups) == len(texts)):
+        raise ValueError("Audit pass count mismatch")
+    return general_groups, clinical_groups, unrelated_groups, language_groups
+
+
 def main():
     try:
         incoming = json.loads(sys.stdin.read())
@@ -583,21 +619,13 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v11-5":
+        if version != "haronex-groq-qwen38-v11-11":
             raise ValueError("Unsupported review version")
-        # Four independent checks on the SAME snapshot, merged before Word
-        # annotations: general, conclusion, context and language. This reduces
-        # missed independent findings; AI coverage cannot be guaranteed.
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            general = executor.submit(
-                lambda: [review_with_recovery(key, text) for text in texts])
-            clinical = executor.submit(conclusion_issue_groups, key, texts)
-            context_audit = executor.submit(contextual_unrelated_groups, key, texts)
-            language_audit = executor.submit(language_audit_groups, key, texts)
-            groups = general.result()
-            independent_audit = clinical.result()
-            unrelated_audit = context_audit.result()
-            extra_language = language_audit.result()
+        # Preserve ALL four independent audit passes; parallelize each report
+        # chunk inside each pass instead of processing chunks serially. Bounded
+        # worker count prevents runaway network threads on 40-part reports.
+        groups, independent_audit, unrelated_audit, extra_language = (
+            full_review_concurrently(key, texts))
         local_offtopic = distribute_conclusion_issues(
             texts, obvious_nonmedical_conclusion_issues("".join(texts)))
         for i, added in enumerate(independent_audit):
@@ -733,6 +761,28 @@ def self_test():
     assert language_audit_groups("offline", ["Average sized kidneys."],
                                  reviewer=mock_language)[0][0]["quote"]=="Average sized"
     assert "quote the entire original sentence" in LANGUAGE_SYSTEM
+    # Four-pass concurrency must preserve every chunk, category and order.
+    samples = ["Findings: Average sized kidneys.\r",
+               "Conclusion: No urolithiasis.\r"]
+    general_mock = lambda text: [{"quote": text[0:8], "category": "language"}]
+    empty_mock = lambda text: []
+    conclusion_mock = lambda chunks: [[], []]
+    g, c, u, l = full_review_concurrently(
+        "offline", samples, general_review=general_mock,
+        conclusion_review=conclusion_mock,
+        unrelated_review=empty_mock, language_review=empty_mock)
+    assert len(g) == len(c) == len(u) == len(l) == 2
+    assert [v[0]["quote"] for v in g] == ["Findings", "Conclusi"]
+    assert c == u == l == [[], []]
+    try:
+        full_review_concurrently("offline", samples,
+            general_review=lambda part: (_ for _ in ()).throw(
+                ReviewFailure("GROQ_NETWORK")),
+            conclusion_review=conclusion_mock,
+            unrelated_review=empty_mock, language_review=empty_mock)
+        raise AssertionError("Failed mandatory pass was ignored")
+    except ReviewFailure as exc:
+        assert exc.code == "GROQ_NETWORK"
     assert MODEL == "qwen/qwen3.8-27b"
     class FakeError:
         def read(self, limit):

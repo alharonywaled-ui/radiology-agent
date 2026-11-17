@@ -71,7 +71,10 @@ namespace RadiologyAgent {
   // Persistent STA window receives Word COM calls ONLY on the UI thread.
   // Gemini browser work uses its own subprocess and is never allowed to modify Word.
   internal sealed class LiveReviewMonitor : Form {
-    private const int PollMilliseconds=400;
+    // Adaptive polling avoids 2.5 full-document COM reads per second while idle.
+    private const int PollMilliseconds=1300;
+    private const int ActivePollMilliseconds=300;
+    private const int SidebarPollMilliseconds=1050;
     private const int DebounceMilliseconds=1200;
     private readonly System.Windows.Forms.Timer timer;
     private object word;
@@ -228,7 +231,15 @@ namespace RadiologyAgent {
         // No background API calls: only explicit Review Text click triggers analysis.
       } catch {
         lastWordProblem="WORD_POLL_FAILED";
-      } finally {polling=false;}
+      } finally {
+        polling=false;
+        if(!IsDisposed) {
+          int next=(working||pendingClick||awaitingDocument)?ActivePollMilliseconds:
+            (sidebar!=null&&!sidebar.IsDisposed&&sidebar.Visible?
+              SidebarPollMilliseconds:PollMilliseconds);
+          if(timer.Interval!=next)timer.Interval=next;
+        }
+      }
     }
 
     private void PollWord() {
@@ -1313,6 +1324,16 @@ namespace RadiologyAgent {
           }
         } catch {}
         int start=(int)doc.Content.Start,end=(int)doc.Content.End;
+        // Batch Word layout repaints while inserting all comments/highlights.
+        // Always restore even after an individual COM failure.
+        uint purpleApplied=0,purpleSkipped=0;
+        bool repaintChanged=false,oldRepaint=true;
+        try {
+          oldRepaint=Convert.ToBoolean(app.ScreenUpdating);
+          app.ScreenUpdating=false;
+          repaintChanged=true;
+        } catch { /* Some protected Word windows reject ScreenUpdating. */ }
+        try {
         foreach(var issue in ordered) {
           try {
             dynamic region=doc.Range(start,end);
@@ -1376,7 +1397,6 @@ namespace RadiologyAgent {
         // Run this after the generic AI annotation path; if that path
         // silently skipped the table cell, apply a verified full-document
         // exact-match highlight and comment instead.
-        uint purpleApplied=0,purpleSkipped=0;
         foreach(string line in fallback) {
           string reason;
           if(EnsureUnrelatedAnnotation(doc,line,currentText,start,end,out reason))purpleApplied++;
@@ -1385,6 +1405,9 @@ namespace RadiologyAgent {
         }
         WriteDword("UnrelatedAppliedCount",purpleApplied);
         WriteDword("UnrelatedSkippedCount",purpleSkipped);
+        } finally {
+          if(repaintChanged)try {app.ScreenUpdating=oldRepaint;}catch{}
+        }
         if(wordApplied==0&&purpleApplied==0&&candidateCount>0) {
           LogFailure("ANNOTATIONS_ZERO_WITH_CANDIDATES");
           NotifyAnnotationResult(candidateCount,0,wordFailed+(int)purpleSkipped);
