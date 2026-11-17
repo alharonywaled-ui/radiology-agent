@@ -7,6 +7,7 @@ import urllib.error
 import time
 import email.utils
 import datetime
+import re
 
 MODEL = "qwen/qwen3.8-27b"
 RETRY_DELAYS = (2, 6, 15)  # Bounded exponential backoff, four total HTTP attempts.
@@ -39,6 +40,85 @@ SYSTEM = (
     "\"suggestion\":\"optional proposed wording\"}]}. "
     "Keep suggestions clinically conservative; if uncertain, recommend verification."
 )
+
+
+# A dedicated, independent semantic audit of every Conclusion assertion.
+CONCLUSION_SYSTEM = (
+    "You are a careful radiology Conclusion-versus-Findings consistency auditor. "
+    "Read every assertion of the Conclusion/Impression and cross-check with Findings. "
+    "Flag clinically meaningful contradictions, unrelated or nonsensical claims, "
+    "wrong laterality, negation, organ, size, severity, disease, and any diagnosis "
+    "or conclusion assertion not supported by the supplied Findings. "
+    "Flag a potentially important finding omitted from the Conclusion only if it "
+    "could materially affect clinical interpretation, and phrase omissions as "
+    "questions to the reporting radiologist, not automatic diagnoses. "
+    "Preserve uncertainty: possible, likely and questionable are not definitive. "
+    "For unsupported conclusions request confirmation instead of inventing facts. "
+    "Do not regard every missing incidental finding as a contradiction. "
+    "For each issue anchor an EXACT substring of the CONCLUSION (not Findings) "
+    "up to 500 characters, preferably an entire unique sentence. "
+    "Return only JSON with issues array; each item: quote, category='logic', "
+    "explanation, suggestion. If nothing is wrong return an empty issues array. "
+    "Never repeat patient identifiers."
+)
+CONCLUSION_HEADING = re.compile(
+    r"(?im)^[ \t]*\*{0,3}[ \t]*(?:conclusion|impression)[ \t]*\*{0,3}[ \t]*[:：]?[ \t]*"
+)
+CONCLUSION_END = re.compile(r"(?im)^[ \t]*(?:thanks[;,.]?|dr\.[ \t]|signed[ \t]*by)")
+
+def conclusion_section(report):
+    match = CONCLUSION_HEADING.search(report)
+    if not match:
+        return None
+    tail = report[match.start():]
+    further = CONCLUSION_HEADING.search(tail, len(match.group(0)))
+    signed = CONCLUSION_END.search(tail, len(match.group(0)))
+    ends = [m.start() for m in (further, signed) if m]
+    section = tail[:min(ends) if ends else len(tail)]
+    return section if section.strip() else None
+
+def conclusion_audit_context(report):
+    section = conclusion_section(report)
+    if not section:
+        return None, None
+    if len(report) <= 6000:
+        return report, section
+    if len(section)>5000:
+        return None, None
+    # Bounded context on very long reports; explicitly state partial coverage.
+    findings = report[:report.find(section)]
+    available = max(0, 5900-len(section)-90)
+    return (findings[:available] +
+            "\n[PARTIAL FINDINGS CONTEXT; CHECK FULL REPORT CLINICALLY]\n" +
+            section), section
+
+def conclusion_issue_groups(key, chunks, reviewer=None):
+    full_report = "".join(chunks)
+    context, section = conclusion_audit_context(full_report)
+    groups = [[] for _ in chunks]
+    if not context:
+        return groups
+    if reviewer is None:
+        reviewer = lambda content: api_review(
+            key, content, system_prompt=CONCLUSION_SYSTEM,
+            user_prefix="Audit every assertion in the Conclusion against the Findings:\n\n")
+    seen = set()
+    for issue in reviewer(context):
+        quote = issue["quote"]
+        if issue["category"] != "logic" or quote not in section:
+            continue
+        candidates = [i for i, chunk in enumerate(chunks) if quote in chunk]
+        if not candidates:
+            continue
+        index = candidates[-1]
+        ident = (index, quote, issue["category"])
+        if ident in seen:
+            continue
+        seen.add(ident)
+        tagged = dict(issue)
+        tagged["section"] = "conclusion"
+        groups[index].append(tagged)
+    return groups
 
 def normalize(text, issues):
     output, seen = [], set()
@@ -219,11 +299,12 @@ def transport_request(req, open_url=urllib.request.urlopen):
         raise ReviewFailure("GROQ_NETWORK", True)
 
 
-def api_review(key, text, requester=transport_request, sleeper=time.sleep):
+def api_review(key, text, requester=transport_request, sleeper=time.sleep,
+               system_prompt=SYSTEM, user_prefix="Review this report completely:\n\n"):
     request_body = {
         "model": MODEL,
-        "messages": [{"role": "system", "content": SYSTEM},
-                     {"role": "user", "content": "Review this report completely:\\n\\n" + text}],
+        "messages": [{"role": "system", "content": system_prompt},
+                     {"role": "user", "content": user_prefix + text}],
         "response_format": {"type": "json_object"},
         "reasoning_effort": "low",
         "reasoning_format": "hidden",
@@ -235,7 +316,7 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep):
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json",
                  "Accept": "application/json",
-                 "User-Agent": "Haronex-Radiology-Agent/10.10"})
+                 "User-Agent": "Haronex-Radiology-Agent/10.12"})
     # Semantic format errors get only one additional fresh response.
     # HTTP 400/auth/content filtering or clinical safety failures are never retried.
     recoverable_formats = {
@@ -313,10 +394,15 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v10-10":
+        if version != "haronex-groq-qwen38-v10-12":
             raise ValueError("Unsupported review version")
         groups = [review_with_recovery(key, text) for text in texts]
-        print(json.dumps({"ok": True, "mode": "groq", "passes": 1,
+        independent_audit = conclusion_issue_groups(key, texts)
+        for i, added in enumerate(independent_audit):
+            existing = {(x["quote"], x["category"]) for x in groups[i]}
+            groups[i].extend(x for x in added
+                             if (x["quote"], x["category"]) not in existing)
+        print(json.dumps({"ok": True, "mode": "groq", "passes": 2,
                           "review_version": version, "groups": groups,
                           "discarded_issues": DISCARDED_ISSUES["count"]},
                          ensure_ascii=False))
@@ -344,12 +430,24 @@ def self_test():
                                 "category": "language", "explanation": "Missing punctuation",
                                 "suggestion": "Small fat-containing umbilical hernia."}])
     assert len(issues) == 1 and issues[0]["category"] == "language"
+    clinical = ("Findings: Multiple bilateral renal cortical cysts, bulky prostate.\n"
+                "Conclusion:\nNormal kidneys with no cysts.\nThanks;")
+    section = conclusion_section(clinical)
+    assert section and "Normal kidneys with no cysts." in section
+    assert "Thanks" not in section
+    fake = {"quote": "Normal kidneys with no cysts.", "category": "logic",
+            "explanation": "Contradicts the documented renal cysts",
+            "suggestion": "Reconcile with Findings after physician verification."}
+    assert conclusion_issue_groups("offline", [clinical],
+        reviewer=lambda context: [fake]) == [[dict(fake, section="conclusion")]]
+    assert conclusion_issue_groups("offline", ["Normal report."],
+        reviewer=lambda context: [fake]) == [[]]
     assert MODEL == "qwen/qwen3.8-27b"
     class FakeError:
         def read(self, limit):
             return b'{"error":{"message":"unsupported reasoning effort"}}'
     assert classify_http_400(FakeError()) == "GROQ_REQUEST_400_REASONING"
-    assert "Haronex-Radiology-Agent/10.10" in str(api_review.__code__.co_consts)
+    assert "Haronex-Radiology-Agent/10.12" in str(api_review.__code__.co_consts)
     assert MAX_COMPLETION_TOKENS == 8192
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
