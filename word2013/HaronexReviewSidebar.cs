@@ -26,6 +26,7 @@ namespace RadiologyAgent {
     private List<Issue> issues=new List<Issue>();
     private string activeId;
     private bool rebuilding;
+    internal event EventHandler Dismissed;
 
     private static readonly Color Navy=Color.FromArgb(20,63,130);
     private static readonly Color Ink=Color.FromArgb(36,48,64);
@@ -57,7 +58,11 @@ namespace RadiologyAgent {
         Font=new Font("Segoe UI",17),ForeColor=Color.White,BackColor=Navy,
         FlatStyle=FlatStyle.Flat,Cursor=Cursors.Hand};
       close.FlatAppearance.BorderSize=0;
-      close.Click+=(s,e)=>Hide();
+      close.Click+=(s,e)=>{
+        Hide();
+        var dismissed=Dismissed;
+        if(dismissed!=null)dismissed(this,EventArgs.Empty);
+      };
       header.Controls.Add(brand);header.Controls.Add(close);
       Controls.Add(header);
 
@@ -129,7 +134,7 @@ namespace RadiologyAgent {
           int number=0;
           foreach(Issue item in shown)cards.Controls.Add(CreateCard(item,++number));
         }
-      } finally {cards.ResumeLayout(true);rebuilding=false;ResizeCards();}
+      } finally {cards.ResumeLayout(true);rebuilding=false;}
     }
     private static string Short(string value,int limit) {
       if(String.IsNullOrEmpty(value))return "";
@@ -177,7 +182,11 @@ namespace RadiologyAgent {
           BackColor=Navy,ForeColor=Color.White,Cursor=Cursors.Hand,
           Font=new Font("Segoe UI",9,FontStyle.Bold)};
         applyButton.FlatAppearance.BorderSize=0;
+        applyButton.Enabled=!String.IsNullOrWhiteSpace(issue.Suggestion)||
+          !String.IsNullOrWhiteSpace(proposed.Text);
         applyButton.Click+=(s,e)=>apply(issue,proposed.Text);
+        proposed.TextChanged+=(s,e)=>applyButton.Enabled=
+          !String.IsNullOrWhiteSpace(proposed.Text);
         var ignoreButton=new Button{Text="Ignore",Location=new Point(x+125,y+5),
           Size=new Size(97,29),BackColor=Color.FromArgb(243,245,248),
           FlatStyle=FlatStyle.Flat,Cursor=Cursors.Hand};
@@ -201,8 +210,7 @@ namespace RadiologyAgent {
         Font=new Font("Segoe UI",9,FontStyle.Bold)};
       parent.Controls.Add(name);
       y+=21;
-      string value=String.IsNullOrWhiteSpace(content)?
-        "No safe literal replacement; edit the proposed wording before applying.":content;
+      string value=content??"";
       int height=TextHeight(value,width-4,
         new Font("Segoe UI",9,bold?FontStyle.Bold:FontStyle.Regular),34,117);
       var text=new TextBox{Text=value,Location=new Point(x,y),
@@ -215,11 +223,11 @@ namespace RadiologyAgent {
       return text;
     }
     private void ResizeCards() {
+      if(rebuilding||cards.Controls.Count==0)return;
       int width=Math.Max(285,cards.ClientSize.Width-42);
       foreach(Control item in cards.Controls) {
-        if(item is Panel && item.Width!=width) {
-          // Rebuild only when width materially changes, not on every Tick.
-          if(!rebuilding) {RefreshCards();return;}
+        if(item is Panel&&Math.Abs(item.Width-width)>8) {
+          RefreshCards();return;
         }
       }
     }
