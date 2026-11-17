@@ -881,28 +881,26 @@ namespace RadiologyAgent {
             dynamic find=region.Find;
             find.ClearFormatting();find.Text=issue.Item1;
             find.Forward=true;find.Wrap=0;find.MatchCase=true;find.MatchWildcards=false;
+            // Word Find may re-scan the same table cell and report a false
+            // duplicate; unique exact positions in the Word snapshot win.
+            int snapshotAt=currentText.IndexOf(issue.Item1,StringComparison.Ordinal);
+            bool snapshotUnique=snapshotAt>=0&&
+              currentText.IndexOf(issue.Item1,snapshotAt+issue.Item1.Length,
+                                  StringComparison.Ordinal)<0;
             if(!(bool)find.Execute()) {
-              // When Word Find fails inside a table, try a precise validated
-              // character-range anchor, NEVER an approximate nearby position.
-              if(issue.Item2!="unrelated"){continue;}
-              int at=currentText.IndexOf(issue.Item1,StringComparison.Ordinal);
-              if(at<0||currentText.IndexOf(issue.Item1,at+1,StringComparison.Ordinal)>=0) {
-                WriteDword("UnrelatedSkippedCount",ReadDword("UnrelatedSkippedCount")+1);
-                continue;
+              if(!snapshotUnique) {wordFailed++;LogFailure("WORD_FIND_MISSING_AMBIGUOUS");continue;}
+              region=doc.Range(start+snapshotAt,start+snapshotAt+issue.Item1.Length);
+              if(!String.Equals(Convert.ToString(region.Text),issue.Item1,
+                                StringComparison.Ordinal)) {
+                wordFailed++;LogFailure("WORD_FIND_RANGE_MISMATCH");continue;
               }
-              region=doc.Range(start+at,start+at+issue.Item1.Length);
-              if(!String.Equals(Convert.ToString(region.Text),issue.Item1,StringComparison.Ordinal)) {
-                WriteDword("UnrelatedSkippedCount",ReadDword("UnrelatedSkippedCount")+1);
-                continue;
-              }
+            } else if(!snapshotUnique) {
+              // If several literal occurrences exist, do not guess which
+              // instance the AI meant without an exact clinical anchor.
+              wordFailed++;LogFailure("WORD_FIND_DUPLICATE_QUOTE");continue;
             }
-            dynamic again=doc.Range((int)region.End,end);
-            dynamic second=again.Find;
-            second.ClearFormatting();second.Text=issue.Item1;
-            second.Forward=true;second.Wrap=0;second.MatchCase=true;second.MatchWildcards=false;
-            if((bool)second.Execute())continue; // Ambiguous quote; never annotate the wrong occurrence.
             string anchorId=((int)region.Start).ToString()+":"+((int)region.End).ToString();
-            if(existing.Contains(anchorId))continue;
+            if(existing.Contains(anchorId)) {wordApplied++;continue;}
             string comment="[Haronex: "+(issue.Item2=="unrelated"?"Unrelated content":(issue.Item2=="logic"?"Potential internal contradiction":"Language"))+"]\r\n"+
               WebReviewForm.Safe(issue.Item3,500)+
               (issue.Item4.Length>0?"\r\nSuggestion: "+WebReviewForm.Safe(issue.Item4,250):"")+
