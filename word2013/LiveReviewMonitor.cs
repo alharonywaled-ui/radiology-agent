@@ -471,7 +471,13 @@ namespace RadiologyAgent {
     private void ApplySidebarIssue(HaronexReviewSidebar.Issue item,
                                   string replacement) {
       object doc;
-      if(!PinnedDocument(out doc)||item==null)return;
+      if(item==null)return;
+      if(!PinnedDocument(out doc)) {
+        if(sidebar!=null&&!sidebar.IsDisposed)
+          sidebar.UpdateStatus("Word document binding changed. Click Show / Hide Sidebar to rebind.");
+        LogFailure("SIDEBAR_APPLY_DOCUMENT_NOT_PINNED");
+        return;
+      }
       object c;
       if(!FindSidebarComment(doc,item,out c)) {
         RefreshSidebarAfterAction(doc);
@@ -807,10 +813,11 @@ namespace RadiologyAgent {
                       "Applied correction; this note was resolved.";}catch{}
                   }
                 } else {
-                  dynamic doneNote=doc.Comments.Add(inserted,
-                    "[Haronex: Resolved]\r\n"+
-                    "Applied correction; the original flagged text was replaced.");
-                  try {doneNote.Done=true;}catch{}
+                  // A whole-sentence edit may delete the original comment.
+                  // DO NOT add a new "Resolved" comment spanning the entire
+                  // inserted sentence: it overlaps surviving comments, changes
+                  // their anchors and can disable every subsequent Apply.
+                  // A vanished verified issue is already resolved in the pane.
                 }
                 resolved++;
               } else {
@@ -853,6 +860,9 @@ namespace RadiologyAgent {
         WriteDword("SuggestionResolutionFailures",unchecked((uint)errors));
         if(errors>0)LogFailure("RELATED_ISSUES_PARTIAL");
         lastSuggestionAnchor=null;
+        // Re-reading live scope coordinates is mandatory after every
+        // successful replacement, not just the first correction.
+        sidebarSignature=null;
         return true;
       } catch(Exception ex) {
         LogFailure("SUGGESTION_APPLY_"+ex.GetType().Name);
