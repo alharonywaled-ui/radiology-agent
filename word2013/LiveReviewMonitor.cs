@@ -342,7 +342,7 @@ namespace RadiologyAgent {
         if(!root.ContainsKey("mode")||Convert.ToString(root["mode"])!="groq")return null;
         if(!root.ContainsKey("review_version")||
            Convert.ToString(root["review_version"])!=WebReviewForm.ReviewAlgorithmVersion)return null;
-        if(!root.ContainsKey("passes")||Convert.ToInt32(root["passes"])!=1)return null;
+        if(!root.ContainsKey("passes")||Convert.ToInt32(root["passes"])!=2)return null;
         var groups=root["groups"] as object[];
         var chunks=Chunks(report);
         if(groups==null||groups.Length!=chunks.Count)return null;
@@ -422,7 +422,7 @@ namespace RadiologyAgent {
           {"explanation","Laterality conflict"},{"suggestion","Verify laterality"}
         };
         var response=new Dictionary<string,object> {
-          {"ok",true},{"mode","groq"},{"passes",1},
+          {"ok",true},{"mode","groq"},{"passes",2},
           {"review_version",WebReviewForm.ReviewAlgorithmVersion},
           {"groups",new object[]{new object[]{issue}}}
         };
@@ -452,7 +452,7 @@ namespace RadiologyAgent {
         var parser=new JavaScriptSerializer{MaxJsonLength=2000000};
         var root=parser.DeserializeObject(source) as Dictionary<string,object>;
         var groups=root["groups"] as object[];
-        var unique=new Dictionary<string,Tuple<string,string,string,string>>(StringComparer.Ordinal);
+        var unique=new Dictionary<string,Tuple<string,string,string,string,string>>(StringComparer.Ordinal);
         foreach(var group in groups) {
           var issues=group as object[];
           foreach(var issue in issues) {
@@ -460,12 +460,13 @@ namespace RadiologyAgent {
             Func<string,string> get=k=>row.ContainsKey(k)&&row[k]!=null?Convert.ToString(row[k]):"";
             string quote=get("quote"),category=get("category");
             if(quote.Length<2||!currentText.Contains(quote))continue;
-            string key=quote;
-            var record=Tuple.Create(quote,category,get("explanation"),get("suggestion"));
+            string section=get("section");
+            string key=quote+"\u001f"+section;
+            var record=Tuple.Create(quote,category,get("explanation"),get("suggestion"),section);
             if(!unique.ContainsKey(key)||category=="logic")unique[key]=record;
           }
         }
-        var ordered=new List<Tuple<string,string,string,string>>(unique.Values);
+        var ordered=new List<Tuple<string,string,string,string,string>>(unique.Values);
         ordered.Sort((a,b)=>{
           int priority=String.CompareOrdinal(a.Item2,b.Item2);
           if(a.Item2=="logic"&&b.Item2!="logic")return -1;
@@ -489,6 +490,22 @@ namespace RadiologyAgent {
         foreach(var issue in ordered) {
           try {
             dynamic region=doc.Range(start,end);
+            // Dedicated conclusion-audit items must be attached inside the
+            // Conclusion/Impression, even when a quote also appears in Findings.
+            if(String.Equals(issue.Item5,"conclusion",StringComparison.OrdinalIgnoreCase)) {
+              dynamic heading=doc.Range(start,end);
+              dynamic hf=heading.Find;
+              hf.ClearFormatting();hf.Text="Conclusion";hf.Forward=true;
+              hf.Wrap=0;hf.MatchCase=false;hf.MatchWildcards=false;
+              if(!(bool)hf.Execute()) {
+                heading=doc.Range(start,end);
+                hf=heading.Find;
+                hf.ClearFormatting();hf.Text="Impression";hf.Forward=true;
+                hf.Wrap=0;hf.MatchCase=false;hf.MatchWildcards=false;
+                if(!(bool)hf.Execute())continue;
+              }
+              region=doc.Range((int)heading.Start,end);
+            }
             dynamic find=region.Find;
             find.ClearFormatting();find.Text=issue.Item1;
             find.Forward=true;find.Wrap=0;find.MatchCase=true;find.MatchWildcards=false;
