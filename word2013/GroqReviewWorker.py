@@ -545,7 +545,7 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v11":
+        if version != "haronex-groq-qwen38-v11-1":
             raise ValueError("Unsupported review version")
         # Three distinct checks run in parallel: language/logic, Conclusion
         # consistency, and independently targeted context-incoherence audit.
