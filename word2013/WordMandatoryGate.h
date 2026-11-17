@@ -434,15 +434,17 @@ public:
       SetCancel(*cancel);
       IncrementDiagnostic(L"SaveBlockedCount");
       MessageBoxW(nullptr,
-        L"Saving is locked for this report. Click Clear Both in the "
-        L"Radiology Agent ribbon to enable Save and Save As.",
+        L"Saving this report has been locked. First click \"Review\" in the "
+        L"Radiology Agent tab, then click \"Clear Both\" to enable "
+        L"\"Save\" and \"Save As\".",
         L"Haronex - Save locked",MB_OK|MB_ICONINFORMATION);
     } else {
       SetCancel(*cancel);
       IncrementDiagnostic(L"PrintBlockedCount");
       MessageBoxW(nullptr,
-        L"Printing is locked until you click Clear Both in the Radiology Agent tab.",
-        L"Haronex - Print requires Clear Both",MB_OK|MB_ICONINFORMATION);
+        L"Printing remains locked until you click \"Review\" and then "
+        L"\"Clear Both\" on the \"Radiology Agent\" tab.",
+        L"Haronex - Print Locked",MB_OK|MB_ICONINFORMATION);
     }
     return S_OK;
   }
