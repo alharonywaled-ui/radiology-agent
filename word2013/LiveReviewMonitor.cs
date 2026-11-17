@@ -88,6 +88,9 @@ namespace RadiologyAgent {
     private bool awaitingDocument;
     private DateTime documentWaitStarted;
     private string lastWordProblem="WORD_NOT_CONNECTED";
+    private SuggestionPopup suggestionPopup;
+    private string lastSuggestionAnchor;
+
 
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     private static extern int MessageBox(IntPtr owner,string message,string title,uint flags);
@@ -191,7 +194,10 @@ namespace RadiologyAgent {
       if(polling||IsDisposed)return;
       polling=true;
       try {
-        if(ConnectWord())PollWord();
+        if(ConnectWord()) {
+          PollWord();
+          CheckSuggestionSelection();
+        }
         CheckClick();
         CheckPendingDocument();
         // No background API calls: only explicit Review Text click triggers analysis.
@@ -263,10 +269,165 @@ namespace RadiologyAgent {
     }
 
     private void ClearDocument() {
+      if(suggestionPopup!=null&&!suggestionPopup.IsDisposed)suggestionPopup.Close();
+      suggestionPopup=null;lastSuggestionAnchor=null;
       if(runningCancellation!=null)runningCancellation.Cancel();
       documentId=null;currentText=null;snapshotToken=null;
       readyResponse=null;failed=false;
       WebReviewForm.SetReviewStatus(0);
+    }
+
+    // Show the non-modal UI only for a selected range attached to a Haronex
+    // comment in the exact pinned Word window. Never bind another open report.
+    private void CheckSuggestionSelection() {
+      if(word==null||currentText==null||boundWordWindow==null)return;
+      if(suggestionPopup!=null&&!suggestionPopup.IsDisposed)return;
+      try {
+        dynamic app=word;
+        dynamic window=boundWordWindow;
+        dynamic doc=window.Document;
+        if(!String.Equals(Convert.ToString(doc.FullName),
+            documentId.Substring(documentId.IndexOf('|')+1),StringComparison.Ordinal))
+          return;
+        // The popup must not appear while another window owns input.
+        // Word selection is meaningful only while the pinned Word app is focused.
+        int selectionStart=(int)app.Selection.Range.Start;
+        int selectionEnd=(int)app.Selection.Range.End;
+        dynamic comments=doc.Comments;
+        int count=(int)comments.Count;
+        for(int index=1;index<=count;index++) {
+          dynamic comment=comments.Item(index);
+          dynamic scope=comment.Scope;
+          int begin=(int)scope.Start,finish=(int)scope.End;
+          if(selectionStart<begin||selectionStart>finish||
+             selectionEnd>finish)continue;
+          string commentText=Convert.ToString(comment.Range.Text);
+          if(commentText.IndexOf("[Haronex:",StringComparison.Ordinal)<0)continue;
+          var result=Regex.Match(commentText,
+            @"\[Haronex:\s*(Language|Potential internal contradiction|Unrelated content)\]",
+            RegexOptions.IgnoreCase);
+          if(!result.Success)continue;
+          string category=result.Groups[1].Value=="Language"?"language":
+            result.Groups[1].Value=="Unrelated content"?"unrelated":"logic";
+          string quote=Convert.ToString(scope.Text);
+          string suggestion=ExtractSuggestion(commentText);
+          if(String.IsNullOrWhiteSpace(quote)||quote.Length>500)continue;
+          string id=documentId+"|"+begin+":"+finish+"|"+commentText.GetHashCode();
+          if(lastSuggestionAnchor==id)return; // Cancel means do not re-open until selection moves.
+          lastSuggestionAnchor=id;
+          int expectedBegin=begin,expectedFinish=finish;
+          string expectedQuote=quote,expectedComment=commentText;
+          object boundDocument=doc;
+          var popup=new SuggestionPopup(category,quote,suggestion,
+            replacement=>ApplyCommentSuggestion(boundDocument,
+              expectedBegin,expectedFinish,expectedQuote,expectedComment,replacement));
+          suggestionPopup=popup;
+          popup.FormClosed+=(sender,args)=>{
+            if(Object.ReferenceEquals(suggestionPopup,popup))suggestionPopup=null;
+          };
+          popup.PositionNearCursor();
+          popup.Show(this);
+          return;
+        }
+        lastSuggestionAnchor=null;
+      } catch { /* Word may be busy during a selection change. */ }
+    }
+
+    private static string ExtractSuggestion(string text) {
+      if(String.IsNullOrWhiteSpace(text))return "";
+      var m=Regex.Match(text,@"(?:^|[\r\n])Suggestion:[ \t]*([^\r\n]*)",
+        RegexOptions.IgnoreCase);
+      return m.Success?m.Groups[1].Value.Trim():"";
+    }
+
+    private bool ApplyCommentSuggestion(object document,int begin,int finish,
+                                        string original,string expectedComment,
+                                        string replacement) {
+      if(String.IsNullOrWhiteSpace(replacement)||replacement==original||
+         replacement.Length>2000||replacement.IndexOf('\0')>=0)return false;
+      try {
+        if(boundWordWindow==null||documentId==null)return false;
+        dynamic doc=document;
+        // Confirm this *same* pinned open document, comment and exact range.
+        if(!Object.ReferenceEquals(document,((dynamic)boundWordWindow).Document)) {
+          // COM RCW identity can change: use name AND existing range checks below.
+          if(!String.Equals(Convert.ToString(doc.FullName),
+              documentId.Substring(documentId.IndexOf('|')+1),StringComparison.Ordinal))
+            return false;
+        }
+        if(!String.Equals(Convert.ToString(doc.FullName),
+            documentId.Substring(documentId.IndexOf('|')+1),StringComparison.Ordinal))
+          return false;
+        dynamic replacementRange=doc.Range(begin,finish);
+        if(!String.Equals(Convert.ToString(replacementRange.Text),original,
+                          StringComparison.Ordinal))return false;
+        dynamic targetComment=null;
+        dynamic comments=doc.Comments;
+        int count=(int)comments.Count;
+        for(int i=1;i<=count;i++) {
+          dynamic c=comments.Item(i);
+          dynamic scope=c.Scope;
+          if((int)scope.Start!=begin||(int)scope.End!=finish)continue;
+          if(String.Equals(Convert.ToString(c.Range.Text),expectedComment,
+                           StringComparison.Ordinal)) {
+            targetComment=c;break;
+          }
+        }
+        if(targetComment==null)return false;
+        // Formatting may span multiple character styles; capture the range's
+        // leading font and restore it after editing where Word permits.
+        string fontName="";float fontSize=0;
+        int bold=0,italic=0;
+        try {
+          dynamic font=replacementRange.Font;
+          fontName=Convert.ToString(font.Name);
+          fontSize=Convert.ToSingle(font.Size);
+          bold=Convert.ToInt32(font.Bold);
+          italic=Convert.ToInt32(font.Italic);
+        } catch {}
+        dynamic undo=null;bool undoStarted=false;
+        try {
+          undo=doc.Application.UndoRecord;
+          undo.StartCustomRecord("Haronex Apply Suggestion");
+          undoStarted=true;
+        } catch {}
+        try {
+          targetComment.Delete();
+          replacementRange.Text=replacement;
+          dynamic inserted=doc.Range(begin,begin+replacement.Length);
+          try {
+            if(!String.IsNullOrWhiteSpace(fontName))inserted.Font.Name=fontName;
+            if(fontSize>0)inserted.Font.Size=fontSize;
+            if(bold>=0)inserted.Font.Bold=bold;
+            if(italic>=0)inserted.Font.Italic=italic;
+          } catch {}
+          try {inserted.HighlightColorIndex=0;} catch {}
+        } finally {
+          if(undoStarted)try {undo.EndCustomRecord();} catch {}
+        }
+        lastSuggestionAnchor=null;
+        // The existing monitor detects the changed document on the next poll.
+        return true;
+      } catch(Exception ex) {
+        LogFailure("SUGGESTION_APPLY_"+ex.GetType().Name);
+        return false;
+      }
+    }
+
+    private static void BoldSuggestionInComment(object comment) {
+      try {
+        dynamic c=comment;
+        dynamic range=c.Range;
+        string text=Convert.ToString(range.Text);
+        int label=text.IndexOf("Suggestion:",StringComparison.OrdinalIgnoreCase);
+        if(label<0)return;
+        int stop=text.IndexOf('\r',label);
+        if(stop<0)stop=text.IndexOf('\n',label);
+        if(stop<0)stop=text.Length;
+        dynamic formatted=range.Duplicate;
+        formatted.SetRange((int)range.Start+label,(int)range.Start+stop);
+        formatted.Font.Bold=1;
+      } catch { /* Bold is best-effort; never fail the review. */ }
     }
 
     private void CheckClick() {
@@ -441,13 +602,15 @@ namespace RadiologyAgent {
         var normalControl=ObviousOffTopicInConclusion(
           "Findings: Bilateral cysts.\rConclusion:\rElement of urinary cystitis.\rThanks;");
         if(gibberish.Count!=1||gibberish[0]!="dsdsd"||normalControl.Count!=0||
-           !LooksLikeGibberishToken("dsdsd")||LooksLikeGibberishToken("cystitis")||
+           !LooksLikeGibberishToken("dsdsd")||!LooksLikeGibberishToken("sasasasas")||
+           LooksLikeGibberishToken("cystitis")||
            LooksLikeGibberishToken("MRCP")||LooksLikeGibberishToken("IHBR")||
            LooksLikeGibberishToken("PETCT")||LooksLikeGibberishToken("2027"))
           return false;
         // V11 regression: standalone symbol-wrapped text, full-body
         // candidates, duplicate token instances and protected medical text.
-        if(ObviousOffTopicInConclusion("***dsdsd ***").Count!=1||
+        if(ObviousOffTopicInConclusion("***sasasasas ***").Count!=1||
+           ObviousOffTopicInConclusion("***dsdsd ***").Count!=1||
            ObviousOffTopicInConclusion("Findings: ***dsdsd ***.").Count!=1||
            ObviousOffTopicInConclusion("Findings: dsdsd.\rConclusion:\rdsdsd.").Count!=1||
            ObviousOffTopicInConclusion(
@@ -474,7 +637,7 @@ namespace RadiologyAgent {
     // a dictionary or replacing a clinical term automatically.
     private static bool LooksLikeGibberishToken(string word) {
       return word!=null&&word.Length>=5&&word.Length<=12&&
-        Regex.IsMatch(word,@"^([a-z]{2})\1(?:\1|[a-z])$",
+        Regex.IsMatch(word,@"^([a-z]{2})\1+[a-z]?$",
           RegexOptions.CultureInvariant);
     }
 
@@ -566,13 +729,14 @@ namespace RadiologyAgent {
           } catch { /* Highlight still checked independently. */ }
           match.HighlightColorIndex=12; // Word 2013 wdViolet.
           if(!hasComment) {
-            doc.Comments.Add(match,
+            dynamic newComment=doc.Comments.Add(match,
               "[Haronex: Unrelated content]\r\n"
               +(gibberish?
                 "Unintelligible repeated-letter token in the clinical report.\r\n":
                 "Non-medical personal or employment statement appears in the clinical conclusion.\r\n")
               +"Suggestion: Verify the intended wording with the reporting radiologist.\r\n"
               +"Requires clinical verification.");
+            BoldSuggestionInComment(newComment);
           }
           if(Convert.ToInt32(match.HighlightColorIndex)!=12) {
             reason="COLOR_NOT_APPLIED";failed++;continue;
@@ -712,7 +876,8 @@ namespace RadiologyAgent {
               (issue.Item4.Length>0?"\r\nSuggestion: "+WebReviewForm.Safe(issue.Item4,250):"")+
               "\r\nRequires clinical verification.";
             region.HighlightColorIndex=issue.Item2=="unrelated"?12:(issue.Item2=="logic"?6:7); // wdViolet=12
-            doc.Comments.Add(region,comment);
+            dynamic createdComment=doc.Comments.Add(region,comment);
+            BoldSuggestionInComment(createdComment);
             if(issue.Item2=="unrelated")
               WriteDword("UnrelatedAppliedCount",ReadDword("UnrelatedAppliedCount")+1);
             existing.Add(anchorId);
