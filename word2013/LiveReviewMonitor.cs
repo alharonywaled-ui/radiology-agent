@@ -6,6 +6,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -427,13 +428,44 @@ namespace RadiologyAgent {
           {"groups",new object[]{new object[]{issue}}}
         };
         string json=parser.Serialize(response);
-        return MandatoryApproval.SelfTest()
+        var tableExample="Findings: Bilateral renal cysts.\r\x07Conclusion:\r\x07o Haron work at dokki scan\r\x07Thanks;";
+        var found=ObviousOffTopicInConclusion(tableExample);
+        var control=ObviousOffTopicInConclusion("Findings: Patient works at refinery.\rConclusion:\rBilateral cysts.\rThanks;");
+        return found.Count==1&&found[0]=="Haron work at dokki scan"&&control.Count==0
+          && MandatoryApproval.SelfTest()
           && DebounceMilliseconds==1200
           && PollMilliseconds==400
           && ValidateResponse(json,report)!=null
           && ValidateResponse(json,report.Replace("Left kidney","Spleen"))==null
           && ValidateResponse(json.Replace("\"groq\"","\"account\""),report)==null;
       } catch {return false;}
+    }
+
+    // Independent Word-side safety net for obvious personal/employment lines
+    // in Conclusion. Generic, narrow pattern: no hard-coded person or site.
+    // Clinical occupational history and non-Conclusion text are not flagged.
+    internal static List<string> ObviousOffTopicInConclusion(string report) {
+      var found=new List<string>();
+      if(String.IsNullOrEmpty(report))return found;
+      var header=Regex.Match(report,
+        @"(?:^|[\r\n\x07])[ \t]*(?:Conclusion|Impression)[ \t]*:",
+        RegexOptions.IgnoreCase);
+      if(!header.Success)return found;
+      int begin=header.Index+header.Length;
+      var ending=Regex.Match(report.Substring(begin),
+        @"(?:^|[\r\n\x07])[ \t]*(?:Thanks[;,.]?|Dr\.[ \t]|Signed[ \t]+by)",
+        RegexOptions.IgnoreCase);
+      string body=ending.Success?report.Substring(begin,ending.Index):
+        report.Substring(begin);
+      foreach(string raw in Regex.Split(body,@"[\r\n\x07]+")) {
+        string line=raw.Trim().TrimStart('o','•','◦','-',' ','\t').Trim();
+        if(line.Length<8||line.Length>240)continue;
+        if(!Regex.IsMatch(line,
+           @"^[A-Z][a-z]{1,30}(?:[ \t]+[A-Z][a-z]{1,30})?[ \t]+(?:work|works|working)[ \t]+(?:at|for)[ \t]+[A-Za-z]",
+           RegexOptions.CultureInvariant))continue;
+        if(!found.Contains(line))found.Add(line);
+      }
+      return found;
     }
 
     private void ApplyReady() {
@@ -465,6 +497,19 @@ namespace RadiologyAgent {
             var record=Tuple.Create(quote,category,get("explanation"),get("suggestion"),section);
             if(!unique.ContainsKey(key)||(category=="logic"||category=="unrelated"))unique[key]=record;
           }
+        }
+        // Cross-check direct Word snapshot, because the Python model/text
+        // segmentation can miss table cells even after a successful review.
+        var fallback=ObviousOffTopicInConclusion(currentText);
+        WriteDword("UnrelatedCandidateCount",(uint)fallback.Count);
+        WriteDword("UnrelatedAppliedCount",0);
+        WriteDword("UnrelatedSkippedCount",0);
+        foreach(string line in fallback) {
+          string key=line+"\u001fconclusion";
+          unique[key]=Tuple.Create(line,"unrelated",
+            "Non-medical personal or employment statement appears in the clinical conclusion.",
+            "Ask the reporting radiologist to verify and remove if unintended.",
+            "conclusion");
         }
         var ordered=new List<Tuple<string,string,string,string,string>>(unique.Values);
         ordered.Sort((a,b)=>{
@@ -511,7 +556,21 @@ namespace RadiologyAgent {
             dynamic find=region.Find;
             find.ClearFormatting();find.Text=issue.Item1;
             find.Forward=true;find.Wrap=0;find.MatchCase=true;find.MatchWildcards=false;
-            if(!(bool)find.Execute())continue;
+            if(!(bool)find.Execute()) {
+              // When Word Find fails inside a table, try a precise validated
+              // character-range anchor, NEVER an approximate nearby position.
+              if(issue.Item2!="unrelated"){continue;}
+              int at=currentText.IndexOf(issue.Item1,StringComparison.Ordinal);
+              if(at<0||currentText.IndexOf(issue.Item1,at+1,StringComparison.Ordinal)>=0) {
+                WriteDword("UnrelatedSkippedCount",ReadDword("UnrelatedSkippedCount")+1);
+                continue;
+              }
+              region=doc.Range(start+at,start+at+issue.Item1.Length);
+              if(!String.Equals(Convert.ToString(region.Text),issue.Item1,StringComparison.Ordinal)) {
+                WriteDword("UnrelatedSkippedCount",ReadDword("UnrelatedSkippedCount")+1);
+                continue;
+              }
+            }
             dynamic again=doc.Range((int)region.End,end);
             dynamic second=again.Find;
             second.ClearFormatting();second.Text=issue.Item1;
@@ -525,8 +584,13 @@ namespace RadiologyAgent {
               "\r\nRequires clinical verification.";
             region.HighlightColorIndex=issue.Item2=="unrelated"?12:(issue.Item2=="logic"?6:7); // wdViolet=12
             doc.Comments.Add(region,comment);
+            if(issue.Item2=="unrelated")
+              WriteDword("UnrelatedAppliedCount",ReadDword("UnrelatedAppliedCount")+1);
             existing.Add(anchorId);
-          } catch {}
+          } catch {
+            if(issue.Item2=="unrelated")
+              WriteDword("UnrelatedSkippedCount",ReadDword("UnrelatedSkippedCount")+1);
+          }
         }
         if(!MandatoryApproval.Approve(doc,currentText,unchecked((uint)hwnd))) {
           LogFailure("MANDATORY_APPROVAL_NOT_STORED");
