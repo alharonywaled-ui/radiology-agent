@@ -30,6 +30,9 @@ SYSTEM = (
     "examination is unremarkable, flag a clearly documented remaining abnormality "
     "as a possible omission requiring clinical judgment. "
     "Do not treat local abbreviations such as IHBR as definitely incorrect. "
+    "Medical abbreviations and acronyms (e.g. CT, MR, MRI, MRCP, IHBR, PET CT, BMD) "
+    "are NOT automatically errors, even if uncommon. Do not flag dates or years "
+    "such as 2026, 2027, or 2026/2027 merely for being recent or unexpected. "
     "Then proofread spelling, grammar, punctuation and awkward constructions. "
     "Only flag well-supported errors. Never invent imaging findings or diagnoses. "
     "Quotes MUST be exact substrings of supplied report and no longer than 500 "
@@ -54,6 +57,9 @@ CONCLUSION_SYSTEM = (
     "could materially affect clinical interpretation, and phrase omissions as "
     "questions to the reporting radiologist, not automatic diagnoses. "
     "Preserve uncertainty: possible, likely and questionable are not definitive. "
+    "Preserve legitimate medical abbreviations and acronyms without assuming "
+    "they are nonsense. Dates and year references including 2026 and 2027 "
+    "must not be treated as incorrect solely due to their value. "
     "For unsupported conclusions request confirmation instead of inventing facts. "
     "Do not regard every missing incidental finding as a contradiction. "
     "For each issue anchor an EXACT substring of the CONCLUSION (not Findings) "
@@ -120,7 +126,7 @@ OFF_TOPIC_EMPLOYMENT = re.compile(
 # Narrow repeated-motif detector; not a dictionary and not a medical
 # spellchecker. Clinical abbreviations and unfamiliar real terms must never
 # be silently rewritten. Only transparent physician-verify annotations.
-REPEATED_GIBBERISH = re.compile(r"(?i)^([a-z]{2})\1(?:\1|[a-z])$")
+REPEATED_GIBBERISH = re.compile(r"^([a-z]{2})\1(?:\1|[a-z])$")
 
 def repeated_gibberish_tokens(line):
     return [m.group(0) for m in re.finditer(r"\b[A-Za-z]{5,12}\b", line)
@@ -563,6 +569,8 @@ def self_test():
     assert nonsense_issues[0]["quote"] == "dsdsd"
     assert nonsense_issues[0]["category"] == "unrelated"
     assert repeated_gibberish_tokens("Bilateral renal cortical cysts.") == []
+    assert repeated_gibberish_tokens("MRI MRCP IHBR PETCT BMD 2026/2027") == []
+    assert repeated_gibberish_tokens("dsdsd") == ["dsdsd"]
     assert MODEL == "qwen/qwen3.8-27b"
     class FakeError:
         def read(self, limit):
