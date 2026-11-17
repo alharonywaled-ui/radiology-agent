@@ -128,6 +128,44 @@ def contextual_unrelated_groups(key, chunks, reviewer=None):
                        and issue.get("quote") in chunk])
     return groups
 
+# Separate exhaustive language-only audit. It runs on the SAME document
+# snapshot as the semantic/Conclusion checks and the first general review.
+LANGUAGE_SYSTEM = (
+    "You are an expert English-language radiology copyeditor. Examine EACH "
+    "sentence of the supplied report, including Findings, Side Findings, "
+    "Conclusion, captions and tables. Identify clear grammar, spelling, "
+    "punctuation, malformed word order, articles, and agreement errors. "
+    "Do not skip a sentence because another error was found. "
+    "Do not invent medical diagnoses, measurements, or findings. "
+    "Preserve medical abbreviations (MRI, CT, MRCP, IHBR, BMD and local "
+    "acronyms), physician names, identity numbers, measurements and valid "
+    "dates including 2026 and 2027. "
+    "Only flag high-confidence errors, category language only. "
+    "For each issue quote the SMALLEST exact contiguous excerpt that fully "
+    "identifies the error, and make suggestion be a LITERAL replacement for "
+    "exactly that excerpt, not a full sentence for a two-word quote. "
+    "If a whole sentence must change, quote the entire original sentence "
+    "and give the entire replacement sentence. "
+    "Return JSON only: {\\\"issues\\\":[{\\\"quote\\\":\\\"exact text\\\","
+    "\\\"category\\\":\\\"language\\\",\\\"explanation\\\":\\\"reason\\\","
+    "\\\"suggestion\\\":\\\"exact replacement\\\"}]}. "
+    "Return an empty array if no clear language errors exist."
+)
+
+def language_audit_groups(key, chunks, reviewer=None):
+    if reviewer is None:
+        reviewer=lambda part: review_with_recovery(
+            key, part,
+            review=lambda k,t: api_review(k,t,system_prompt=LANGUAGE_SYSTEM,
+                        user_prefix="Perform a complete independent language audit:\\n\\n"))
+    groups=[]
+    for text in chunks:
+        results=reviewer(text)
+        groups.append([dict(item,section="body") for item in results
+                       if item.get("category")=="language"
+                       and item.get("quote") in text])
+    return groups
+
 # Word's Document.Content.Text uses CR-only paragraphs and 0x07 table-cell
 # boundaries. ^ with re.MULTILINE only handles LF, silently skipping a
 # Conclusion table in real Word reports. Recognize all three boundaries.
@@ -547,20 +585,26 @@ def main():
             raise ValueError("Invalid report text")
         if version != "haronex-groq-qwen38-v11-1":
             raise ValueError("Unsupported review version")
-        # Three distinct checks run in parallel: language/logic, Conclusion
-        # consistency, and independently targeted context-incoherence audit.
-        # No partial responses are accepted if a required check fails.
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        # Four independent checks on the SAME snapshot, merged before Word
+        # annotations: general, conclusion, context and language. This reduces
+        # missed independent findings; AI coverage cannot be guaranteed.
+        with ThreadPoolExecutor(max_workers=4) as executor:
             general = executor.submit(
                 lambda: [review_with_recovery(key, text) for text in texts])
             clinical = executor.submit(conclusion_issue_groups, key, texts)
             context_audit = executor.submit(contextual_unrelated_groups, key, texts)
+            language_audit = executor.submit(language_audit_groups, key, texts)
             groups = general.result()
             independent_audit = clinical.result()
             unrelated_audit = context_audit.result()
+            extra_language = language_audit.result()
         local_offtopic = distribute_conclusion_issues(
             texts, obvious_nonmedical_conclusion_issues("".join(texts)))
         for i, added in enumerate(independent_audit):
+            existing = {(x["quote"], x["category"]) for x in groups[i]}
+            groups[i].extend(x for x in added
+                             if (x["quote"], x["category"]) not in existing)
+        for i, added in enumerate(extra_language):
             existing = {(x["quote"], x["category"]) for x in groups[i]}
             groups[i].extend(x for x in added
                              if (x["quote"], x["category"]) not in existing)
@@ -683,6 +727,12 @@ def self_test():
          "suggestion": "Verify intended wording.", "section": "body"}]]
     assert "2026/2027" in OFF_TOPIC_SYSTEM
     assert "EVERY" in OFF_TOPIC_SYSTEM
+    mock_language=lambda text: [{
+        "quote":"Average sized", "category":"language",
+        "explanation":"Word choice", "suggestion":"Average-sized"}]
+    assert language_audit_groups("offline", ["Average sized kidneys."],
+                                 reviewer=mock_language)[0][0]["quote"]=="Average sized"
+    assert "quote the entire original sentence" in LANGUAGE_SYSTEM
     assert MODEL == "qwen/qwen3.8-27b"
     class FakeError:
         def read(self, limit):
