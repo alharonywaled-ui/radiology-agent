@@ -115,7 +115,9 @@ def conclusion_issue_groups(key, chunks, reviewer=None):
         if ident in seen:
             continue
         seen.add(ident)
-        groups[index].append(issue)
+        tagged = dict(issue)
+        tagged["section"] = "conclusion"
+        groups[index].append(tagged)
     return groups
 
 def normalize(text, issues):
@@ -302,7 +304,7 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep,
     request_body = {
         "model": MODEL,
         "messages": [{"role": "system", "content": system_prompt},
-                     {"role": "user", "content": "Review this report completely:\\n\\n" + text}],
+                     {"role": "user", "content": user_prefix + text}],
         "response_format": {"type": "json_object"},
         "reasoning_effort": "low",
         "reasoning_format": "hidden",
