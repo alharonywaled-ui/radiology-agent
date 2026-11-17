@@ -233,7 +233,7 @@ namespace RadiologyAgent {
         lastWordProblem="WORD_POLL_FAILED";
       } finally {
         polling=false;
-        if(!timer.IsDisposed) {
+        if(!IsDisposed) {
           int next=(working||pendingClick||awaitingDocument)?ActivePollMilliseconds:
             (sidebar!=null&&!sidebar.IsDisposed&&sidebar.Visible?
               SidebarPollMilliseconds:PollMilliseconds);
@@ -1326,6 +1326,7 @@ namespace RadiologyAgent {
         int start=(int)doc.Content.Start,end=(int)doc.Content.End;
         // Batch Word layout repaints while inserting all comments/highlights.
         // Always restore even after an individual COM failure.
+        uint purpleApplied=0,purpleSkipped=0;
         bool repaintChanged=false,oldRepaint=true;
         try {
           oldRepaint=Convert.ToBoolean(app.ScreenUpdating);
@@ -1396,7 +1397,6 @@ namespace RadiologyAgent {
         // Run this after the generic AI annotation path; if that path
         // silently skipped the table cell, apply a verified full-document
         // exact-match highlight and comment instead.
-        uint purpleApplied=0,purpleSkipped=0;
         foreach(string line in fallback) {
           string reason;
           if(EnsureUnrelatedAnnotation(doc,line,currentText,start,end,out reason))purpleApplied++;
