@@ -8,6 +8,7 @@ import time
 import email.utils
 import datetime
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 MODEL = "qwen/qwen3.8-27b"
 RETRY_DELAYS = (2, 6, 15)  # Bounded exponential backoff, four total HTTP attempts.
@@ -65,10 +66,19 @@ CONCLUSION_SYSTEM = (
     "explanation, suggestion. If nothing is wrong return an empty issues array. "
     "Never repeat patient identifiers."
 )
+# Word's Document.Content.Text uses CR-only paragraphs and 0x07 table-cell
+# boundaries. ^ with re.MULTILINE only handles LF, silently skipping a
+# Conclusion table in real Word reports. Recognize all three boundaries.
+WORD_BOUNDARY = r"(?:^|(?<=[\r\n\x07]))"
 CONCLUSION_HEADING = re.compile(
-    r"(?im)^[ \t]*\*{0,3}[ \t]*(?:conclusion|impression)[ \t]*\*{0,3}[ \t]*[:：]?[ \t]*"
+    WORD_BOUNDARY +
+    r"[ \t]*\*{0,3}[ \t]*(?:conclusion|impression)[ \t]*\*{0,3}[ \t]*[:：]?[ \t]*",
+    re.IGNORECASE
 )
-CONCLUSION_END = re.compile(r"(?im)^[ \t]*(?:thanks[;,.]?|dr\.[ \t]|signed[ \t]*by)")
+CONCLUSION_END = re.compile(
+    WORD_BOUNDARY + r"[ \t]*(?:thanks[;,.]?|dr\.[ \t]|signed[ \t]*by)",
+    re.IGNORECASE
+)
 
 def conclusion_section(report):
     match = CONCLUSION_HEADING.search(report)
@@ -96,20 +106,50 @@ def conclusion_audit_context(report):
             "\n[PARTIAL FINDINGS CONTEXT; CHECK FULL REPORT CLINICALLY]\n" +
             section), section
 
-def conclusion_issue_groups(key, chunks, reviewer=None):
-    full_report = "".join(chunks)
-    context, section = conclusion_audit_context(full_report)
+
+# Local high-precision safeguard for unmistakable biographical/employment
+# statements inside clinical conclusions. It does not replace the semantic AI
+# audit or make any medical claim. Never persist patient/report content.
+OFF_TOPIC_EMPLOYMENT = re.compile(
+    r"(?i)\b(?:work|works|working|employed)\s+(?:at|for)\s+\S+"
+    r"|\b(?:my|his|her)\s+(?:workplace|employer|occupation)\b"
+    r"|\b(?:is|am|are)\s+(?:a|an)\s+"
+    r"(?:developer|accountant|engineer|teacher|student|employee)\b"
+)
+
+def obvious_nonmedical_conclusion_issues(report):
+    section = conclusion_section(report)
+    if not section:
+        return []
+    # Word text uses CR paragraph breaks, ordinary text may use LF.
+    issues = []
+    for raw in re.split(r"[\r\n\x07]+", section):
+        line = raw.strip().lstrip("o•◦- \t").strip()
+        if not line or len(line) > 300:
+            continue
+        if not OFF_TOPIC_EMPLOYMENT.search(line):
+            continue
+        # Only flag a clearly off-topic statement. Do not flag clinical notes
+        # like occupational exposure / employment history from Findings.
+        issues.append({
+            "quote": line,
+            "category": "unrelated",
+            "explanation": ("Non-medical employment or personal statement "
+                            "appears in the clinical conclusion."),
+            "suggestion": "Ask the reporting radiologist to verify and remove if unintended.",
+            "section": "conclusion",
+        })
+    return issues
+
+def distribute_conclusion_issues(chunks, issues):
+    section = conclusion_section("".join(chunks))
     groups = [[] for _ in chunks]
-    if not context:
+    if not section:
         return groups
-    if reviewer is None:
-        reviewer = lambda content: api_review(
-            key, content, system_prompt=CONCLUSION_SYSTEM,
-            user_prefix="Audit every assertion in the Conclusion against the Findings:\n\n")
     seen = set()
-    for issue in reviewer(context):
-        quote = issue["quote"]
-        if issue["category"] not in ("logic", "unrelated") or quote not in section:
+    for issue in issues:
+        quote = issue.get("quote", "")
+        if not quote or quote not in section or issue.get("category") not in ("logic", "unrelated"):
             continue
         candidates = [i for i, chunk in enumerate(chunks) if quote in chunk]
         if not candidates:
@@ -123,6 +163,18 @@ def conclusion_issue_groups(key, chunks, reviewer=None):
         tagged["section"] = "conclusion"
         groups[index].append(tagged)
     return groups
+
+def conclusion_issue_groups(key, chunks, reviewer=None):
+    full_report = "".join(chunks)
+    context, section = conclusion_audit_context(full_report)
+    groups = [[] for _ in chunks]
+    if not context:
+        return groups
+    if reviewer is None:
+        reviewer = lambda content: api_review(
+            key, content, system_prompt=CONCLUSION_SYSTEM,
+            user_prefix="Audit every assertion in the Conclusion against the Findings:\n\n")
+    return distribute_conclusion_issues(chunks, reviewer(context))
 
 def normalize(text, issues):
     output, seen = [], set()
@@ -320,7 +372,7 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep,
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json",
                  "Accept": "application/json",
-                 "User-Agent": "Haronex-Radiology-Agent/10.14"})
+                 "User-Agent": "Haronex-Radiology-Agent/10.15"})
     # Semantic format errors get only one additional fresh response.
     # HTTP 400/auth/content filtering or clinical safety failures are never retried.
     recoverable_formats = {
@@ -398,11 +450,24 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v10-14":
+        if version != "haronex-groq-qwen38-v10-15":
             raise ValueError("Unsupported review version")
-        groups = [review_with_recovery(key, text) for text in texts]
-        independent_audit = conclusion_issue_groups(key, texts)
+        # Two independent reviews run concurrently rather than sequentially.
+        # Both are still mandatory, and their results are combined only after
+        # successful completion. This reduces wall time, not model token usage.
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            general = executor.submit(
+                lambda: [review_with_recovery(key, text) for text in texts])
+            clinical = executor.submit(conclusion_issue_groups, key, texts)
+            groups = general.result()
+            independent_audit = clinical.result()
+        local_offtopic = distribute_conclusion_issues(
+            texts, obvious_nonmedical_conclusion_issues("".join(texts)))
         for i, added in enumerate(independent_audit):
+            existing = {(x["quote"], x["category"]) for x in groups[i]}
+            groups[i].extend(x for x in added
+                             if (x["quote"], x["category"]) not in existing)
+        for i, added in enumerate(local_offtopic):
             existing = {(x["quote"], x["category"]) for x in groups[i]}
             groups[i].extend(x for x in added
                              if (x["quote"], x["category"]) not in existing)
@@ -453,12 +518,36 @@ def self_test():
     tagged = conclusion_issue_groups("offline", [off_topic], reviewer=lambda ctx: [outside])
     assert len(tagged[0]) == 1 and tagged[0][0]["category"] == "unrelated"
     assert normalize_response(off_topic, [outside])[0]["category"] == "unrelated"
+    assert conclusion_section(
+        "Findings: Bilateral cysts.\r\x07Conclusion:\r\x07Haron work at dokki scan"
+        "\r\x07Thanks;") is not None
+    assert obvious_nonmedical_conclusion_issues(
+        "Findings: Bilateral cysts.\r\x07Conclusion:\r\x07"
+        "o Haron work at dokki scan\r\x07Thanks;")
+    assert obvious_nonmedical_conclusion_issues(
+        "Findings: Bilateral renal cysts.\rConclusion:\r"
+        "o Haron work at dokki scan\r"
+        "o Bilateral renal cortical cysts\rThanks;")[0]["category"] == "unrelated"
+    assert obvious_nonmedical_conclusion_issues(
+        "Findings: Bulky prostate.\rConclusion:\rBulky prostate.\rThanks;") == []
+    assert obvious_nonmedical_conclusion_issues(
+        "Findings: The patient works at the hospital.\r"
+        "Conclusion:\rNo acute finding.\rThanks;") == []
+    # Both checks are mandatory while their execution overlaps.
+    events = []
+    def simulated(tag):
+        events.append(tag)
+        return tag
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a = pool.submit(simulated, "general")
+        b = pool.submit(simulated, "conclusion")
+        assert a.result() == "general" and b.result() == "conclusion"
     assert MODEL == "qwen/qwen3.8-27b"
     class FakeError:
         def read(self, limit):
             return b'{"error":{"message":"unsupported reasoning effort"}}'
     assert classify_http_400(FakeError()) == "GROQ_REQUEST_400_REASONING"
-    assert "Haronex-Radiology-Agent/10.14" in str(api_review.__code__.co_consts)
+    assert "Haronex-Radiology-Agent/10.15" in str(api_review.__code__.co_consts)
     assert MAX_COMPLETION_TOKENS == 8192
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
