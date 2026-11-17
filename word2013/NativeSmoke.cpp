@@ -131,7 +131,8 @@ int main(){
   VARIANT_BOOL cancel=VARIANT_FALSE;
   VARIANTARG argv[3];for(int i=0;i<3;++i)VariantInit(&argv[i]);
   argv[0].vt=VT_BYREF|VT_BOOL;argv[0].pboolVal=&cancel;
-  argv[1].vt=VT_BOOL;argv[1].boolVal=VARIANT_FALSE;
+  VARIANT_BOOL saveAsUI=VARIANT_FALSE;
+  argv[1].vt=VT_BYREF|VT_BOOL;argv[1].pboolVal=&saveAsUI;
   argv[2].vt=VT_DISPATCH;argv[2].pdispVal=releasedForTest;
   DISPPARAMS saveArgs={argv,nullptr,3,0};
   bool saved=SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
@@ -140,12 +141,12 @@ int main(){
   DISPPARAMS printArgs={argv,nullptr,2,0};
   bool printed=SUCCEEDED(gate.Invoke(102,IID_NULL,0,DISPATCH_METHOD,
                       &printArgs,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
-  // Actual Word 2013 on the target PC exposes VT_DISPATCH at rgvarg[0].
+  // Observed live Word 2013: [VT_DISPATCH, 16395, 16395].
   // Exercise forward order as well as reverse order before releasing.
   VARIANT_BOOL alternateCancel=VARIANT_FALSE;
   VARIANTARG forwardSave[3];for(int i=0;i<3;++i)VariantInit(&forwardSave[i]);
   forwardSave[0].vt=VT_DISPATCH;forwardSave[0].pdispVal=releasedForTest;
-  forwardSave[1].vt=VT_BOOL;forwardSave[1].boolVal=VARIANT_FALSE;
+  forwardSave[1].vt=VT_BYREF|VT_BOOL;forwardSave[1].pboolVal=&saveAsUI;
   forwardSave[2].vt=VT_BYREF|VT_BOOL;forwardSave[2].pboolVal=&alternateCancel;
   DISPPARAMS fSave={forwardSave,nullptr,3,0};
   VARIANTARG* foundCancel=nullptr;
@@ -154,6 +155,12 @@ int main(){
       &fSave,3,&foundCancel,&foundDoc)&&foundCancel==&forwardSave[2]&&
       foundDoc!=nullptr;
   if(foundDoc){foundDoc->Release();foundDoc=nullptr;}
+  bool correctCancelOnly=identified && foundCancel==&forwardSave[2] &&
+    saveAsUI==VARIANT_FALSE;
+  if(correctCancelOnly)HaronexMandatory::SetCancel(*foundCancel);
+  correctCancelOnly=correctCancelOnly && alternateCancel==VARIANT_TRUE &&
+    saveAsUI==VARIANT_FALSE;
+  alternateCancel=VARIANT_FALSE;
   bool forwardSaved=identified &&
       SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
                            &fSave,nullptr,nullptr,nullptr)) &&
@@ -168,7 +175,7 @@ int main(){
   // Unknown event argument must fail open (never cancel the report).
   VARIANTARG malformedArgs[3];for(int i=0;i<3;++i)VariantInit(&malformedArgs[i]);
   malformedArgs[0].vt=VT_DISPATCH;malformedArgs[0].pdispVal=releasedForTest;
-  malformedArgs[1].vt=VT_BOOL;malformedArgs[1].boolVal=VARIANT_FALSE;
+  malformedArgs[1].vt=VT_BYREF|VT_BOOL;malformedArgs[1].pboolVal=&saveAsUI;
   malformedArgs[2].vt=VT_I4;malformedArgs[2].lVal=42;
   DISPPARAMS invalidArgs={malformedArgs,nullptr,3,0};
   bool invalidFailsOpen=SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
@@ -177,8 +184,8 @@ int main(){
   bool safe=SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
                       &malformed,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
   gate.Detach();releasedForTest->Release();other->Release();
-  if(!separated||!saved||!printed||!safe||!forwardSaved||!forwardPrinted||!invalidFailsOpen) {
-    wprintf(L"V107_WORD_EVENT_RELEASE_FAILED\n");
+  if(!separated||!saved||!printed||!safe||!forwardSaved||!forwardPrinted||!invalidFailsOpen||!correctCancelOnly) {
+    wprintf(L"V1010_WORD_EVENT_RELEASE_FAILED\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 40;
   }
   wprintf(L"NATIVE_COM_AND_RIBBON_AND_MANDATORY_HASH_OK\n");
