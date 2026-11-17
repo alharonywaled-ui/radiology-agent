@@ -445,6 +445,14 @@ namespace RadiologyAgent {
            LooksLikeGibberishToken("MRCP")||LooksLikeGibberishToken("IHBR")||
            LooksLikeGibberishToken("PETCT")||LooksLikeGibberishToken("2027"))
           return false;
+        // V11 regression: standalone symbol-wrapped text, full-body
+        // candidates, duplicate token instances and protected medical text.
+        if(ObviousOffTopicInConclusion("***dsdsd ***").Count!=1||
+           ObviousOffTopicInConclusion("Findings: ***dsdsd ***.").Count!=1||
+           ObviousOffTopicInConclusion("Findings: dsdsd.\rConclusion:\rdsdsd.").Count!=1||
+           ObviousOffTopicInConclusion(
+             "CT and MRI in 2026/2027: renal cystitis, MRCP, IHBR.").Count!=0)
+          return false;
         var duplicateCase=ObviousOffTopicInConclusion(
           tableExample+"\rHaron work at dokki scan");
         return duplicateCase.Count==1
@@ -470,112 +478,112 @@ namespace RadiologyAgent {
           RegexOptions.CultureInvariant);
     }
 
+    // V11: detect high-confidence repeated-motif nonsense anywhere in the
+    // Word document, including table cells, not only in Conclusion.
+    // Employment/biography statements are intentionally Conclusion-only.
     internal static List<string> ObviousOffTopicInConclusion(string report) {
       var found=new List<string>();
       if(String.IsNullOrEmpty(report))return found;
       var header=Regex.Match(report,
         @"(?:^|[\r\n\x07])[ \t]*(?:Conclusion|Impression)[ \t]*:",
         RegexOptions.IgnoreCase);
-      if(!header.Success)return found;
-      int begin=header.Index+header.Length;
-      var ending=Regex.Match(report.Substring(begin),
-        @"(?:^|[\r\n\x07])[ \t]*(?:Thanks[;,.]?|Dr\.[ \t]|Signed[ \t]+by)",
-        RegexOptions.IgnoreCase);
-      string body=ending.Success?report.Substring(begin,ending.Index):
-        report.Substring(begin);
-      foreach(string raw in Regex.Split(body,@"[\r\n\x07]+")) {
-        string line=raw.Trim().TrimStart('o','•','◦','-',' ','\t').Trim();
-        if(line.Length==0||line.Length>300)continue;
-        // Obvious nonclinical biography/employment sentences.
-        if(line.Length>=8&&Regex.IsMatch(line,
-           @"^[A-Z][a-z]{1,30}(?:[ \t]+[A-Z][a-z]{1,30})?[ \t]+(?:work|works|working)[ \t]+(?:at|for)[ \t]+[A-Za-z]",
-           RegexOptions.CultureInvariant)&&!found.Contains(line))
-          found.Add(line);
-        // Detect an isolated repeated-motif gibberish token even when it is
-        // embedded in an otherwise meaningful clinical Conclusion sentence.
-        foreach(Match candidate in Regex.Matches(line,@"\b[A-Za-z]{5,12}\b")) {
-          string token=candidate.Value;
-          if(LooksLikeGibberishToken(token)&&!found.Contains(token))
-            found.Add(token);
+      if(header.Success) {
+        int begin=header.Index+header.Length;
+        var ending=Regex.Match(report.Substring(begin),
+          @"(?:^|[\r\n\x07])[ \t]*(?:Thanks[;,.]?|Dr\.[ \t]|Signed[ \t]+by)",
+          RegexOptions.IgnoreCase);
+        string body=ending.Success?report.Substring(begin,ending.Index):
+          report.Substring(begin);
+        foreach(string raw in Regex.Split(body,@"[\r\n\x07]+")) {
+          string line=raw.Trim().TrimStart('o','•','◦','-',' ','\t').Trim();
+          if(line.Length==0||line.Length>300)continue;
+          if(line.Length>=8&&Regex.IsMatch(line,
+             @"^[A-Z][a-z]{1,30}(?:[ \t]+[A-Z][a-z]{1,30})?[ \t]+(?:work|works|working)[ \t]+(?:at|for)[ \t]+[A-Za-z]",
+             RegexOptions.CultureInvariant)&&!found.Contains(line))
+            found.Add(line);
         }
+      }
+      // Scan the whole body independently: "***dsdsd ***" and the same
+      // token embedded in a clinical sentence are both valid candidates.
+      foreach(Match candidate in Regex.Matches(report,@"\b[A-Za-z]{5,12}\b")) {
+        string token=candidate.Value;
+        if(LooksLikeGibberishToken(token)&&!found.Contains(token))
+          found.Add(token);
       }
       return found;
     }
 
-    // Final Word-side enforcement of purple annotation. A separate, full-doc
-    // exact Find prevents table heading-scoped Find from silently skipping it.
-    // Only acts on a uniquely occurring literal quote from the current
-    // Conclusion snapshot; never selects an approximate neighboring phrase.
+    // Apply only to exact, character-for-character verified Word ranges.
+    // Each occurrence is treated separately: duplicates are not a reason to
+    // skip every occurrence or accidentally mark a different table cell.
     private static bool EnsureUnrelatedAnnotation(object document,string quote,
                                                  string snapshot,int start,int end,out string reason) {
       reason="UNKNOWN";
-      // Word's Find.Execute can wrap or rescan the same table cell when a
-      // new range is constructed. Verify uniqueness from the report text
-      // snapshot instead; we NEVER assume that a second Find means duplicate.
       if(String.IsNullOrEmpty(snapshot)||String.IsNullOrEmpty(quote)) {
         reason="EMPTY_SNAPSHOT";return false;
       }
-      int occurrence=snapshot.IndexOf(quote,StringComparison.Ordinal);
-      if(occurrence<0){reason="NOT_IN_SNAPSHOT";return false;}
-      if(snapshot.IndexOf(quote,occurrence+quote.Length,StringComparison.Ordinal)>=0) {
-        reason="DUPLICATE";return false;
+      bool gibberish=LooksLikeGibberishToken(quote);
+      int headingStart=-1,conclusionEnd=snapshot.Length;
+      if(!gibberish) {
+        var heading=Regex.Match(snapshot,
+          @"(?:^|[\r\n\x07])[ \t]*(?:Conclusion|Impression)[ \t]*:",
+          RegexOptions.IgnoreCase);
+        if(!heading.Success){reason="OUTSIDE_CONCLUSION";return false;}
+        headingStart=heading.Index+heading.Length;
+        var ending=Regex.Match(snapshot.Substring(headingStart),
+          @"(?:^|[\r\n\x07])[ \t]*(?:Thanks[;,.]?|Dr\.[ \t]|Signed[ \t]+by)",
+          RegexOptions.IgnoreCase);
+        if(ending.Success)conclusionEnd=headingStart+ending.Index;
       }
-      var heading=Regex.Match(snapshot,
-        @"(?:^|[\r\n\x07])[ \t]*(?:Conclusion|Impression)[ \t]*:",
-        RegexOptions.IgnoreCase);
-      if(!heading.Success||occurrence<heading.Index+heading.Length) {
-        reason="OUTSIDE_CONCLUSION";return false;
-      }
-      try {
-        dynamic doc=document;
-        dynamic match=doc.Range(start,end);
-        dynamic find=match.Find;
-        find.ClearFormatting();
-        find.Text=quote;find.Forward=true;find.Wrap=0;
-        find.MatchCase=true;find.MatchWildcards=false;
-        if(!(bool)find.Execute()){reason="NOT_FOUND";return false;}
-        if(!String.Equals(Convert.ToString(match.Text),quote,StringComparison.Ordinal)) {
-          reason="RANGE_MISMATCH";return false;
-        }
-        int firstStart=(int)match.Start,firstEnd=(int)match.End;
-        // A prior annotation at this exact scope may already exist. It must
-        // still be recolored violet rather than silently ignored.
-        bool hasComment=false;
+      int applied=0,failed=0;
+      for(int at=snapshot.IndexOf(quote,StringComparison.Ordinal);
+          at>=0;at=snapshot.IndexOf(quote,at+quote.Length,StringComparison.Ordinal)) {
+        if(!gibberish&&(at<headingStart||at>=conclusionEnd))continue;
+        // Word's content snapshot is the only allowed anchor for a local
+        // candidate. Do not trust Word Find's duplicate/wrap behavior.
+        if(start+at+quote.Length>end){reason="OUT_OF_RANGE";failed++;continue;}
         try {
-          dynamic comments=doc.Comments;
-          int count=(int)comments.Count;
-          for(int i=1;i<=count;i++) {
-            dynamic c=comments.Item(i);
-            dynamic scope=c.Scope;
-            if((int)scope.Start!=firstStart||(int)scope.End!=firstEnd)continue;
-            string existingText=Convert.ToString(c.Range.Text);
-            if(existingText.IndexOf("[Haronex: Unrelated content]",
-                                    StringComparison.Ordinal)>=0) {
-              hasComment=true;break;
-            }
+          dynamic doc=document;
+          dynamic match=doc.Range(start+at,start+at+quote.Length);
+          if(!String.Equals(Convert.ToString(match.Text),quote,StringComparison.Ordinal)) {
+            reason="RANGE_MISMATCH";failed++;continue;
           }
-        } catch { /* Continue, the highlight still matters. */ }
-        // Word 2013 WdColorIndex wdViolet = 12.
-        match.HighlightColorIndex=12;
-        if(!hasComment) {
+          int firstStart=(int)match.Start,firstEnd=(int)match.End;
+          bool hasComment=false;
           try {
-            bool gibberish=LooksLikeGibberishToken(quote);
+            dynamic comments=doc.Comments;
+            int count=(int)comments.Count;
+            for(int i=1;i<=count;i++) {
+              dynamic c=comments.Item(i);
+              dynamic scope=c.Scope;
+              if((int)scope.Start!=firstStart||(int)scope.End!=firstEnd)continue;
+              string existingText=Convert.ToString(c.Range.Text);
+              if(existingText.IndexOf("[Haronex: Unrelated content]",
+                                      StringComparison.Ordinal)>=0) {
+                hasComment=true;break;
+              }
+            }
+          } catch { /* Highlight still checked independently. */ }
+          match.HighlightColorIndex=12; // Word 2013 wdViolet.
+          if(!hasComment) {
             doc.Comments.Add(match,
               "[Haronex: Unrelated content]\r\n"
               +(gibberish?
-                "Unintelligible repeated-letter token in the clinical conclusion.\r\n":
+                "Unintelligible repeated-letter token in the clinical report.\r\n":
                 "Non-medical personal or employment statement appears in the clinical conclusion.\r\n")
               +"Suggestion: Verify the intended wording with the reporting radiologist.\r\n"
               +"Requires clinical verification.");
-          } catch {reason="COMMENT_FAILED";return false;}
-        }
-        int selectedColor=Convert.ToInt32(match.HighlightColorIndex);
-        if(selectedColor!=12){reason="COLOR_NOT_APPLIED";return false;}
-        reason=hasComment?"EXISTING_RECOLORED":"APPLIED";
-        return true;
-      } catch {
-        reason="WORD_COM_FAILED";return false;
+          }
+          if(Convert.ToInt32(match.HighlightColorIndex)!=12) {
+            reason="COLOR_NOT_APPLIED";failed++;continue;
+          }
+          reason=hasComment?"EXISTING_RECOLORED":"APPLIED";
+          applied++;
+        } catch {reason="WORD_COM_FAILED";failed++;}
       }
+      if(applied==0&&failed==0){reason="NOT_IN_SCOPE";return false;}
+      if(applied>0&&failed>0)reason="PARTIAL_APPLIED";
+      return applied>0;
     }
     private static void WriteUnrelatedReason(string reason) {
       try {
