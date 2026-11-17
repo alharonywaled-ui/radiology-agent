@@ -146,6 +146,33 @@ namespace RadiologyAgent {
       MessageBox(IntPtr.Zero,success?"تمت المراجعة":"رجاءً أعد المحاولة",
         "Haronex",0x00040000|0x00010000|(success?0x40u:0x10u));
     }
+    // A successful API response is not the same thing as visible Word changes.
+    // Always report how many annotations really survived the Word COM calls.
+    private static void NotifyAnnotationResult(int candidates,int applied,int failed) {
+      WriteDword("ReviewIssuesFound",unchecked((uint)Math.Max(0,candidates)));
+      WriteDword("ReviewAnnotationsApplied",unchecked((uint)Math.Max(0,applied)));
+      WriteDword("ReviewAnnotationsFailed",unchecked((uint)Math.Max(0,failed)));
+      if(candidates==0) {
+        WebReviewForm.SetReviewStatus(1);
+        MessageBox(IntPtr.Zero,
+          "اكتملت المراجعة، لكن لم يتم اكتشاف أخطاء مؤكدة في هذا التقرير.\r\n"+
+          "لم تتم إضافة تعليقات أو تلوين.",
+          "Haronex",0x00040000|0x00010000|0x40u);
+      } else if(applied==0) {
+        WebReviewForm.SetReviewStatus(2);
+        MessageBox(IntPtr.Zero,
+          "تم اكتشاف "+candidates+" ملاحظات، لكن تعذر إظهار أي منها في Word.\r\n"+
+          "لم تتم الموافقة على المراجعة. راجع diagnostics.log.",
+          "Haronex",0x00040000|0x00010000|0x10u);
+      } else {
+        WebReviewForm.SetReviewStatus(1);
+        MessageBox(IntPtr.Zero,
+          "تمت المراجعة. ظهرت "+applied+" ملاحظة في Word."+
+          (failed>0?"\r\nتعذر إظهار "+failed+" ملاحظة؛ راجع diagnostics.log.":"")+
+          "\r\nاختر النص الملوّن لعرض Apply Suggestion.",
+          "Haronex",0x00040000|0x00010000|0x40u);
+      }
+    }
 
     private bool ConnectWord() {
       uint requested=ReadDword("WordWindowHwnd");
@@ -805,6 +832,7 @@ namespace RadiologyAgent {
             "conclusion");
         }
         var ordered=new List<Tuple<string,string,string,string,string>>(unique.Values);
+        int candidateCount=ordered.Count,wordApplied=0,wordFailed=0;
         ordered.Sort((a,b)=>{
           int priority=String.CompareOrdinal(a.Item2,b.Item2);
           if(a.Item2=="unrelated"&&b.Item2!="unrelated")return -1;
@@ -878,10 +906,13 @@ namespace RadiologyAgent {
             region.HighlightColorIndex=issue.Item2=="unrelated"?12:(issue.Item2=="logic"?6:7); // wdViolet=12
             dynamic createdComment=doc.Comments.Add(region,comment);
             BoldSuggestionInComment(createdComment);
+            wordApplied++;
             if(issue.Item2=="unrelated")
               WriteDword("UnrelatedAppliedCount",ReadDword("UnrelatedAppliedCount")+1);
             existing.Add(anchorId);
-          } catch {
+          } catch(Exception ex) {
+            wordFailed++;
+            LogFailure("ANNOTATION_"+ex.GetType().Name);
             if(issue.Item2=="unrelated")
               WriteDword("UnrelatedSkippedCount",ReadDword("UnrelatedSkippedCount")+1);
           }
@@ -898,12 +929,18 @@ namespace RadiologyAgent {
         }
         WriteDword("UnrelatedAppliedCount",purpleApplied);
         WriteDword("UnrelatedSkippedCount",purpleSkipped);
+        if(wordApplied==0&&purpleApplied==0&&candidateCount>0) {
+          LogFailure("ANNOTATIONS_ZERO_WITH_CANDIDATES");
+          NotifyAnnotationResult(candidateCount,0,wordFailed+(int)purpleSkipped);
+          pendingClick=false;return;
+        }
         if(!MandatoryApproval.Approve(doc,currentText,unchecked((uint)hwnd))) {
           LogFailure("MANDATORY_APPROVAL_NOT_STORED");
           pendingClick=false;Notify(false);return;
         }
         pendingClick=false;
-        Notify(true);
+        NotifyAnnotationResult(candidateCount,Math.Max(wordApplied,(int)purpleApplied),
+                               wordFailed+(int)purpleSkipped);
       } catch(Exception ex) {
         LogFailure("WORD_ANNOTATE_"+ex.GetType().Name);
         pendingClick=false;Notify(false);
