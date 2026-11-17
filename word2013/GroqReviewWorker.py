@@ -146,9 +146,9 @@ LANGUAGE_SYSTEM = (
     "exactly that excerpt, not a full sentence for a two-word quote. "
     "If a whole sentence must change, quote the entire original sentence "
     "and give the entire replacement sentence. "
-    "Return JSON only: {\\\"issues\\\":[{\\\"quote\\\":\\\"exact text\\\","
-    "\\\"category\\\":\\\"language\\\",\\\"explanation\\\":\\\"reason\\\","
-    "\\\"suggestion\\\":\\\"exact replacement\\\"}]}. "
+    'Return JSON only: {"issues":[{"quote":"exact text",'
+    '"category":"language","explanation":"reason",'
+    '"suggestion":"exact replacement"}]}. '
     "Return an empty array if no clear language errors exist."
 )
 
@@ -157,7 +157,7 @@ def language_audit_groups(key, chunks, reviewer=None):
         reviewer=lambda part: review_with_recovery(
             key, part,
             review=lambda k,t: api_review(k,t,system_prompt=LANGUAGE_SYSTEM,
-                        user_prefix="Perform a complete independent language audit:\\n\\n"))
+                        user_prefix="Perform a complete independent language audit:\n\n"))
     groups=[]
     for text in chunks:
         results=reviewer(text)
