@@ -20,7 +20,8 @@ UninstallDisplayName=Haronex (Word 2013 x86)
 Source: "bin\NDP48-x86-x64-AllOS-ENU.exe"; Flags: dontcopy
 Source: "bin\RadiologyAgent.NativeShim.dll"; DestDir: "{app}"; Flags: ignoreversion regserver
 Source: "bin\RadiologyAgent.ReviewHost.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "bin\HaronexGroqWorker.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\HaronexGroqWorker\HaronexGroqWorker.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\HaronexGroqWorker\_HaronexRuntime\*"; DestDir: "{app}\_HaronexRuntime"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "bin\RadiologyAgent.KeySetup.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
