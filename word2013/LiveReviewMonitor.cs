@@ -433,6 +433,13 @@ namespace RadiologyAgent {
         var control=ObviousOffTopicInConclusion("Findings: Patient works at refinery.\rConclusion:\rBilateral cysts.\rThanks;");
         // A quote inside a Word table is unique in this exact report snapshot,
         // despite Word Find occasionally reporting a spurious second hit.
+        var gibberish=ObviousOffTopicInConclusion(
+          "Findings: Bilateral cysts.\rConclusion:\rElement of dsdsd urinary cystitis.\rThanks;");
+        var normalControl=ObviousOffTopicInConclusion(
+          "Findings: Bilateral cysts.\rConclusion:\rElement of urinary cystitis.\rThanks;");
+        if(gibberish.Count!=1||gibberish[0]!="dsdsd"||normalControl.Count!=0||
+           !LooksLikeGibberishToken("dsdsd")||LooksLikeGibberishToken("cystitis"))
+          return false;
         var duplicateCase=ObviousOffTopicInConclusion(
           tableExample+"\rHaron work at dokki scan");
         return duplicateCase.Count==1
@@ -449,6 +456,15 @@ namespace RadiologyAgent {
     // Independent Word-side safety net for obvious personal/employment lines
     // in Conclusion. Generic, narrow pattern: no hard-coded person or site.
     // Clinical occupational history and non-Conclusion text are not flagged.
+    // High-precision local safeguard for repeated, nonlinguistic fragments
+    // such as dsdsd. Avoid classifying ordinary unknown medical words using
+    // a dictionary or replacing a clinical term automatically.
+    private static bool LooksLikeGibberishToken(string word) {
+      return word!=null&&word.Length>=5&&word.Length<=12&&
+        Regex.IsMatch(word,@"^([a-z]{2})\1(?:\1|[a-z])$",
+          RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
+    }
+
     internal static List<string> ObviousOffTopicInConclusion(string report) {
       var found=new List<string>();
       if(String.IsNullOrEmpty(report))return found;
@@ -464,11 +480,19 @@ namespace RadiologyAgent {
         report.Substring(begin);
       foreach(string raw in Regex.Split(body,@"[\r\n\x07]+")) {
         string line=raw.Trim().TrimStart('o','•','◦','-',' ','\t').Trim();
-        if(line.Length<8||line.Length>240)continue;
-        if(!Regex.IsMatch(line,
+        if(line.Length==0||line.Length>300)continue;
+        // Obvious nonclinical biography/employment sentences.
+        if(line.Length>=8&&Regex.IsMatch(line,
            @"^[A-Z][a-z]{1,30}(?:[ \t]+[A-Z][a-z]{1,30})?[ \t]+(?:work|works|working)[ \t]+(?:at|for)[ \t]+[A-Za-z]",
-           RegexOptions.CultureInvariant))continue;
-        if(!found.Contains(line))found.Add(line);
+           RegexOptions.CultureInvariant)&&!found.Contains(line))
+          found.Add(line);
+        // Detect an isolated repeated-motif gibberish token even when it is
+        // embedded in an otherwise meaningful clinical Conclusion sentence.
+        foreach(Match candidate in Regex.Matches(line,@"\b[A-Za-z]{5,12}\b")) {
+          string token=candidate.Value;
+          if(LooksLikeGibberishToken(token)&&!found.Contains(token))
+            found.Add(token);
+        }
       }
       return found;
     }
@@ -530,11 +554,13 @@ namespace RadiologyAgent {
         match.HighlightColorIndex=12;
         if(!hasComment) {
           try {
+            bool gibberish=LooksLikeGibberishToken(quote);
             doc.Comments.Add(match,
               "[Haronex: Unrelated content]\r\n"
-              +"Non-medical personal or employment statement appears in "
-              +"the clinical conclusion.\r\n"
-              +"Suggestion: Verify and remove if unintended.\r\n"
+              +(gibberish?
+                "Unintelligible repeated-letter token in the clinical conclusion.\r\n":
+                "Non-medical personal or employment statement appears in the clinical conclusion.\r\n")
+              +"Suggestion: Verify the intended wording with the reporting radiologist.\r\n"
               +"Requires clinical verification.");
           } catch {reason="COMMENT_FAILED";return false;}
         }
@@ -593,8 +619,12 @@ namespace RadiologyAgent {
         foreach(string line in fallback) {
           string key=line+"\u001fconclusion";
           unique[key]=Tuple.Create(line,"unrelated",
-            "Non-medical personal or employment statement appears in the clinical conclusion.",
-            "Ask the reporting radiologist to verify and remove if unintended.",
+            LooksLikeGibberishToken(line)?
+              "Unintelligible repeated-letter token appears in the clinical conclusion.":
+              "Non-medical personal or employment statement appears in the clinical conclusion.",
+            LooksLikeGibberishToken(line)?
+              "Verify intended wording with the reporting radiologist; remove or correct if accidental.":
+              "Ask the reporting radiologist to verify and remove if unintended.",
             "conclusion");
         }
         var ordered=new List<Tuple<string,string,string,string,string>>(unique.Values);
