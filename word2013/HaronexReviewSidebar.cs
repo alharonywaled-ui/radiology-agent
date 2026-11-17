@@ -17,6 +17,7 @@ namespace RadiologyAgent {
     private readonly FlowLayoutPanel cards;
     private readonly Label summary;
     private readonly Label status;
+    private readonly Dictionary<string,string> issueFeedback=new Dictionary<string,string>(StringComparer.Ordinal);
     private readonly Dictionary<string,Button> filters=
       new Dictionary<string,Button>(StringComparer.Ordinal);
     private readonly Action<Issue,string> apply;
@@ -194,6 +195,18 @@ namespace RadiologyAgent {
         ignoreButton.Click+=(s,e)=>ignore(issue);
         box.Controls.Add(applyButton);box.Controls.Add(ignoreButton);y+=45;
       }
+      string feedback;
+      if(issueFeedback.TryGetValue(issue.Id,out feedback)) {
+        var hint=new Label{
+          Text=feedback,AutoSize=false,
+          Location=new Point(x,y+2),Size=new Size(width-4,46),
+          BackColor=Color.FromArgb(255,245,221),
+          ForeColor=Color.FromArgb(128,74,16),
+          Font=new Font("Segoe UI",8.5f),
+          TextAlign=ContentAlignment.MiddleLeft
+        };
+        box.Controls.Add(hint);y+=54;
+      }
       var clicker=new Label{Location=new Point(contentWidth-128,35),
         Size=new Size(108,18),Text="Locate in Word",
         ForeColor=Color.FromArgb(37,104,189),Cursor=Cursors.Hand,
@@ -233,6 +246,12 @@ namespace RadiologyAgent {
     }
     internal void UpdateStatus(string message) {
       status.Text=message;
+    }
+    internal void ShowIssueFeedback(Issue issue,string message) {
+      if(issue==null)return;
+      if(String.IsNullOrWhiteSpace(message))issueFeedback.Remove(issue.Id);
+      else issueFeedback[issue.Id]=message;
+      RefreshCards();
     }
     internal void SetWindowPlacement(Rectangle wordRectangle) {
       if(wordRectangle.Width<750||wordRectangle.Height<300)return;
