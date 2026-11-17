@@ -431,7 +431,7 @@ public:
       LR"(<ribbon><tabs><tab id="RadiologyAgentTab" label="Radiology Agent">)"
       LR"(<group id="RadiologyAgentGroup" label="Report Review">)"
       LR"(<button id="RadiologyAgentReview" label="Review Text" size="large" getImage="ReviewIcon" onAction="ReviewTextClick"/>)"
-      LR"(<button id="HaronexSidebarToggle" label="Show / Hide Sidebar" size="large" imageMso="TaskPane" onAction="ToggleSidebarClick" screentip="Show or hide Haronex Review Panel" supertip="Toggle the existing sidebar without starting a new AI review." />)"
+      LR"(<button id="HaronexSidebarToggle" label="Show / Hide Sidebar" size="large" getImage="SidebarIcon" onAction="ToggleSidebarClick" screentip="Show or hide Haronex Review Panel" supertip="Toggle the existing sidebar without starting a new AI review." />)"
       LR"(<button id="RadiologyAgentDeleteComments" label="Clear Comments" size="large" getImage="DeleteCommentsIcon" onAction="DeleteAllCommentsClick" screentip="Remove all comments" supertip="Delete every Word comment in the active document locally. No API call." />)"
       LR"(<button id="RadiologyAgentClearHighlights" label="Clear Highlights" size="large" getImage="ClearHighlightsIcon" onAction="ClearRedYellowClick" screentip="Remove red and yellow highlights" supertip="Remove red and yellow text highlighting from the active Word document, preserving other colors. Runs locally." />)"
       LR"(<button id="RadiologyAgentClearBoth" label="Clear Both" size="large" getImage="ClearBothIcon" onAction="ClearBothClick" screentip="Clear comments and red/yellow highlights" supertip="Clear comments and highlights, then unlock Save, Save As and Print for this open report. No repeated review after edits." />)"
