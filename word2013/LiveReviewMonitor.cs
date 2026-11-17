@@ -424,15 +424,49 @@ namespace RadiologyAgent {
       comment=null;
       try {
         dynamic doc=document,comments=doc.Comments;
+        // Word shifts all subsequent comment anchors after a replacement.
+        // Prefer the original exact anchor and body; if positions moved,
+        // recover only by a UNIQUE matching body+quote. Never choose a
+        // different occurrence just because the wording is similar.
+        object unique=null;
+        int matches=0;
         for(int i=1;i<=(int)comments.Count;i++) {
           dynamic c=comments.Item(i),scope=c.Scope;
-          if((int)scope.Start!=item.Start||(int)scope.End!=item.End)continue;
-          if(!String.Equals(Convert.ToString(c.Range.Text),item.Body,
-            StringComparison.Ordinal))continue;
-          comment=c;return true;
+          string body=Convert.ToString(c.Range.Text);
+          if(!String.Equals(body,item.Body,StringComparison.Ordinal))continue;
+          int a=(int)scope.Start,b=(int)scope.End;
+          string quote=Convert.ToString(scope.Text);
+          if(!String.Equals(quote,item.Quote,StringComparison.Ordinal))continue;
+          if(a==item.Start&&b==item.End) {
+            comment=c;return true;
+          }
+          unique=c;matches++;
         }
-      } catch {}
+        if(matches==1) {comment=unique;return true;}
+        if(matches>1)LogFailure("SIDEBAR_COMMENT_ANCHOR_AMBIGUOUS");
+      } catch(Exception ex) {
+        LogFailure("SIDEBAR_COMMENT_LOOKUP_"+ex.GetType().Name);
+      }
       return false;
+    }
+
+    private void RefreshSidebarAfterAction(object document) {
+      // Never retain original offsets after an edit. Read all live Word
+      // comments afresh, including their new Scope.Start/End and Done status.
+      // This is synchronous and happens after EVERY Apply/Ignore; no AI call.
+      sidebarSignature=null;
+      try {
+        if(sidebar==null||sidebar.IsDisposed)return;
+        dynamic doc=document;
+        if(boundWordWindow==null||
+          !String.Equals(Convert.ToString(doc.FullName),
+                         Convert.ToString(((dynamic)boundWordWindow).Document.FullName),
+                         StringComparison.Ordinal))return;
+        PollWord();
+        UpdateSidebar(doc,true);
+      } catch(Exception ex) {
+        LogFailure("SIDEBAR_REFRESH_"+ex.GetType().Name);
+      }
     }
     private void ApplySidebarIssue(HaronexReviewSidebar.Issue item,
                                   string replacement) {
@@ -440,40 +474,59 @@ namespace RadiologyAgent {
       if(!PinnedDocument(out doc)||item==null)return;
       object c;
       if(!FindSidebarComment(doc,item,out c)) {
-        sidebar.UpdateStatus("This comment changed. Review the report again.");
-        UpdateSidebar(doc,true);return;
+        RefreshSidebarAfterAction(doc);
+        sidebar.UpdateStatus("Word moved or removed this comment. Card locations refreshed; select the updated issue.");
+        return;
       }
       try {
-        string quote=Convert.ToString(((dynamic)c).Scope.Text);
-        if(!String.Equals(quote,item.Quote,StringComparison.Ordinal))return;
+        dynamic scope=((dynamic)c).Scope;
+        int begin=(int)scope.Start,finish=(int)scope.End;
+        string quote=Convert.ToString(scope.Text);
+        string body=Convert.ToString(((dynamic)c).Range.Text);
+        if(!String.Equals(quote,item.Quote,StringComparison.Ordinal)||
+           !String.Equals(body,item.Body,StringComparison.Ordinal)) {
+          RefreshSidebarAfterAction(doc);
+          sidebar.UpdateStatus("Original comment changed; cards updated from Word.");
+          return;
+        }
         string snapshot=Convert.ToString(((dynamic)doc).Content.Text);
         int contentStart=(int)((dynamic)doc).Content.Start;
         int a,b;string original,safe;
         if(!SuggestionReplacementPlan.TryBuild(snapshot,
-           item.Start-contentStart,item.End-contentStart,quote,replacement,
+           begin-contentStart,finish-contentStart,quote,replacement,
            out a,out b,out original,out safe)||
            String.IsNullOrWhiteSpace(safe)||safe!=replacement.Trim()) {
-          sidebar.UpdateStatus("Unsafe replacement scope: edit the exact quote or use a matching full sentence.");
+          sidebar.UpdateStatus("Unsafe replacement: enter exact replacement for the shown phrase, or a matching full sentence.");
           return;
         }
-        bool ok=ApplyCommentSuggestion(doc,item.Start,item.End,quote,item.Body,
+        bool ok=ApplyCommentSuggestion(doc,begin,finish,quote,body,
             contentStart+a,contentStart+b,original,replacement.Trim());
-        sidebar.UpdateStatus(ok?"Correction applied; linked comments reconciled.":
-          "No change applied: document or comment changed.");
-        UpdateSidebar(doc,true);
-      } catch(Exception ex){LogFailure("SIDEBAR_APPLY_"+ex.GetType().Name);}
+        RefreshSidebarAfterAction(doc);
+        sidebar.UpdateStatus(ok?"Applied. Every remaining comment is now linked to its CURRENT Word position.":
+          "No correction applied. Positions refreshed; review the suggestion.");
+      } catch(Exception ex) {
+        LogFailure("SIDEBAR_APPLY_"+ex.GetType().Name);
+        RefreshSidebarAfterAction(doc);
+        sidebar.UpdateStatus("Apply failed; annotations refreshed safely.");
+      }
     }
     private void IgnoreSidebarIssue(HaronexReviewSidebar.Issue item) {
       object doc,c;
-      if(!PinnedDocument(out doc)||item==null||
-         !FindSidebarComment(doc,item,out c))return;
+      if(!PinnedDocument(out doc)||item==null)return;
+      if(!FindSidebarComment(doc,item,out c)) {
+        RefreshSidebarAfterAction(doc);
+        sidebar.UpdateStatus("Comment location changed; cards updated.");
+        return;
+      }
       try {
         dynamic note=c;
         note.Done=true;
-        // Do not silently clear text marked by another overlapping note.
-        sidebar.UpdateStatus("Suggestion marked ignored/resolved; report text unchanged.");
-        UpdateSidebar(doc,true);
-      } catch(Exception ex){LogFailure("SIDEBAR_IGNORE_"+ex.GetType().Name);}
+        RefreshSidebarAfterAction(doc);
+        sidebar.UpdateStatus("Ignored. Other comments refreshed without re-review.");
+      } catch(Exception ex) {
+        LogFailure("SIDEBAR_IGNORE_"+ex.GetType().Name);
+        sidebar.UpdateStatus("Could not ignore this comment.");
+      }
     }
     private void LocateSidebarIssue(HaronexReviewSidebar.Issue item) {
       object doc,c;
