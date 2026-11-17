@@ -85,6 +85,7 @@ namespace RadiologyAgent {
     private bool failed, working, pendingClick;
     private CancellationTokenSource runningCancellation;
     private uint lastHandledCommand;
+    private uint lastHandledSidebarCommand;
     private bool awaitingDocument;
     private DateTime documentWaitStarted;
     private string lastWordProblem="WORD_NOT_CONNECTED";
@@ -106,6 +107,7 @@ namespace RadiologyAgent {
       Location=new Point(-30000,-30000);
       FormBorderStyle=FormBorderStyle.None;
       lastHandledCommand=ReadDword("LiveReviewHandled");
+      lastHandledSidebarCommand=ReadDword("SidebarToggleHandled");
       timer=new System.Windows.Forms.Timer {Interval=PollMilliseconds};
       timer.Tick+=(sender,args)=>TickOnce();
       Shown+=(sender,args)=>timer.Start();
@@ -156,26 +158,17 @@ namespace RadiologyAgent {
       WriteDword("ReviewIssuesFound",unchecked((uint)Math.Max(0,candidates)));
       WriteDword("ReviewAnnotationsApplied",unchecked((uint)Math.Max(0,applied)));
       WriteDword("ReviewAnnotationsFailed",unchecked((uint)Math.Max(0,failed)));
-      if(candidates==0) {
-        WebReviewForm.SetReviewStatus(1);
-        MessageBox(IntPtr.Zero,
-          "اكتملت المراجعة، لكن لم يتم اكتشاف أخطاء مؤكدة في هذا التقرير.\r\n"+
-          "لم تتم إضافة تعليقات أو تلوين.",
-          "Haronex",0x00040000|0x00010000|0x40u);
-      } else if(applied==0) {
+      if(candidates>0&&applied==0) {
+        // Do not show success if nothing could be written to Word.
         WebReviewForm.SetReviewStatus(2);
-        MessageBox(IntPtr.Zero,
-          "تم اكتشاف "+candidates+" ملاحظات، لكن تعذر إظهار أي منها في Word.\r\n"+
-          "لم تتم الموافقة على المراجعة. راجع diagnostics.log.",
-          "Haronex",0x00040000|0x00010000|0x10u);
-      } else {
-        WebReviewForm.SetReviewStatus(1);
-        MessageBox(IntPtr.Zero,
-          "تمت المراجعة. ظهرت "+applied+" ملاحظة في Word."+
-          (failed>0?"\r\nتعذر إظهار "+failed+" ملاحظة؛ راجع diagnostics.log.":"")+
-          "\r\nاختر النص الملوّن لعرض Apply Suggestion.",
-          "Haronex",0x00040000|0x00010000|0x40u);
+        LogFailure("REVIEW_ANNOTATIONS_NOT_APPLIED");
+        Notify(false);return;
       }
+      WebReviewForm.SetReviewStatus(1);
+      // Deliberately no counts/details in this confirmation; the sidebar
+      // contains the findings and diagnostics retain private summary counts.
+      MessageBox(IntPtr.Zero,"تمت المراجعة","Haronex",
+        0x00040000|0x00010000|0x40u);
     }
 
     private bool ConnectWord() {
@@ -230,6 +223,7 @@ namespace RadiologyAgent {
           PollSidebar();
         } else if(sidebar!=null&&!sidebar.IsDisposed)sidebar.Hide();
         CheckClick();
+        CheckSidebarCommand();
         CheckPendingDocument();
         // No background API calls: only explicit Review Text click triggers analysis.
       } catch {
@@ -772,6 +766,30 @@ namespace RadiologyAgent {
         formatted.SetRange((int)range.Start+label,(int)range.Start+stop);
         formatted.Font.Bold=1;
       } catch { /* Bold is best-effort; never fail the review. */ }
+    }
+
+    // Ribbon-triggered, explicit Show/Hide action. It cannot trigger API
+    // calls and must bind to the Word window that invoked the ribbon click.
+    private void CheckSidebarCommand() {
+      uint cmd=ReadDword("SidebarToggleCommand");
+      if(cmd==lastHandledSidebarCommand)return;
+      lastHandledSidebarCommand=cmd;
+      WriteDword("SidebarToggleHandled",cmd);
+      uint clicked=ReadDword("WordWindowHwnd");
+      if(clicked==0)return;
+      if(boundWordHwnd!=clicked||word==null) {
+        if(!ConnectWord())return;
+        PollWord();
+      }
+      if(boundWordHwnd!=clicked)return;
+      object doc;
+      if(!PinnedDocument(out doc))return;
+      if(sidebar!=null&&!sidebar.IsDisposed&&sidebar.Visible) {
+        sidebarDismissed=true;sidebar.Hide();
+      } else {
+        sidebarDismissed=false;
+        ShowSidebar();
+      }
     }
 
     private void CheckClick() {
