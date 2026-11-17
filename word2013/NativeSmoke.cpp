@@ -56,11 +56,32 @@ int main(){
   if(FAILED(hr)||!xml||!wcsstr(xml,L"Radiology Agent")||!wcsstr(xml,L"ReviewTextClick")||
      !wcsstr(xml,L"DeleteAllCommentsClick")||!wcsstr(xml,L"ClearRedYellowClick")||
      !wcsstr(xml,L"Clear Comments")||!wcsstr(xml,L"Clear Highlights")||
-     !wcsstr(xml,L"ClearBothClick")||!wcsstr(xml,L"Clear Both")) {
+     !wcsstr(xml,L"ClearBothClick")||!wcsstr(xml,L"Clear Both")||
+     !wcsstr(xml,L"getImage=\"SidebarIcon\"")||
+     !wcsstr(xml,L"ToggleSidebarClick")) {
     wprintf(L"RIBBON_CHECK_FAILED 0x%08x\n",static_cast<unsigned>(hr));
     if(xml)SysFreeString(xml);
     ribbon->Release();CoUninitialize();return 30;
   }
+  // Verify the Office Ribbon custom icon callback is registered and produces
+  // an actual OLE image, not a blank unsupported imageMso placeholder.
+  LPOLESTR callback=const_cast<LPOLESTR>(L"SidebarIcon");
+  DISPID iconId=0;
+  if(FAILED(ribbon->GetIDsOfNames(IID_NULL,&callback,1,LOCALE_USER_DEFAULT,
+                                  &iconId))) {
+    wprintf(L"SIDEBAR_ICON_CALLBACK_MISSING\n");
+    SysFreeString(xml);ribbon->Release();CoUninitialize();return 31;
+  }
+  DISPPARAMS args={nullptr,nullptr,0,0};
+  VARIANT picture;VariantInit(&picture);
+  hr=ribbon->Invoke(iconId,IID_NULL,LOCALE_USER_DEFAULT,DISPATCH_METHOD,
+                    &args,&picture,nullptr,nullptr);
+  if(FAILED(hr)||picture.vt!=VT_DISPATCH||!picture.pdispVal) {
+    wprintf(L"SIDEBAR_ICON_IMAGE_FAILED 0x%08x\n",static_cast<unsigned>(hr));
+    VariantClear(&picture);SysFreeString(xml);
+    ribbon->Release();CoUninitialize();return 32;
+  }
+  VariantClear(&picture);
   if(HaronexMandatory::Hash(L"Text")!=L"71988c4d8e0803ba4519f0b2864c1331c14a1890bf8694e251379177bfedb5c3") {
     wprintf(L"MANDATORY_SHA256_INCOMPATIBLE\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 35;
