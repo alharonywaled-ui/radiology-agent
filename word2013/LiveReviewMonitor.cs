@@ -408,9 +408,11 @@ namespace RadiologyAgent {
           if(!IsHaronexOpenComment(body))continue;
           bool selected=a==chosenStart&&b==chosenEnd;
           string text=Convert.ToString(scope.Text);
-          if(RelatedIssueResolution.IsResolved(a,b,text,editStart,editEnd,
-                                               proposal,selected))
-            result++;
+          bool separateLogic=!selected&&
+            body.IndexOf("Potential internal contradiction",
+              StringComparison.Ordinal)>=0;
+          if(!separateLogic&&RelatedIssueResolution.IsResolved(a,b,text,
+              editStart,editEnd,proposal,selected))result++;
         }
       } catch {}
       return result;
@@ -463,8 +465,11 @@ namespace RadiologyAgent {
           affected.Add(new CommentSnapshot {
             Start=noteStart,End=noteEnd,Quote=text,Body=body,
             Selected=selected,
-            Resolved=RelatedIssueResolution.IsResolved(
-              noteStart,noteEnd,text,replaceStart,replaceEnd,replacement,selected)
+            Resolved=(selected||
+              body.IndexOf("Potential internal contradiction",
+                StringComparison.Ordinal)<0)&&
+              RelatedIssueResolution.IsResolved(
+                noteStart,noteEnd,text,replaceStart,replaceEnd,replacement,selected)
           });
         }
         if(!foundSelected)return false;
