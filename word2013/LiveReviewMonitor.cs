@@ -435,10 +435,15 @@ namespace RadiologyAgent {
         // despite Word Find occasionally reporting a spurious second hit.
         var gibberish=ObviousOffTopicInConclusion(
           "Findings: Bilateral cysts.\rConclusion:\rElement of dsdsd urinary cystitis.\rThanks;");
+        var datesAndAbbreviations=ObviousOffTopicInConclusion(
+          "Findings: No acute lesion.\rConclusion:\rMRI and MRCP (2026/2027): no acute lesion.\rThanks;");
+        if(datesAndAbbreviations.Count!=0)return false;
         var normalControl=ObviousOffTopicInConclusion(
           "Findings: Bilateral cysts.\rConclusion:\rElement of urinary cystitis.\rThanks;");
         if(gibberish.Count!=1||gibberish[0]!="dsdsd"||normalControl.Count!=0||
-           !LooksLikeGibberishToken("dsdsd")||LooksLikeGibberishToken("cystitis"))
+           !LooksLikeGibberishToken("dsdsd")||LooksLikeGibberishToken("cystitis")||
+           LooksLikeGibberishToken("MRCP")||LooksLikeGibberishToken("IHBR")||
+           LooksLikeGibberishToken("PETCT")||LooksLikeGibberishToken("2027"))
           return false;
         var duplicateCase=ObviousOffTopicInConclusion(
           tableExample+"\rHaron work at dokki scan");
@@ -462,7 +467,7 @@ namespace RadiologyAgent {
     private static bool LooksLikeGibberishToken(string word) {
       return word!=null&&word.Length>=5&&word.Length<=12&&
         Regex.IsMatch(word,@"^([a-z]{2})\1(?:\1|[a-z])$",
-          RegexOptions.IgnoreCase|RegexOptions.CultureInvariant);
+          RegexOptions.CultureInvariant);
     }
 
     internal static List<string> ObviousOffTopicInConclusion(string report) {
