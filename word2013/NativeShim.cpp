@@ -137,6 +137,54 @@ static HRESULT CreateCleanupIcon(bool comments, VARIANT* out) {
 }
 
 
+// Custom x86 Ribbon image. Office 2013 does not reliably resolve the
+// getImage="SidebarIcon" symbol, leaving a large Ribbon button with no icon.
+static HRESULT CreateSidebarIcon(VARIANT* out) {
+  if(!out)return E_POINTER;
+  HDC screen=GetDC(nullptr);
+  if(!screen)return E_FAIL;
+  HDC dc=CreateCompatibleDC(screen);
+  HBITMAP bmp=CreateCompatibleBitmap(screen,32,32);
+  ReleaseDC(nullptr,screen);
+  if(!dc||!bmp){if(dc)DeleteDC(dc);if(bmp)DeleteObject(bmp);return E_OUTOFMEMORY;}
+  HGDIOBJ oldBmp=SelectObject(dc,bmp);
+  RECT all={0,0,32,32};
+  HBRUSH white=CreateSolidBrush(RGB(255,255,255));
+  FillRect(dc,&all,white);DeleteObject(white);
+  // Blue document frame, pale page, and distinct dark-blue right task pane.
+  HBRUSH pale=CreateSolidBrush(RGB(241,246,253));
+  HGDIOBJ oldBrush=SelectObject(dc,pale);
+  HPEN blue=CreatePen(PS_SOLID,2,RGB(24,81,159));
+  HGDIOBJ oldPen=SelectObject(dc,blue);
+  RoundRect(dc,2,4,30,28,3,3);
+  SelectObject(dc,oldPen);DeleteObject(blue);
+  SelectObject(dc,oldBrush);DeleteObject(pale);
+  RECT bar={20,5,29,27};
+  HBRUSH navy=CreateSolidBrush(RGB(31,89,171));
+  FillRect(dc,&bar,navy);DeleteObject(navy);
+  HPEN ink=CreatePen(PS_SOLID,2,RGB(83,112,155));
+  oldPen=SelectObject(dc,ink);
+  MoveToEx(dc,6,10,nullptr);LineTo(dc,17,10);
+  MoveToEx(dc,6,15,nullptr);LineTo(dc,17,15);
+  MoveToEx(dc,6,20,nullptr);LineTo(dc,15,20);
+  SelectObject(dc,oldPen);DeleteObject(ink);
+  HPEN light=CreatePen(PS_SOLID,2,RGB(237,244,255));
+  oldPen=SelectObject(dc,light);
+  MoveToEx(dc,23,10,nullptr);LineTo(dc,27,10);
+  MoveToEx(dc,23,15,nullptr);LineTo(dc,27,15);
+  MoveToEx(dc,23,20,nullptr);LineTo(dc,27,20);
+  SelectObject(dc,oldPen);DeleteObject(light);
+  SelectObject(dc,oldBmp);DeleteDC(dc);
+  PICTDESC desc={};desc.cbSizeofstruct=sizeof(desc);desc.picType=PICTYPE_BITMAP;
+  desc.bmp.hbitmap=bmp;desc.bmp.hpal=nullptr;
+  IPictureDisp* picture=nullptr;
+  HRESULT hr=OleCreatePictureIndirect(&desc,IID_IPictureDisp,TRUE,
+      reinterpret_cast<void**>(&picture));
+  if(FAILED(hr)){DeleteObject(bmp);return hr;}
+  VariantInit(out);out->vt=VT_DISPATCH;out->pdispVal=picture;
+  return S_OK;
+}
+
 struct IExtensibility2 : IDispatch {
   virtual HRESULT STDMETHODCALLTYPE OnConnection(IDispatch*, LONG, IDispatch*, SAFEARRAY**) = 0;
   virtual HRESULT STDMETHODCALLTYPE OnDisconnection(LONG, SAFEARRAY**) = 0;
@@ -308,6 +356,7 @@ public:
       else if(!_wcsicmp(n,L"ClearBothClick")) ids[i]=107;
       else if(!_wcsicmp(n,L"ClearBothIcon")) ids[i]=108;
       else if(!_wcsicmp(n,L"ToggleSidebarClick")) ids[i]=109;
+      else if(!_wcsicmp(n,L"SidebarIcon")) ids[i]=110;
       else return DISP_E_UNKNOWNNAME;
     }
     return S_OK;
@@ -351,6 +400,7 @@ public:
     }
     if(id==108)return CreateCleanupIcon(false,result);
     if(id==109){RequestSidebarToggle(wordApplication_);return S_OK;}
+    if(id==110)return CreateSidebarIcon(result);
     if(id>=1&&id<=5)return S_OK;
     return DISP_E_MEMBERNOTFOUND;
   }
