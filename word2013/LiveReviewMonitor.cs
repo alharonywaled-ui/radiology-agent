@@ -85,6 +85,7 @@ namespace RadiologyAgent {
     private bool failed, working, pendingClick;
     private CancellationTokenSource runningCancellation;
     private uint lastHandledCommand;
+    private uint lastHandledSidebarCommand;
     private bool awaitingDocument;
     private DateTime documentWaitStarted;
     private string lastWordProblem="WORD_NOT_CONNECTED";
@@ -106,6 +107,7 @@ namespace RadiologyAgent {
       Location=new Point(-30000,-30000);
       FormBorderStyle=FormBorderStyle.None;
       lastHandledCommand=ReadDword("LiveReviewHandled");
+      lastHandledSidebarCommand=ReadDword("SidebarToggleHandled");
       timer=new System.Windows.Forms.Timer {Interval=PollMilliseconds};
       timer.Tick+=(sender,args)=>TickOnce();
       Shown+=(sender,args)=>timer.Start();
@@ -156,26 +158,17 @@ namespace RadiologyAgent {
       WriteDword("ReviewIssuesFound",unchecked((uint)Math.Max(0,candidates)));
       WriteDword("ReviewAnnotationsApplied",unchecked((uint)Math.Max(0,applied)));
       WriteDword("ReviewAnnotationsFailed",unchecked((uint)Math.Max(0,failed)));
-      if(candidates==0) {
-        WebReviewForm.SetReviewStatus(1);
-        MessageBox(IntPtr.Zero,
-          "اكتملت المراجعة، لكن لم يتم اكتشاف أخطاء مؤكدة في هذا التقرير.\r\n"+
-          "لم تتم إضافة تعليقات أو تلوين.",
-          "Haronex",0x00040000|0x00010000|0x40u);
-      } else if(applied==0) {
+      if(candidates>0&&applied==0) {
+        // Do not show success if nothing could be written to Word.
         WebReviewForm.SetReviewStatus(2);
-        MessageBox(IntPtr.Zero,
-          "تم اكتشاف "+candidates+" ملاحظات، لكن تعذر إظهار أي منها في Word.\r\n"+
-          "لم تتم الموافقة على المراجعة. راجع diagnostics.log.",
-          "Haronex",0x00040000|0x00010000|0x10u);
-      } else {
-        WebReviewForm.SetReviewStatus(1);
-        MessageBox(IntPtr.Zero,
-          "تمت المراجعة. ظهرت "+applied+" ملاحظة في Word."+
-          (failed>0?"\r\nتعذر إظهار "+failed+" ملاحظة؛ راجع diagnostics.log.":"")+
-          "\r\nاختر النص الملوّن لعرض Apply Suggestion.",
-          "Haronex",0x00040000|0x00010000|0x40u);
+        LogFailure("REVIEW_ANNOTATIONS_NOT_APPLIED");
+        Notify(false);return;
       }
+      WebReviewForm.SetReviewStatus(1);
+      // Deliberately no counts/details in this confirmation; the sidebar
+      // contains the findings and diagnostics retain private summary counts.
+      MessageBox(IntPtr.Zero,"تمت المراجعة","Haronex",
+        0x00040000|0x00010000|0x40u);
     }
 
     private bool ConnectWord() {
@@ -230,6 +223,7 @@ namespace RadiologyAgent {
           PollSidebar();
         } else if(sidebar!=null&&!sidebar.IsDisposed)sidebar.Hide();
         CheckClick();
+        CheckSidebarCommand();
         CheckPendingDocument();
         // No background API calls: only explicit Review Text click triggers analysis.
       } catch {
@@ -430,15 +424,49 @@ namespace RadiologyAgent {
       comment=null;
       try {
         dynamic doc=document,comments=doc.Comments;
+        // Word shifts all subsequent comment anchors after a replacement.
+        // Prefer the original exact anchor and body; if positions moved,
+        // recover only by a UNIQUE matching body+quote. Never choose a
+        // different occurrence just because the wording is similar.
+        object unique=null;
+        int matches=0;
         for(int i=1;i<=(int)comments.Count;i++) {
           dynamic c=comments.Item(i),scope=c.Scope;
-          if((int)scope.Start!=item.Start||(int)scope.End!=item.End)continue;
-          if(!String.Equals(Convert.ToString(c.Range.Text),item.Body,
-            StringComparison.Ordinal))continue;
-          comment=c;return true;
+          string body=Convert.ToString(c.Range.Text);
+          if(!String.Equals(body,item.Body,StringComparison.Ordinal))continue;
+          int a=(int)scope.Start,b=(int)scope.End;
+          string quote=Convert.ToString(scope.Text);
+          if(!String.Equals(quote,item.Quote,StringComparison.Ordinal))continue;
+          if(a==item.Start&&b==item.End) {
+            comment=c;return true;
+          }
+          unique=c;matches++;
         }
-      } catch {}
+        if(matches==1) {comment=unique;return true;}
+        if(matches>1)LogFailure("SIDEBAR_COMMENT_ANCHOR_AMBIGUOUS");
+      } catch(Exception ex) {
+        LogFailure("SIDEBAR_COMMENT_LOOKUP_"+ex.GetType().Name);
+      }
       return false;
+    }
+
+    private void RefreshSidebarAfterAction(object document) {
+      // Never retain original offsets after an edit. Read all live Word
+      // comments afresh, including their new Scope.Start/End and Done status.
+      // This is synchronous and happens after EVERY Apply/Ignore; no AI call.
+      sidebarSignature=null;
+      try {
+        if(sidebar==null||sidebar.IsDisposed)return;
+        dynamic doc=document;
+        if(boundWordWindow==null||
+          !String.Equals(Convert.ToString(doc.FullName),
+                         Convert.ToString(((dynamic)boundWordWindow).Document.FullName),
+                         StringComparison.Ordinal))return;
+        PollWord();
+        UpdateSidebar(doc,true);
+      } catch(Exception ex) {
+        LogFailure("SIDEBAR_REFRESH_"+ex.GetType().Name);
+      }
     }
     private void ApplySidebarIssue(HaronexReviewSidebar.Issue item,
                                   string replacement) {
@@ -446,40 +474,114 @@ namespace RadiologyAgent {
       if(!PinnedDocument(out doc)||item==null)return;
       object c;
       if(!FindSidebarComment(doc,item,out c)) {
-        sidebar.UpdateStatus("This comment changed. Review the report again.");
-        UpdateSidebar(doc,true);return;
+        RefreshSidebarAfterAction(doc);
+        sidebar.UpdateStatus("Word moved or removed this comment. Card locations refreshed; select the updated issue.");
+        return;
       }
       try {
-        string quote=Convert.ToString(((dynamic)c).Scope.Text);
-        if(!String.Equals(quote,item.Quote,StringComparison.Ordinal))return;
+        dynamic scope=((dynamic)c).Scope;
+        int begin=(int)scope.Start,finish=(int)scope.End;
+        string quote=Convert.ToString(scope.Text);
+        string body=Convert.ToString(((dynamic)c).Range.Text);
+        if(!String.Equals(quote,item.Quote,StringComparison.Ordinal)||
+           !String.Equals(body,item.Body,StringComparison.Ordinal)) {
+          RefreshSidebarAfterAction(doc);
+          sidebar.UpdateStatus("Original comment changed; cards updated from Word.");
+          return;
+        }
         string snapshot=Convert.ToString(((dynamic)doc).Content.Text);
         int contentStart=(int)((dynamic)doc).Content.Start;
         int a,b;string original,safe;
         if(!SuggestionReplacementPlan.TryBuild(snapshot,
-           item.Start-contentStart,item.End-contentStart,quote,replacement,
+           begin-contentStart,finish-contentStart,quote,replacement,
            out a,out b,out original,out safe)||
            String.IsNullOrWhiteSpace(safe)||safe!=replacement.Trim()) {
-          sidebar.UpdateStatus("Unsafe replacement scope: edit the exact quote or use a matching full sentence.");
+          sidebar.UpdateStatus("Unsafe replacement: enter exact replacement for the shown phrase, or a matching full sentence.");
           return;
         }
-        bool ok=ApplyCommentSuggestion(doc,item.Start,item.End,quote,item.Body,
+        bool ok=ApplyCommentSuggestion(doc,begin,finish,quote,body,
             contentStart+a,contentStart+b,original,replacement.Trim());
-        sidebar.UpdateStatus(ok?"Correction applied; linked comments reconciled.":
-          "No change applied: document or comment changed.");
-        UpdateSidebar(doc,true);
-      } catch(Exception ex){LogFailure("SIDEBAR_APPLY_"+ex.GetType().Name);}
+        RefreshSidebarAfterAction(doc);
+        sidebar.UpdateStatus(ok?"Applied. Every remaining comment is now linked to its CURRENT Word position.":
+          "No correction applied. Positions refreshed; review the suggestion.");
+      } catch(Exception ex) {
+        LogFailure("SIDEBAR_APPLY_"+ex.GetType().Name);
+        RefreshSidebarAfterAction(doc);
+        sidebar.UpdateStatus("Apply failed; annotations refreshed safely.");
+      }
+    }
+    private static void ClearIgnoredHighlight(object document,int begin,int finish,
+                                               string category) {
+      // Only remove Haronex's expected colour, never another reviewer's
+      // manually-highlighted text or a surviving overlapping annotation.
+      int expected=category=="Logic"?6:category=="Unrelated"?12:7;
+      dynamic doc=document;
+      var protectedRanges=new List<Tuple<int,int>>();
+      dynamic notes=doc.Comments;
+      for(int i=1;i<=(int)notes.Count;i++) {
+        dynamic other=notes.Item(i),scope=other.Scope;
+        int a=(int)scope.Start,b=(int)scope.End;
+        if(a<finish&&b>begin)
+          protectedRanges.Add(Tuple.Create(Math.Max(a,begin),Math.Min(b,finish)));
+      }
+      // A comment may cover only part of the ignored phrase. Clear the rest
+      // while keeping all positions covered by a different comment untouched.
+      int last=Math.Max(begin,0);
+      protectedRanges.Sort((a,b)=>a.Item1.CompareTo(b.Item1));
+      foreach(var span in protectedRanges) {
+        int stop=Math.Min(finish,span.Item1);
+        if(stop>last)ClearOwnedHighlightSegment(doc,last,stop,expected);
+        last=Math.Max(last,span.Item2);
+      }
+      if(last<finish)ClearOwnedHighlightSegment(doc,last,finish,expected);
+    }
+    private static void ClearOwnedHighlightSegment(object document,int start,
+                                                    int end,int expected) {
+      dynamic doc=document;
+      // Mixed formatting returns wdUndefined for a larger range. Inspect
+      // individual characters so unrelated highlights are never removed.
+      for(int i=start;i<end;i++) {
+        try {
+          dynamic part=doc.Range(i,i+1);
+          if(Convert.ToInt32(part.HighlightColorIndex)==expected)
+            part.HighlightColorIndex=0; // wdNoHighlight
+        } catch { /* Keep remaining marks; log at the caller. */ }
+      }
     }
     private void IgnoreSidebarIssue(HaronexReviewSidebar.Issue item) {
       object doc,c;
-      if(!PinnedDocument(out doc)||item==null||
-         !FindSidebarComment(doc,item,out c))return;
+      if(!PinnedDocument(out doc)||item==null)return;
+      if(!FindSidebarComment(doc,item,out c)) {
+        RefreshSidebarAfterAction(doc);
+        sidebar.UpdateStatus("Comment location changed; cards updated.");
+        return;
+      }
       try {
-        dynamic note=c;
-        note.Done=true;
-        // Do not silently clear text marked by another overlapping note.
-        sidebar.UpdateStatus("Suggestion marked ignored/resolved; report text unchanged.");
-        UpdateSidebar(doc,true);
-      } catch(Exception ex){LogFailure("SIDEBAR_IGNORE_"+ex.GetType().Name);}
+        dynamic note=c,scope=note.Scope;
+        int begin=(int)scope.Start,finish=(int)scope.End;
+        string currentQuote=Convert.ToString(scope.Text);
+        if(!String.Equals(currentQuote,item.Quote,StringComparison.Ordinal)||
+           !String.Equals(Convert.ToString(note.Range.Text),item.Body,
+                          StringComparison.Ordinal)) {
+          RefreshSidebarAfterAction(doc);
+          sidebar.UpdateStatus("Comment changed; nothing was removed.");
+          return;
+        }
+        // Ignore means remove this Haronex comment, not mark it Done.
+        // The Word report text itself is NEVER changed.
+        note.Delete();
+        try {
+          ClearIgnoredHighlight(doc,begin,finish,item.Category);
+        } catch(Exception clearError) {
+          LogFailure("SIDEBAR_IGNORE_HIGHLIGHT_"+clearError.GetType().Name);
+        }
+        RefreshSidebarAfterAction(doc);
+        sidebar.UpdateStatus("Ignored: comment and its non-overlapping Haronex highlight removed.");
+      } catch(Exception ex) {
+        LogFailure("SIDEBAR_IGNORE_"+ex.GetType().Name);
+        RefreshSidebarAfterAction(doc);
+        sidebar.UpdateStatus("Ignore failed; comment locations refreshed.");
+      }
     }
     private void LocateSidebarIssue(HaronexReviewSidebar.Issue item) {
       object doc,c;
@@ -772,6 +874,30 @@ namespace RadiologyAgent {
         formatted.SetRange((int)range.Start+label,(int)range.Start+stop);
         formatted.Font.Bold=1;
       } catch { /* Bold is best-effort; never fail the review. */ }
+    }
+
+    // Ribbon-triggered, explicit Show/Hide action. It cannot trigger API
+    // calls and must bind to the Word window that invoked the ribbon click.
+    private void CheckSidebarCommand() {
+      uint cmd=ReadDword("SidebarToggleCommand");
+      if(cmd==lastHandledSidebarCommand)return;
+      lastHandledSidebarCommand=cmd;
+      WriteDword("SidebarToggleHandled",cmd);
+      uint clicked=ReadDword("WordWindowHwnd");
+      if(clicked==0)return;
+      if(boundWordHwnd!=clicked||word==null) {
+        if(!ConnectWord())return;
+        PollWord();
+      }
+      if(boundWordHwnd!=clicked)return;
+      object doc;
+      if(!PinnedDocument(out doc))return;
+      if(sidebar!=null&&!sidebar.IsDisposed&&sidebar.Visible) {
+        sidebarDismissed=true;sidebar.Hide();
+      } else {
+        sidebarDismissed=false;
+        ShowSidebar();
+      }
     }
 
     private void CheckClick() {
