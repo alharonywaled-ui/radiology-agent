@@ -468,6 +468,76 @@ namespace RadiologyAgent {
       return found;
     }
 
+    // Final Word-side enforcement of purple annotation. A separate, full-doc
+    // exact Find prevents table heading-scoped Find from silently skipping it.
+    // Only acts on a uniquely occurring literal quote from the current
+    // Conclusion snapshot; never selects an approximate neighboring phrase.
+    private static bool EnsureUnrelatedAnnotation(object document,string quote,
+                                                 int start,int end,out string reason) {
+      reason="UNKNOWN";
+      try {
+        dynamic doc=document;
+        dynamic match=doc.Range(start,end);
+        dynamic find=match.Find;
+        find.ClearFormatting();
+        find.Text=quote;find.Forward=true;find.Wrap=0;
+        find.MatchCase=true;find.MatchWildcards=false;
+        if(!(bool)find.Execute()){reason="NOT_FOUND";return false;}
+        if(!String.Equals(Convert.ToString(match.Text),quote,StringComparison.Ordinal)) {
+          reason="RANGE_MISMATCH";return false;
+        }
+        int firstStart=(int)match.Start,firstEnd=(int)match.End;
+        dynamic remaining=doc.Range(firstEnd,end);
+        dynamic second=remaining.Find;
+        second.ClearFormatting();
+        second.Text=quote;second.Forward=true;second.Wrap=0;
+        second.MatchCase=true;second.MatchWildcards=false;
+        if((bool)second.Execute()){reason="DUPLICATE";return false;}
+        // A prior annotation at this exact scope may already exist. It must
+        // still be recolored violet rather than silently ignored.
+        bool hasComment=false;
+        try {
+          dynamic comments=doc.Comments;
+          int count=(int)comments.Count;
+          for(int i=1;i<=count;i++) {
+            dynamic c=comments.Item(i);
+            dynamic scope=c.Scope;
+            if((int)scope.Start!=firstStart||(int)scope.End!=firstEnd)continue;
+            string existingText=Convert.ToString(c.Range.Text);
+            if(existingText.IndexOf("[Haronex: Unrelated content]",
+                                    StringComparison.Ordinal)>=0) {
+              hasComment=true;break;
+            }
+          }
+        } catch { /* Continue, the highlight still matters. */ }
+        // Word 2013 WdColorIndex wdViolet = 12.
+        match.HighlightColorIndex=12;
+        if(!hasComment) {
+          try {
+            doc.Comments.Add(match,
+              "[Haronex: Unrelated content]\r\n"
+              +"Non-medical personal or employment statement appears in "
+              +"the clinical conclusion.\r\n"
+              +"Suggestion: Verify and remove if unintended.\r\n"
+              +"Requires clinical verification.");
+          } catch {reason="COMMENT_FAILED";return false;}
+        }
+        int selectedColor=Convert.ToInt32(match.HighlightColorIndex);
+        if(selectedColor!=12){reason="COLOR_NOT_APPLIED";return false;}
+        reason=hasComment?"EXISTING_RECOLORED":"APPLIED";
+        return true;
+      } catch {
+        reason="WORD_COM_FAILED";return false;
+      }
+    }
+    private static void WriteUnrelatedReason(string reason) {
+      try {
+        // Codes only: never store report, patient name, or excerpt.
+        using(var key=Registry.CurrentUser.CreateSubKey(@"Software\Haronex"))
+          key.SetValue("UnrelatedLastResult",reason,RegistryValueKind.String);
+      } catch {}
+    }
+
     private void ApplyReady() {
       if(readyResponse==null||currentText==null){Notify(false);return;}
       try {
@@ -592,6 +662,18 @@ namespace RadiologyAgent {
               WriteDword("UnrelatedSkippedCount",ReadDword("UnrelatedSkippedCount")+1);
           }
         }
+        // Run this after the generic AI annotation path; if that path
+        // silently skipped the table cell, apply a verified full-document
+        // exact-match highlight and comment instead.
+        uint purpleApplied=0,purpleSkipped=0;
+        foreach(string line in fallback) {
+          string reason;
+          if(EnsureUnrelatedAnnotation(doc,line,start,end,out reason))purpleApplied++;
+          else purpleSkipped++;
+          WriteUnrelatedReason(reason);
+        }
+        WriteDword("UnrelatedAppliedCount",purpleApplied);
+        WriteDword("UnrelatedSkippedCount",purpleSkipped);
         if(!MandatoryApproval.Approve(doc,currentText,unchecked((uint)hwnd))) {
           LogFailure("MANDATORY_APPROVAL_NOT_STORED");
           pendingClick=false;Notify(false);return;
