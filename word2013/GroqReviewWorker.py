@@ -132,6 +132,25 @@ def repeated_gibberish_tokens(line):
     return [m.group(0) for m in re.finditer(r"\b[A-Za-z]{5,12}\b", line)
             if REPEATED_GIBBERISH.fullmatch(m.group(0))]
 
+def whole_report_gibberish_groups(chunks):
+    """Find only repeated-motif nonsense; never dictionary-check clinical terms."""
+    groups = []
+    for part in chunks:
+        seen, issues = set(), []
+        for token in repeated_gibberish_tokens(part):
+            if token in seen:
+                continue
+            seen.add(token)
+            issues.append({
+                "quote": token,
+                "category": "unrelated",
+                "explanation": "Unintelligible repeated-letter token in radiology report.",
+                "suggestion": "Verify intended wording with reporting radiologist.",
+                "section": "body",
+            })
+        groups.append(issues)
+    return groups
+
 def obvious_nonmedical_conclusion_issues(report):
     section = conclusion_section(report)
     if not section:
@@ -470,7 +489,7 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v10-19":
+        if version != "haronex-groq-qwen38-v11":
             raise ValueError("Unsupported review version")
         # Two independent reviews run concurrently rather than sequentially.
         # Both are still mandatory, and their results are combined only after
@@ -484,6 +503,12 @@ def main():
         local_offtopic = distribute_conclusion_issues(
             texts, obvious_nonmedical_conclusion_issues("".join(texts)))
         for i, added in enumerate(independent_audit):
+            existing = {(x["quote"], x["category"]) for x in groups[i]}
+            groups[i].extend(x for x in added
+                             if (x["quote"], x["category"]) not in existing)
+        # The local Conclusion audit is section-limited; this independent
+        # safeguard also sees Findings, tables and standalone symbol-wrapped text.
+        for i, added in enumerate(whole_report_gibberish_groups(texts)):
             existing = {(x["quote"], x["category"]) for x in groups[i]}
             groups[i].extend(x for x in added
                              if (x["quote"], x["category"]) not in existing)
@@ -571,6 +596,9 @@ def self_test():
     assert repeated_gibberish_tokens("Bilateral renal cortical cysts.") == []
     assert repeated_gibberish_tokens("MRI MRCP IHBR PETCT BMD 2026/2027") == []
     assert repeated_gibberish_tokens("dsdsd") == ["dsdsd"]
+    assert [i["quote"] for i in whole_report_gibberish_groups(
+        ["Findings: ***dsdsd ***", "Conclusion:\\rElement of dsdsd urinary cystitis."])[0]] == ["dsdsd"]
+    assert whole_report_gibberish_groups(["CT, MRCP, IHBR, MRI, 2026/2027."]) == [[]]
     assert MODEL == "qwen/qwen3.8-27b"
     class FakeError:
         def read(self, limit):
