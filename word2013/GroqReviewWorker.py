@@ -583,7 +583,7 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v11-2":
+        if version != "haronex-groq-qwen38-v11-3":
             raise ValueError("Unsupported review version")
         # Four independent checks on the SAME snapshot, merged before Word
         # annotations: general, conclusion, context and language. This reduces
