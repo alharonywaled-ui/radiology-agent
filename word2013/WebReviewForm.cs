@@ -16,7 +16,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    internal const string ReviewAlgorithmVersion="haronex-groq-qwen38-v10-13";
+    internal const string ReviewAlgorithmVersion="haronex-groq-qwen38-v10-14";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=1; Height=1;
@@ -178,7 +178,7 @@ namespace RadiologyAgent {
             var quote=field("quote");
             var category=field("category").Trim().ToLowerInvariant();
             if(quote.Length<2||quote.Length>500||!chunks[i].Contains(quote)||
-               (category!="language"&&category!="logic")) {rejected++;continue;}
+               (category!="language"&&category!="logic"&&category!="unrelated")) {rejected++;continue;}
             valid.Add(Tuple.Create(quote,category,field("explanation"),field("suggestion"),field("section")));
           }
         }
@@ -230,10 +230,10 @@ namespace RadiologyAgent {
             if((bool)second.Execute()){skipped++;continue;}
             string anchorId=((int)region.Start).ToString()+":"+((int)region.End).ToString();
             if(existing.Contains(anchorId)){duplicates++;continue;}
-            string comment="[Haronex: "+(issue.Item2=="logic"?"Potential internal contradiction":"Language")+"]\r\n"+
+            string comment="[Haronex: "+(issue.Item2=="unrelated"?"Unrelated content":(issue.Item2=="logic"?"Potential internal contradiction":"Language"))+"]\r\n"+
               Safe(issue.Item3,500)+(issue.Item4.Length>0?"\r\nSuggestion: "+Safe(issue.Item4,250):"")+
               "\r\nRequires clinical verification.";
-            region.HighlightColorIndex=issue.Item2=="logic"?6:7;
+            region.HighlightColorIndex=issue.Item2=="unrelated"?12:(issue.Item2=="logic"?6:7); // wdViolet=12
             doc.Comments.Add(region,comment);
             existing.Add(anchorId);
             applied++;

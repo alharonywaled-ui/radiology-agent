@@ -355,7 +355,7 @@ namespace RadiologyAgent {
             string quote=Convert.ToString(row["quote"]);
             string category=Convert.ToString(row["category"]);
             if(String.IsNullOrWhiteSpace(quote)||quote.Length>500||
-               (category!="language"&&category!="logic")||!chunks[i].Contains(quote))return null;
+               (category!="language"&&category!="logic"&&category!="unrelated")||!chunks[i].Contains(quote))return null;
           }
         }
         return json;
@@ -463,12 +463,14 @@ namespace RadiologyAgent {
             string section=get("section");
             string key=quote+"\u001f"+section;
             var record=Tuple.Create(quote,category,get("explanation"),get("suggestion"),section);
-            if(!unique.ContainsKey(key)||category=="logic")unique[key]=record;
+            if(!unique.ContainsKey(key)||(category=="logic"||category=="unrelated"))unique[key]=record;
           }
         }
         var ordered=new List<Tuple<string,string,string,string,string>>(unique.Values);
         ordered.Sort((a,b)=>{
           int priority=String.CompareOrdinal(a.Item2,b.Item2);
+          if(a.Item2=="unrelated"&&b.Item2!="unrelated")return -1;
+          if(b.Item2=="unrelated"&&a.Item2!="unrelated")return 1;
           if(a.Item2=="logic"&&b.Item2!="logic")return -1;
           if(b.Item2=="logic"&&a.Item2!="logic")return 1;
           return currentText.IndexOf(a.Item1,StringComparison.Ordinal)
@@ -517,11 +519,11 @@ namespace RadiologyAgent {
             if((bool)second.Execute())continue; // Ambiguous quote; never annotate the wrong occurrence.
             string anchorId=((int)region.Start).ToString()+":"+((int)region.End).ToString();
             if(existing.Contains(anchorId))continue;
-            string comment="[Haronex: "+(issue.Item2=="logic"?"Potential internal contradiction":"Language")+"]\r\n"+
+            string comment="[Haronex: "+(issue.Item2=="unrelated"?"Unrelated content":(issue.Item2=="logic"?"Potential internal contradiction":"Language"))+"]\r\n"+
               WebReviewForm.Safe(issue.Item3,500)+
               (issue.Item4.Length>0?"\r\nSuggestion: "+WebReviewForm.Safe(issue.Item4,250):"")+
               "\r\nRequires clinical verification.";
-            region.HighlightColorIndex=issue.Item2=="logic"?6:7;
+            region.HighlightColorIndex=issue.Item2=="unrelated"?12:(issue.Item2=="logic"?6:7); // wdViolet=12
             doc.Comments.Add(region,comment);
             existing.Add(anchorId);
           } catch {}

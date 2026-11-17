@@ -57,7 +57,11 @@ CONCLUSION_SYSTEM = (
     "Do not regard every missing incidental finding as a contradiction. "
     "For each issue anchor an EXACT substring of the CONCLUSION (not Findings) "
     "up to 500 characters, preferably an entire unique sentence. "
-    "Return only JSON with issues array; each item: quote, category='logic', "
+    "Use category 'unrelated' ONLY for an obvious non-medical statement or "
+    "off-topic material inside Conclusion (personal biography, employment, "
+    "greetings, unrelated filler). Do not use 'unrelated' for an unsupported "
+    "but medically relevant statement; use 'logic' for that. "
+    "Return only JSON with issues array; each item: quote, category='logic' or 'unrelated', "
     "explanation, suggestion. If nothing is wrong return an empty issues array. "
     "Never repeat patient identifiers."
 )
@@ -105,7 +109,7 @@ def conclusion_issue_groups(key, chunks, reviewer=None):
     seen = set()
     for issue in reviewer(context):
         quote = issue["quote"]
-        if issue["category"] != "logic" or quote not in section:
+        if issue["category"] not in ("logic", "unrelated") or quote not in section:
             continue
         candidates = [i for i, chunk in enumerate(chunks) if quote in chunk]
         if not candidates:
@@ -131,7 +135,7 @@ def normalize(text, issues):
         category = item.get("category")
         if not isinstance(quote, str) or not 2 <= len(quote) <= 500:
             raise ValueError("Invalid quote")
-        if quote not in text or category not in ("logic", "language"):
+        if quote not in text or category not in ("logic", "language", "unrelated"):
             raise ValueError("Invalid quote location or category")
         explanation = item.get("explanation", "")
         suggestion = item.get("suggestion", "")
@@ -163,7 +167,7 @@ def normalize_response(text, issues):
         if not isinstance(quote, str) or not 2 <= len(quote) <= 500 or quote not in text:
             invalid.append("GROQ_INVALID_QUOTE")
             continue
-        if category not in ("logic", "language"):
+        if category not in ("logic", "language", "unrelated"):
             invalid.append("GROQ_INVALID_CATEGORY")
             continue
         explanation, suggestion = item.get("explanation", ""), item.get("suggestion", "")
@@ -316,7 +320,7 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep,
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json",
                  "Accept": "application/json",
-                 "User-Agent": "Haronex-Radiology-Agent/10.13"})
+                 "User-Agent": "Haronex-Radiology-Agent/10.14"})
     # Semantic format errors get only one additional fresh response.
     # HTTP 400/auth/content filtering or clinical safety failures are never retried.
     recoverable_formats = {
@@ -394,7 +398,7 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v10-13":
+        if version != "haronex-groq-qwen38-v10-14":
             raise ValueError("Unsupported review version")
         groups = [review_with_recovery(key, text) for text in texts]
         independent_audit = conclusion_issue_groups(key, texts)
@@ -442,12 +446,19 @@ def self_test():
         reviewer=lambda context: [fake]) == [[dict(fake, section="conclusion")]]
     assert conclusion_issue_groups("offline", ["Normal report."],
         reviewer=lambda context: [fake]) == [[]]
+    off_topic = clinical.replace("Normal kidneys with no cysts.", "Haron work at dokki scan")
+    outside = {"quote": "Haron work at dokki scan", "category": "unrelated",
+               "explanation": "Statement is not a radiology finding",
+               "suggestion": "Verify and remove if entered inadvertently."}
+    tagged = conclusion_issue_groups("offline", [off_topic], reviewer=lambda ctx: [outside])
+    assert len(tagged[0]) == 1 and tagged[0][0]["category"] == "unrelated"
+    assert normalize_response(off_topic, [outside])[0]["category"] == "unrelated"
     assert MODEL == "qwen/qwen3.8-27b"
     class FakeError:
         def read(self, limit):
             return b'{"error":{"message":"unsupported reasoning effort"}}'
     assert classify_http_400(FakeError()) == "GROQ_REQUEST_400_REASONING"
-    assert "Haronex-Radiology-Agent/10.13" in str(api_review.__code__.co_consts)
+    assert "Haronex-Radiology-Agent/10.14" in str(api_review.__code__.co_consts)
     assert MAX_COMPLETION_TOKENS == 8192
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
