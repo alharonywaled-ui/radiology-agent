@@ -318,8 +318,12 @@ namespace RadiologyAgent {
           return;
         // The popup must not appear while another window owns input.
         // Word selection is meaningful only while the pinned Word app is focused.
-        int selectionStart=(int)app.Selection.Range.Start;
-        int selectionEnd=(int)app.Selection.Range.End;
+        // Prefer the selection belonging to the pinned Word window.
+        dynamic selected;
+        try {selected=window.Selection.Range;}
+        catch {selected=app.Selection.Range;}
+        int selectionStart=(int)selected.Start;
+        int selectionEnd=(int)selected.End;
         dynamic comments=doc.Comments;
         int count=(int)comments.Count;
         for(int index=1;index<=count;index++) {
@@ -353,7 +357,7 @@ namespace RadiologyAgent {
             if(Object.ReferenceEquals(suggestionPopup,popup))suggestionPopup=null;
           };
           popup.PositionNearCursor();
-          popup.Show(this);
+          popup.Show(); // The monitor window is invisible; never own the popup to it.
           return;
         }
         lastSuggestionAnchor=null;
