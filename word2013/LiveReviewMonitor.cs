@@ -146,6 +146,33 @@ namespace RadiologyAgent {
       MessageBox(IntPtr.Zero,success?"تمت المراجعة":"رجاءً أعد المحاولة",
         "Haronex",0x00040000|0x00010000|(success?0x40u:0x10u));
     }
+    // A successful API response is not the same thing as visible Word changes.
+    // Always report how many annotations really survived the Word COM calls.
+    private static void NotifyAnnotationResult(int candidates,int applied,int failed) {
+      WriteDword("ReviewIssuesFound",unchecked((uint)Math.Max(0,candidates)));
+      WriteDword("ReviewAnnotationsApplied",unchecked((uint)Math.Max(0,applied)));
+      WriteDword("ReviewAnnotationsFailed",unchecked((uint)Math.Max(0,failed)));
+      if(candidates==0) {
+        WebReviewForm.SetReviewStatus(1);
+        MessageBox(IntPtr.Zero,
+          "اكتملت المراجعة، لكن لم يتم اكتشاف أخطاء مؤكدة في هذا التقرير.\r\n"+
+          "لم تتم إضافة تعليقات أو تلوين.",
+          "Haronex",0x00040000|0x00010000|0x40u);
+      } else if(applied==0) {
+        WebReviewForm.SetReviewStatus(2);
+        MessageBox(IntPtr.Zero,
+          "تم اكتشاف "+candidates+" ملاحظات، لكن تعذر إظهار أي منها في Word.\r\n"+
+          "لم تتم الموافقة على المراجعة. راجع diagnostics.log.",
+          "Haronex",0x00040000|0x00010000|0x10u);
+      } else {
+        WebReviewForm.SetReviewStatus(1);
+        MessageBox(IntPtr.Zero,
+          "تمت المراجعة. ظهرت "+applied+" ملاحظة في Word."+
+          (failed>0?"\r\nتعذر إظهار "+failed+" ملاحظة؛ راجع diagnostics.log.":"")+
+          "\r\nاختر النص الملوّن لعرض Apply Suggestion.",
+          "Haronex",0x00040000|0x00010000|0x40u);
+      }
+    }
 
     private bool ConnectWord() {
       uint requested=ReadDword("WordWindowHwnd");
@@ -291,8 +318,12 @@ namespace RadiologyAgent {
           return;
         // The popup must not appear while another window owns input.
         // Word selection is meaningful only while the pinned Word app is focused.
-        int selectionStart=(int)app.Selection.Range.Start;
-        int selectionEnd=(int)app.Selection.Range.End;
+        // Prefer the selection belonging to the pinned Word window.
+        dynamic selected;
+        try {selected=window.Selection.Range;}
+        catch {selected=app.Selection.Range;}
+        int selectionStart=(int)selected.Start;
+        int selectionEnd=(int)selected.End;
         dynamic comments=doc.Comments;
         int count=(int)comments.Count;
         for(int index=1;index<=count;index++) {
@@ -326,7 +357,7 @@ namespace RadiologyAgent {
             if(Object.ReferenceEquals(suggestionPopup,popup))suggestionPopup=null;
           };
           popup.PositionNearCursor();
-          popup.Show(this);
+          popup.Show(); // The monitor window is invisible; never own the popup to it.
           return;
         }
         lastSuggestionAnchor=null;
@@ -805,6 +836,7 @@ namespace RadiologyAgent {
             "conclusion");
         }
         var ordered=new List<Tuple<string,string,string,string,string>>(unique.Values);
+        int candidateCount=ordered.Count,wordApplied=0,wordFailed=0;
         ordered.Sort((a,b)=>{
           int priority=String.CompareOrdinal(a.Item2,b.Item2);
           if(a.Item2=="unrelated"&&b.Item2!="unrelated")return -1;
@@ -849,28 +881,26 @@ namespace RadiologyAgent {
             dynamic find=region.Find;
             find.ClearFormatting();find.Text=issue.Item1;
             find.Forward=true;find.Wrap=0;find.MatchCase=true;find.MatchWildcards=false;
+            // Word Find may re-scan the same table cell and report a false
+            // duplicate; unique exact positions in the Word snapshot win.
+            int snapshotAt=currentText.IndexOf(issue.Item1,StringComparison.Ordinal);
+            bool snapshotUnique=snapshotAt>=0&&
+              currentText.IndexOf(issue.Item1,snapshotAt+issue.Item1.Length,
+                                  StringComparison.Ordinal)<0;
             if(!(bool)find.Execute()) {
-              // When Word Find fails inside a table, try a precise validated
-              // character-range anchor, NEVER an approximate nearby position.
-              if(issue.Item2!="unrelated"){continue;}
-              int at=currentText.IndexOf(issue.Item1,StringComparison.Ordinal);
-              if(at<0||currentText.IndexOf(issue.Item1,at+1,StringComparison.Ordinal)>=0) {
-                WriteDword("UnrelatedSkippedCount",ReadDword("UnrelatedSkippedCount")+1);
-                continue;
+              if(!snapshotUnique) {wordFailed++;LogFailure("WORD_FIND_MISSING_AMBIGUOUS");continue;}
+              region=doc.Range(start+snapshotAt,start+snapshotAt+issue.Item1.Length);
+              if(!String.Equals(Convert.ToString(region.Text),issue.Item1,
+                                StringComparison.Ordinal)) {
+                wordFailed++;LogFailure("WORD_FIND_RANGE_MISMATCH");continue;
               }
-              region=doc.Range(start+at,start+at+issue.Item1.Length);
-              if(!String.Equals(Convert.ToString(region.Text),issue.Item1,StringComparison.Ordinal)) {
-                WriteDword("UnrelatedSkippedCount",ReadDword("UnrelatedSkippedCount")+1);
-                continue;
-              }
+            } else if(!snapshotUnique) {
+              // If several literal occurrences exist, do not guess which
+              // instance the AI meant without an exact clinical anchor.
+              wordFailed++;LogFailure("WORD_FIND_DUPLICATE_QUOTE");continue;
             }
-            dynamic again=doc.Range((int)region.End,end);
-            dynamic second=again.Find;
-            second.ClearFormatting();second.Text=issue.Item1;
-            second.Forward=true;second.Wrap=0;second.MatchCase=true;second.MatchWildcards=false;
-            if((bool)second.Execute())continue; // Ambiguous quote; never annotate the wrong occurrence.
             string anchorId=((int)region.Start).ToString()+":"+((int)region.End).ToString();
-            if(existing.Contains(anchorId))continue;
+            if(existing.Contains(anchorId)) {wordApplied++;continue;}
             string comment="[Haronex: "+(issue.Item2=="unrelated"?"Unrelated content":(issue.Item2=="logic"?"Potential internal contradiction":"Language"))+"]\r\n"+
               WebReviewForm.Safe(issue.Item3,500)+
               (issue.Item4.Length>0?"\r\nSuggestion: "+WebReviewForm.Safe(issue.Item4,250):"")+
@@ -878,10 +908,13 @@ namespace RadiologyAgent {
             region.HighlightColorIndex=issue.Item2=="unrelated"?12:(issue.Item2=="logic"?6:7); // wdViolet=12
             dynamic createdComment=doc.Comments.Add(region,comment);
             BoldSuggestionInComment(createdComment);
+            wordApplied++;
             if(issue.Item2=="unrelated")
               WriteDword("UnrelatedAppliedCount",ReadDword("UnrelatedAppliedCount")+1);
             existing.Add(anchorId);
-          } catch {
+          } catch(Exception ex) {
+            wordFailed++;
+            LogFailure("ANNOTATION_"+ex.GetType().Name);
             if(issue.Item2=="unrelated")
               WriteDword("UnrelatedSkippedCount",ReadDword("UnrelatedSkippedCount")+1);
           }
@@ -898,12 +931,18 @@ namespace RadiologyAgent {
         }
         WriteDword("UnrelatedAppliedCount",purpleApplied);
         WriteDword("UnrelatedSkippedCount",purpleSkipped);
+        if(wordApplied==0&&purpleApplied==0&&candidateCount>0) {
+          LogFailure("ANNOTATIONS_ZERO_WITH_CANDIDATES");
+          NotifyAnnotationResult(candidateCount,0,wordFailed+(int)purpleSkipped);
+          pendingClick=false;return;
+        }
         if(!MandatoryApproval.Approve(doc,currentText,unchecked((uint)hwnd))) {
           LogFailure("MANDATORY_APPROVAL_NOT_STORED");
           pendingClick=false;Notify(false);return;
         }
         pendingClick=false;
-        Notify(true);
+        NotifyAnnotationResult(candidateCount,Math.Max(wordApplied,(int)purpleApplied),
+                               wordFailed+(int)purpleSkipped);
       } catch(Exception ex) {
         LogFailure("WORD_ANNOTATE_"+ex.GetType().Name);
         pendingClick=false;Notify(false);
