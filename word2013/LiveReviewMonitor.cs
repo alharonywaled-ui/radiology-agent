@@ -1324,6 +1324,15 @@ namespace RadiologyAgent {
           }
         } catch {}
         int start=(int)doc.Content.Start,end=(int)doc.Content.End;
+        // Batch Word layout repaints while inserting all comments/highlights.
+        // Always restore even after an individual COM failure.
+        bool repaintChanged=false,oldRepaint=true;
+        try {
+          oldRepaint=Convert.ToBoolean(app.ScreenUpdating);
+          app.ScreenUpdating=false;
+          repaintChanged=true;
+        } catch { /* Some protected Word windows reject ScreenUpdating. */ }
+        try {
         foreach(var issue in ordered) {
           try {
             dynamic region=doc.Range(start,end);
@@ -1396,6 +1405,9 @@ namespace RadiologyAgent {
         }
         WriteDword("UnrelatedAppliedCount",purpleApplied);
         WriteDword("UnrelatedSkippedCount",purpleSkipped);
+        } finally {
+          if(repaintChanged)try {app.ScreenUpdating=oldRepaint;}catch{}
+        }
         if(wordApplied==0&&purpleApplied==0&&candidateCount>0) {
           LogFailure("ANNOTATIONS_ZERO_WITH_CANDIDATES");
           NotifyAnnotationResult(candidateCount,0,wordFailed+(int)purpleSkipped);
