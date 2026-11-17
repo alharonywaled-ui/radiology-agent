@@ -494,6 +494,11 @@ namespace RadiologyAgent {
               dynamic all=doc.Comments;
               for(int i=1;i<=(int)all.Count;i++) {
                 dynamic c=all.Item(i);
+                dynamic activeScope=c.Scope;
+                int currentStart=(int)activeScope.Start;
+                int currentEnd=(int)activeScope.End;
+                if(currentEnd<replaceStart||
+                   currentStart>replaceStart+replacement.Length)continue;
                 if(String.Equals(Convert.ToString(c.Range.Text),item.Body,
                                  StringComparison.Ordinal)) {
                   existing=c;break;
