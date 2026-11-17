@@ -359,7 +359,10 @@ namespace RadiologyAgent {
           int replacementFinish=contentStart+replaceTo;
           string expectedQuote=quote,expectedComment=commentText;
           object boundDocument=doc;
+          int predicted=CountResolvableComments(doc,replacementBegin,
+            replacementFinish,begin,finish,safeSuggestion);
           var popup=new SuggestionPopup(category,visibleOriginal,safeSuggestion,
+            predicted,
             replacement=>ApplyCommentSuggestion(boundDocument,
               expectedBegin,expectedFinish,expectedQuote,expectedComment,
               replacementBegin,replacementFinish,visibleOriginal,replacement));
@@ -382,6 +385,39 @@ namespace RadiologyAgent {
       return m.Success?m.Groups[1].Value.Trim():"";
     }
 
+    private sealed class CommentSnapshot {
+      internal int Start,End;
+      internal string Quote,Body;
+      internal bool Selected,Resolved;
+    }
+    private static bool IsHaronexOpenComment(string body) {
+      return !String.IsNullOrEmpty(body)&&
+        body.IndexOf("[Haronex:",StringComparison.Ordinal)>=0&&
+        body.IndexOf("[Haronex: Resolved]",StringComparison.Ordinal)<0;
+    }
+    private static int CountResolvableComments(object document,int editStart,
+        int editEnd,int chosenStart,int chosenEnd,string proposal) {
+      if(String.IsNullOrWhiteSpace(proposal))return 0;
+      int result=0;
+      try {
+        dynamic doc=document,comments=doc.Comments;
+        for(int i=1;i<=(int)comments.Count;i++) {
+          dynamic note=comments.Item(i),scope=note.Scope;
+          int a=(int)scope.Start,b=(int)scope.End;
+          string body=Convert.ToString(note.Range.Text);
+          if(!IsHaronexOpenComment(body))continue;
+          bool selected=a==chosenStart&&b==chosenEnd;
+          string text=Convert.ToString(scope.Text);
+          bool separateLogic=!selected&&
+            body.IndexOf("Potential internal contradiction",
+              StringComparison.Ordinal)>=0;
+          if(!separateLogic&&RelatedIssueResolution.IsResolved(a,b,text,
+              editStart,editEnd,proposal,selected))result++;
+        }
+      } catch {}
+      return result;
+    }
+
     private bool ApplyCommentSuggestion(object document,int begin,int finish,
                                         string original,string expectedComment,
                                         int replaceStart,int replaceEnd,
@@ -392,55 +428,140 @@ namespace RadiologyAgent {
          replacement.IndexOf('\r')>=0||replacement.IndexOf('\n')>=0)return false;
       try {
         if(boundWordWindow==null||documentId==null)return false;
-        dynamic doc=document;
-        dynamic pinned=((dynamic)boundWordWindow).Document;
-        // Do not mistake another same-named document for the reviewed one.
+        dynamic doc=document,pinned=((dynamic)boundWordWindow).Document;
         if(!Object.ReferenceEquals(document,pinned)) {
           if(!String.Equals(Convert.ToString(doc.FullName),
-            Convert.ToString(pinned.FullName),StringComparison.Ordinal) ||
+            Convert.ToString(pinned.FullName),StringComparison.Ordinal)||
             !String.Equals(Convert.ToString(doc.Content.Text),
               Convert.ToString(pinned.Content.Text),StringComparison.Ordinal))
             return false;
         }
         if(!String.Equals(Convert.ToString(doc.FullName),
-          documentId.Substring(documentId.IndexOf('|')+1),
-          StringComparison.Ordinal))return false;
-        dynamic scope=doc.Range(begin,finish);
-        dynamic target=doc.Range(replaceStart,replaceEnd);
-        if(!String.Equals(Convert.ToString(scope.Text),original,
-                          StringComparison.Ordinal)||
-           !String.Equals(Convert.ToString(target.Text),expectedReplacementText,
-                          StringComparison.Ordinal))return false;
+          documentId.Substring(documentId.IndexOf('|')+1),StringComparison.Ordinal))
+          return false;
         if(replaceStart>begin||replaceEnd<finish)return false;
-        dynamic targetComment=null;
+        dynamic originalRange=doc.Range(begin,finish);
+        dynamic candidate=doc.Range(replaceStart,replaceEnd);
+        if(!String.Equals(Convert.ToString(originalRange.Text),original,
+                          StringComparison.Ordinal)||
+           !String.Equals(Convert.ToString(candidate.Text),expectedReplacementText,
+                          StringComparison.Ordinal))return false;
+
+        // Freeze all Haronex comment anchors in the edited span BEFORE any
+        // Word COM edit: replacing a sentence can delete several comments.
+        var affected=new List<CommentSnapshot>();
+        bool foundSelected=false;
         dynamic comments=doc.Comments;
-        int count=(int)comments.Count;
-        for(int i=1;i<=count;i++) {
-          dynamic c=comments.Item(i),anchor=c.Scope;
-          if((int)anchor.Start!=begin||(int)anchor.End!=finish)continue;
-          if(String.Equals(Convert.ToString(c.Range.Text),expectedComment,
-                           StringComparison.Ordinal)){targetComment=c;break;}
+        for(int i=1;i<=(int)comments.Count;i++) {
+          dynamic comment=comments.Item(i),scope=comment.Scope;
+          int noteStart=(int)scope.Start,noteEnd=(int)scope.End;
+          if(noteStart<replaceStart||noteEnd>replaceEnd)continue;
+          string body=Convert.ToString(comment.Range.Text);
+          if(!IsHaronexOpenComment(body))continue;
+          bool selected=noteStart==begin&&noteEnd==finish&&
+            String.Equals(body,expectedComment,StringComparison.Ordinal);
+          if(selected)foundSelected=true;
+          string text=Convert.ToString(scope.Text);
+          affected.Add(new CommentSnapshot {
+            Start=noteStart,End=noteEnd,Quote=text,Body=body,
+            Selected=selected,
+            Resolved=(selected||
+              body.IndexOf("Potential internal contradiction",
+                StringComparison.Ordinal)<0)&&
+              RelatedIssueResolution.IsResolved(
+                noteStart,noteEnd,text,replaceStart,replaceEnd,replacement,selected)
+          });
         }
-        if(targetComment==null)return false;
-        // Delete only the selected comment, replace only the exact preview
-        // range; Word retains the paragraph style and supports normal Undo.
+        if(!foundSelected)return false;
         dynamic undo=null;bool started=false;
-        try {undo=doc.Application.UndoRecord;
-             undo.StartCustomRecord("Haronex Apply Suggestion");started=true;}catch{}
         try {
-          targetComment.Delete();
-          dynamic region=doc.Range(replaceStart,replaceEnd);
-          if(!String.Equals(Convert.ToString(region.Text),
+          undo=doc.Application.UndoRecord;
+          undo.StartCustomRecord("Haronex Apply and Resolve Related Issues");
+          started=true;
+        } catch {}
+
+        bool changed=false;
+        int resolved=0,retained=0,errors=0;
+        try {
+          dynamic target=doc.Range(replaceStart,replaceEnd);
+          if(!String.Equals(Convert.ToString(target.Text),
                             expectedReplacementText,StringComparison.Ordinal))
             return false;
-          region.Text=replacement;
-          try {
-            dynamic result=doc.Range(replaceStart,replaceStart+replacement.Length);
-            result.HighlightColorIndex=0;
-          } catch {}
+          target.Text=replacement;
+          changed=true;
+          dynamic inserted=doc.Range(replaceStart,replaceStart+replacement.Length);
+          try {inserted.HighlightColorIndex=0;}catch{}
+          // Retain independent notes; close related ones as Word-resolved.
+          // In Word 2013 Comment.Done is supported; fallback text is explicit.
+          foreach(CommentSnapshot item in affected) {
+            try {
+              dynamic existing=null;
+              dynamic all=doc.Comments;
+              for(int i=1;i<=(int)all.Count;i++) {
+                dynamic c=all.Item(i);
+                dynamic activeScope=c.Scope;
+                int currentStart=(int)activeScope.Start;
+                int currentEnd=(int)activeScope.End;
+                if(currentEnd<replaceStart||
+                   currentStart>replaceStart+replacement.Length)continue;
+                if(String.Equals(Convert.ToString(c.Range.Text),item.Body,
+                                 StringComparison.Ordinal)) {
+                  existing=c;break;
+                }
+              }
+              if(item.Resolved) {
+                // Never mark an unrelated note solved by proximity alone.
+                if(existing!=null) {
+                  try {existing.Done=true;} catch {
+                    try {existing.Range.Text="[Haronex: Resolved]\r\n"+
+                      "Applied correction; this note was resolved.";}catch{}
+                  }
+                } else {
+                  dynamic doneNote=doc.Comments.Add(inserted,
+                    "[Haronex: Resolved]\r\n"+
+                    "Applied correction; the original flagged text was replaced.");
+                  try {doneNote.Done=true;}catch{}
+                }
+                resolved++;
+              } else {
+                if(existing==null) {
+                  // If the corrected sentence still contains the old flagged
+                  // words, restore that independent comment at the exact
+                  // unchanged fragment. Never mark it resolved automatically.
+                  int offset=replacement.IndexOf(item.Quote,StringComparison.Ordinal);
+                  int after=offset<0?-1:
+                    replacement.IndexOf(item.Quote,offset+item.Quote.Length,
+                                        StringComparison.Ordinal);
+                  if(offset>=0&&after<0) {
+                    dynamic stillFlagged=doc.Range(replaceStart+offset,
+                      replaceStart+offset+item.Quote.Length);
+                    dynamic stillOpen=doc.Comments.Add(stillFlagged,item.Body);
+                    try {
+                      stillFlagged.HighlightColorIndex=
+                        item.Body.IndexOf("Unrelated content",
+                          StringComparison.Ordinal)>=0?12:
+                        (item.Body.IndexOf("internal contradiction",
+                          StringComparison.Ordinal)>=0?6:7);
+                    } catch {}
+                  } else {
+                    dynamic stillOpen=doc.Comments.Add(inserted,
+                      "[Haronex: Review required]\r\n"+item.Body);
+                  }
+                }
+                retained++;
+              }
+            } catch(Exception ex) {
+              errors++;LogFailure("RELATED_ISSUE_"+ex.GetType().Name);
+            }
+          }
         } finally {
           if(started)try {undo.EndCustomRecord();}catch{}
         }
+        if(!changed)return false;
+        WriteDword("SuggestionResolvedCount",unchecked((uint)resolved));
+        WriteDword("SuggestionRetainedCount",unchecked((uint)retained));
+        WriteDword("SuggestionResolutionFailures",unchecked((uint)errors));
+        if(errors>0)LogFailure("RELATED_ISSUES_PARTIAL");
         lastSuggestionAnchor=null;
         return true;
       } catch(Exception ex) {
@@ -655,6 +776,7 @@ namespace RadiologyAgent {
           tableExample+"\rHaron work at dokki scan");
         return duplicateCase.Count==1
           && found.Count==1&&found[0]=="Haron work at dokki scan"&&control.Count==0
+          && RelatedIssueResolution.SelfTest()
           && SuggestionReplacementPlan.SelfTest()
           && MandatoryApproval.SelfTest()
           && DebounceMilliseconds==1200
