@@ -90,6 +90,10 @@ namespace RadiologyAgent {
     private string lastWordProblem="WORD_NOT_CONNECTED";
     private SuggestionPopup suggestionPopup;
     private string lastSuggestionAnchor;
+    private HaronexReviewSidebar sidebar;
+    private string sidebarSignature;
+    private int sidebarPollCounter;
+    private bool sidebarDismissed;
 
 
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
@@ -223,8 +227,8 @@ namespace RadiologyAgent {
       try {
         if(ConnectWord()) {
           PollWord();
-          CheckSuggestionSelection();
-        }
+          PollSidebar();
+        } else if(sidebar!=null&&!sidebar.IsDisposed)sidebar.Hide();
         CheckClick();
         CheckPendingDocument();
         // No background API calls: only explicit Review Text click triggers analysis.
@@ -296,12 +300,196 @@ namespace RadiologyAgent {
     }
 
     private void ClearDocument() {
+      if(sidebar!=null&&!sidebar.IsDisposed)sidebar.Hide();
+      sidebarSignature=null;sidebarPollCounter=0;sidebarDismissed=false;
       if(suggestionPopup!=null&&!suggestionPopup.IsDisposed)suggestionPopup.Close();
       suggestionPopup=null;lastSuggestionAnchor=null;
       if(runningCancellation!=null)runningCancellation.Cancel();
       documentId=null;currentText=null;snapshotToken=null;
       readyResponse=null;failed=false;
       WebReviewForm.SetReviewStatus(0);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect {internal int Left,Top,Right,Bottom;}
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hwnd,out NativeRect rect);
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
+    private void EnsureSidebar() {
+      if(sidebar!=null&&!sidebar.IsDisposed)return;
+      sidebar=new HaronexReviewSidebar(ApplySidebarIssue,IgnoreSidebarIssue,
+                                      LocateSidebarIssue);
+      sidebar.Dismissed+=(s,e)=>sidebarDismissed=true;
+      sidebarSignature=null;
+    }
+    private bool PinnedDocument(out object document) {
+      document=null;
+      try {
+        if(boundWordWindow==null||documentId==null||currentText==null)return false;
+        dynamic win=boundWordWindow;
+        dynamic doc=win.Document;
+        string id=Convert.ToString(win.Hwnd)+"|"+Convert.ToString(doc.FullName);
+        if(!String.Equals(id,documentId,StringComparison.Ordinal))return false;
+        document=doc;return true;
+      } catch {return false;}
+    }
+    private void ShowSidebar() {
+      object document;
+      if(!PinnedDocument(out document))return;
+      EnsureSidebar();sidebarDismissed=false;
+      UpdateSidebar(document,true);
+      PositionSidebar();
+      if(!sidebar.Visible)sidebar.Show();
+    }
+    private void PollSidebar() {
+      if(sidebar==null||sidebar.IsDisposed||sidebarDismissed)return;
+      if(!sidebar.Visible)return;
+      // Word and this modeless tool window can both own focus, but other
+      // applications must not be covered by a stale pinned panel.
+      PositionSidebar();
+      if(++sidebarPollCounter%4!=0)return;
+      object doc;
+      if(PinnedDocument(out doc))UpdateSidebar(doc,false);
+    }
+    private void PositionSidebar() {
+      if(sidebar==null||sidebar.IsDisposed||boundWordHwnd==0)return;
+      IntPtr hwnd=new IntPtr(unchecked((int)boundWordHwnd));
+      if(IsIconic(hwnd)) {sidebar.Hide();return;}
+      IntPtr foreground=GetForegroundWindow();
+      uint activePid=0,wordPid=0;
+      GetWindowThreadProcessId(foreground,out activePid);
+      GetWindowThreadProcessId(hwnd,out wordPid);
+      if(activePid!=wordPid&&activePid!=
+            (uint)Process.GetCurrentProcess().Id) {
+        if(sidebar.Visible)sidebar.Hide();
+        return;
+      }
+      NativeRect rect;
+      if(GetWindowRect(hwnd,out rect))sidebar.SetWindowPlacement(
+        Rectangle.FromLTRB(rect.Left,rect.Top,rect.Right,rect.Bottom));
+      if(!sidebar.Visible&&!sidebarDismissed)sidebar.Show();
+    }
+    private static HaronexReviewSidebar.Issue ParseSidebarIssue(
+        object comment) {
+      try {
+        dynamic note=comment;
+        dynamic scope=note.Scope;
+        string body=Convert.ToString(note.Range.Text);
+        if(String.IsNullOrWhiteSpace(body)||
+           body.IndexOf("[Haronex:",StringComparison.Ordinal)<0)return null;
+        string category=body.IndexOf("[Haronex: Language]",
+          StringComparison.OrdinalIgnoreCase)>=0?"Language":
+          body.IndexOf("[Haronex: Potential internal contradiction]",
+          StringComparison.OrdinalIgnoreCase)>=0?"Logic":
+          body.IndexOf("[Haronex: Unrelated content]",
+          StringComparison.OrdinalIgnoreCase)>=0?"Unrelated":"";
+        if(category.Length==0)return null;
+        string why=body;
+        int first=why.IndexOf('\r');
+        if(first>=0)why=why.Substring(first+1).Trim();
+        int suggestionAt=why.IndexOf("Suggestion:",StringComparison.OrdinalIgnoreCase);
+        if(suggestionAt>=0)why=why.Substring(0,suggestionAt).Trim();
+        why=Regex.Replace(why,@"(?i)\s*Requires clinical verification\.\s*$","").Trim();
+        bool done=false;
+        try {done=Convert.ToBoolean(note.Done);}catch{}
+        return new HaronexReviewSidebar.Issue{
+          Start=(int)scope.Start,End=(int)scope.End,
+          Quote=Convert.ToString(scope.Text),Body=body,
+          Category=category,Why=why,
+          Suggestion=ExtractSuggestion(body),Resolved=done
+        };
+      } catch {return null;}
+    }
+    private void UpdateSidebar(object document,bool force) {
+      if(sidebar==null||sidebar.IsDisposed)return;
+      try {
+        dynamic doc=document;
+        dynamic comments=doc.Comments;
+        var list=new List<HaronexReviewSidebar.Issue>();
+        var fingerprint=new StringBuilder();
+        for(int i=1;i<=(int)comments.Count;i++) {
+          var item=ParseSidebarIssue(comments.Item(i));
+          if(item==null)continue;
+          list.Add(item);
+          fingerprint.Append(item.Id).Append('|')
+            .Append(item.Resolved?'1':'0').Append(';');
+        }
+        string hash=MandatoryApproval.Digest(fingerprint.ToString());
+        if(!force&&hash==sidebarSignature)return;
+        sidebarSignature=hash;
+        sidebar.UpdateIssues(list);
+      } catch(Exception ex){LogFailure("SIDEBAR_READ_"+ex.GetType().Name);}
+    }
+    private bool FindSidebarComment(object document,
+       HaronexReviewSidebar.Issue item,out object comment) {
+      comment=null;
+      try {
+        dynamic doc=document,comments=doc.Comments;
+        for(int i=1;i<=(int)comments.Count;i++) {
+          dynamic c=comments.Item(i),scope=c.Scope;
+          if((int)scope.Start!=item.Start||(int)scope.End!=item.End)continue;
+          if(!String.Equals(Convert.ToString(c.Range.Text),item.Body,
+            StringComparison.Ordinal))continue;
+          comment=c;return true;
+        }
+      } catch {}
+      return false;
+    }
+    private void ApplySidebarIssue(HaronexReviewSidebar.Issue item,
+                                  string replacement) {
+      object doc;
+      if(!PinnedDocument(out doc)||item==null)return;
+      object c;
+      if(!FindSidebarComment(doc,item,out c)) {
+        sidebar.UpdateStatus("This comment changed. Review the report again.");
+        UpdateSidebar(doc,true);return;
+      }
+      try {
+        string quote=Convert.ToString(((dynamic)c).Scope.Text);
+        if(!String.Equals(quote,item.Quote,StringComparison.Ordinal))return;
+        string snapshot=Convert.ToString(((dynamic)doc).Content.Text);
+        int contentStart=(int)((dynamic)doc).Content.Start;
+        int a,b;string original,safe;
+        if(!SuggestionReplacementPlan.TryBuild(snapshot,
+           item.Start-contentStart,item.End-contentStart,quote,replacement,
+           out a,out b,out original,out safe)||
+           String.IsNullOrWhiteSpace(safe)||safe!=replacement.Trim()) {
+          sidebar.UpdateStatus("Unsafe replacement scope: edit the exact quote or use a matching full sentence.");
+          return;
+        }
+        bool ok=ApplyCommentSuggestion(doc,item.Start,item.End,quote,item.Body,
+            contentStart+a,contentStart+b,original,replacement.Trim());
+        sidebar.UpdateStatus(ok?"Correction applied; linked comments reconciled.":
+          "No change applied: document or comment changed.");
+        UpdateSidebar(doc,true);
+      } catch(Exception ex){LogFailure("SIDEBAR_APPLY_"+ex.GetType().Name);}
+    }
+    private void IgnoreSidebarIssue(HaronexReviewSidebar.Issue item) {
+      object doc,c;
+      if(!PinnedDocument(out doc)||item==null||
+         !FindSidebarComment(doc,item,out c))return;
+      try {
+        dynamic note=c;
+        note.Done=true;
+        // Do not silently clear text marked by another overlapping note.
+        sidebar.UpdateStatus("Suggestion marked ignored/resolved; report text unchanged.");
+        UpdateSidebar(doc,true);
+      } catch(Exception ex){LogFailure("SIDEBAR_IGNORE_"+ex.GetType().Name);}
+    }
+    private void LocateSidebarIssue(HaronexReviewSidebar.Issue item) {
+      object doc,c;
+      if(!PinnedDocument(out doc)||item==null||
+         !FindSidebarComment(doc,item,out c))return;
+      try {
+        dynamic range=((dynamic)doc).Range(item.Start,item.End);
+        range.Select();
+        sidebar.UpdateStatus("Located selected issue in Word.");
+      } catch(Exception ex){LogFailure("SIDEBAR_LOCATE_"+ex.GetType().Name);}
     }
 
     // Show the non-modal UI only for a selected range attached to a Haronex
@@ -1068,6 +1256,7 @@ namespace RadiologyAgent {
           pendingClick=false;Notify(false);return;
         }
         pendingClick=false;
+        ShowSidebar();
         NotifyAnnotationResult(candidateCount,Math.Max(wordApplied,(int)purpleApplied),
                                wordFailed+(int)purpleSkipped);
       } catch(Exception ex) {
