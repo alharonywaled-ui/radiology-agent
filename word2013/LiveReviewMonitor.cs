@@ -479,6 +479,59 @@ namespace RadiologyAgent {
         LogFailure("SIDEBAR_REFRESH_"+ex.GetType().Name);
       }
     }
+    // Word offsets are not string indices in doc.Content.Text for tables,
+    // embedded objects or some compatibility-mode documents. Plan local
+    // edits from the exact Word comment Scope, never a whole-report substring.
+    private static bool TryPlanWordReplacement(object document,object scope,
+      string quote,string replacement,out int replaceStart,out int replaceEnd,
+      out string original,out string safe) {
+      dynamic doc=document;
+      dynamic anchor=scope;
+      replaceStart=(int)anchor.Start;
+      replaceEnd=(int)anchor.End;
+      original=quote;safe="";
+      if(replaceEnd<=replaceStart||
+         !String.Equals(Convert.ToString(anchor.Text),quote,
+                        StringComparison.Ordinal))return false;
+      int a,b;string localOriginal,localSafe;
+      if(!SuggestionReplacementPlan.TryBuild(quote,0,quote.Length,quote,replacement,
+        out a,out b,out localOriginal,out localSafe))return false;
+      if(!String.IsNullOrWhiteSpace(localSafe)) {
+        // Example: "phleboli" -> "phleboliths". Check only the exact
+        // commented word and leave other clinical text untouched.
+        safe=localSafe;return true;
+      }
+      try {
+        // A full-sentence replacement must stay inside the SAME Word
+        // paragraph, and must be unambiguously anchored to this Scope.
+        dynamic para=anchor.Paragraphs.Item(1).Range;
+        int paragraphStart=(int)para.Start;
+        int paragraphEnd=(int)para.End;
+        if(replaceStart<paragraphStart||replaceEnd>paragraphEnd)return true;
+        string paragraphText=Convert.ToString(para.Text);
+        int relativeStart=replaceStart-paragraphStart;
+        int relativeEnd=replaceEnd-paragraphStart;
+        if(!SuggestionReplacementPlan.TryBuild(paragraphText,
+           relativeStart,relativeEnd,quote,replacement,
+           out a,out b,out localOriginal,out localSafe))return true;
+        if(String.IsNullOrWhiteSpace(localSafe))return true;
+        replaceStart=paragraphStart+a;
+        replaceEnd=paragraphStart+b;
+        dynamic verified=doc.Range(replaceStart,replaceEnd);
+        if(!String.Equals(Convert.ToString(verified.Text),localOriginal,
+                          StringComparison.Ordinal)) {
+          replaceStart=(int)anchor.Start;replaceEnd=(int)anchor.End;
+          return true;
+        }
+        original=localOriginal;safe=localSafe;
+      } catch {
+        // A failed paragraph projection NEVER falls back to a guessed range.
+        replaceStart=(int)anchor.Start;replaceEnd=(int)anchor.End;
+        original=quote;safe="";
+      }
+      return true;
+    }
+
     private void ApplySidebarIssue(HaronexReviewSidebar.Issue item,
                                   string replacement) {
       object doc;
@@ -506,19 +559,18 @@ namespace RadiologyAgent {
           sidebar.ShowIssueFeedback(item,"Original text changed. This correction was not applied; check the refreshed card.");
           return;
         }
-        string snapshot=Convert.ToString(((dynamic)doc).Content.Text);
-        int contentStart=(int)((dynamic)doc).Content.Start;
-        int a,b;string original,safe;
-        if(!SuggestionReplacementPlan.TryBuild(snapshot,
-           begin-contentStart,finish-contentStart,quote,replacement,
-           out a,out b,out original,out safe)||
+        int replacementBegin,replacementEnd;string original,safe;
+        if(!TryPlanWordReplacement(doc,scope,quote,replacement,
+           out replacementBegin,out replacementEnd,out original,out safe)||
            String.IsNullOrWhiteSpace(safe)||safe!=replacement.Trim()) {
-          sidebar.ShowIssueFeedback(item,"AI suggestion does not safely match the highlighted text. Enter a short, exact replacement for this phrase.");
+          sidebar.ShowIssueFeedback(item,
+            "This proposed wording does not safely match the selected Word text. "+
+            "For a short correction, enter only the replacement word or phrase.");
           LogFailure("SIDEBAR_APPLY_UNSAFE_SCOPE");
           return;
         }
         bool ok=ApplyCommentSuggestion(doc,begin,finish,quote,body,
-            contentStart+a,contentStart+b,original,replacement.Trim());
+            replacementBegin,replacementEnd,original,replacement.Trim());
         RefreshSidebarAfterAction(doc);
         sidebar.UpdateStatus(ok?"Applied. All remaining comment locations refreshed.":
           "Nothing changed; see this card for the reason.");
