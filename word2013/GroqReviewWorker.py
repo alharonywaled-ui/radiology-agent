@@ -123,7 +123,7 @@ def obvious_nonmedical_conclusion_issues(report):
         return []
     # Word text uses CR paragraph breaks, ordinary text may use LF.
     issues = []
-    for raw in re.split(r"[\r\n]+", section):
+    for raw in re.split(r"[\r\n\x07]+", section):
         line = raw.strip().lstrip("o•◦- \t").strip()
         if not line or len(line) > 300:
             continue
