@@ -324,10 +324,7 @@ namespace RadiologyAgent {
       if(sidebar!=null&&!sidebar.IsDisposed)return;
       sidebar=new HaronexReviewSidebar(ApplySidebarIssue,IgnoreSidebarIssue,
                                       LocateSidebarIssue);
-      sidebar.VisibleChanged+=(s,e)=>{
-        if(sidebar!=null&&!sidebar.IsDisposed&&!sidebar.Visible)
-          sidebarDismissed=true;
-      };
+      sidebar.Dismissed+=(s,e)=>sidebarDismissed=true;
       sidebarSignature=null;
     }
     private bool PinnedDocument(out object document) {
