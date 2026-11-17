@@ -115,6 +115,15 @@ jobs:
           if (!(Test-Path $hostExe)) { throw "Web host not installed" }
           $worker=Join-Path $env:LOCALAPPDATA 'RadiologyAgent\Word2013Safe\HaronexGroqWorker.exe'
           if (!(Test-Path $worker)) { throw "Groq worker not installed" }
+          $runtime=Join-Path $env:LOCALAPPDATA 'RadiologyAgent\Word2013Safe\_HaronexRuntime'
+          if (!(Test-Path $runtime)) { throw "Optimized onedir Groq runtime missing" }
+          $start=[Diagnostics.Stopwatch]::StartNew()
+          $installedWorkerTest=& $worker --self-test
+          $start.Stop()
+          if ($LASTEXITCODE -ne 0 -or $installedWorkerTest -notmatch '"ok": true') {
+            throw "Installed optimized Groq worker self-test failed"
+          }
+          Write-Host "INSTALLED_OPTIMIZED_GROQ_WORKER_SELF_TEST_OK startup_ms=$($start.ElapsedMilliseconds)"
           $enabled=Get-ItemProperty -Path 'HKCU:\Software\Haronex' -ErrorAction SilentlyContinue
           if ($enabled -and $enabled.WebTransferAllowed -eq 1) { throw 'Silent installer must not grant consent automatically' }
           & word2013/bin/NativeSmoke.exe
