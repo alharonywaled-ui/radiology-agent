@@ -16,7 +16,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    internal const string ReviewAlgorithmVersion="haronex-groq-qwen38-v10-10";
+    internal const string ReviewAlgorithmVersion="haronex-groq-qwen38-v10-12";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=1; Height=1;
@@ -161,11 +161,11 @@ namespace RadiologyAgent {
         if(!root.ContainsKey("mode")||Convert.ToString(root["mode"])!="groq"||
            !root.ContainsKey("review_version")||Convert.ToString(root["review_version"])!=ReviewAlgorithmVersion)
           throw new Exception("Unexpected non-guest browser result; no Word changes applied.");
-        if(!root.ContainsKey("passes")||Convert.ToInt32(root["passes"])!=1)
+        if(!root.ContainsKey("passes")||Convert.ToInt32(root["passes"])!=2)
           throw new Exception("Incomplete review stages; no Word changes applied.");
         var groups=root["groups"] as object[];
         if(groups==null||groups.Length!=chunks.Count)throw new Exception("Incomplete web response: no Word changes applied.");
-        var valid=new List<Tuple<string,string,string,string>>();
+        var valid=new List<Tuple<string,string,string,string,string>>();
         int received=0,rejected=0;
         for(int i=0;i<groups.Length;i++) {
           var rows=groups[i] as object[];
@@ -179,7 +179,7 @@ namespace RadiologyAgent {
             var category=field("category").Trim().ToLowerInvariant();
             if(quote.Length<2||quote.Length>500||!chunks[i].Contains(quote)||
                (category!="language"&&category!="logic")) {rejected++;continue;}
-            valid.Add(Tuple.Create(quote,category,field("explanation"),field("suggestion")));
+            valid.Add(Tuple.Create(quote,category,field("explanation"),field("suggestion"),field("section")));
           }
         }
         if(!cached)SaveCached(cacheFile,workerResult);
@@ -201,6 +201,24 @@ namespace RadiologyAgent {
         foreach(var issue in valid) {
           try {
             dynamic region=doc.Range(rangeStart,rangeEnd);
+            // For semantic Conclusion audit, search from the actual Word
+            // Conclusion heading onwards; identical phrasing in Findings
+            // must not swallow a conclusion-specific medical warning.
+            if(String.Equals(issue.Item5,"conclusion",StringComparison.OrdinalIgnoreCase)) {
+              dynamic heading=doc.Range(rangeStart,rangeEnd);
+              dynamic hf=heading.Find;
+              hf.ClearFormatting();hf.Text="Conclusion";hf.Forward=true;
+              hf.Wrap=0;hf.MatchCase=false;hf.MatchWildcards=false;
+              if(!(bool)hf.Execute()) {
+                hf.Text="Impression";
+                heading=doc.Range(rangeStart,rangeEnd);
+                hf=heading.Find;
+                hf.ClearFormatting();hf.Text="Impression";hf.Forward=true;
+                hf.Wrap=0;hf.MatchCase=false;hf.MatchWildcards=false;
+                if(!(bool)hf.Execute()){skipped++;continue;}
+              }
+              region=doc.Range((int)heading.Start,rangeEnd);
+            }
             dynamic find=region.Find;
             find.ClearFormatting();find.Text=issue.Item1;
             find.Forward=true;find.Wrap=0;find.MatchCase=true;find.MatchWildcards=false;
