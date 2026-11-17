@@ -14,7 +14,7 @@ namespace RadiologyAgent {
     private readonly Label state;
 
     internal SuggestionPopup(string category,string quote,string proposed,
-                             Func<string,bool> applyAction) {
+                             int relatedCount,Func<string,bool> applyAction) {
       onApply=applyAction;
       initialOriginal=quote??"";
       Text="Haronex | Suggested Correction";
@@ -35,7 +35,9 @@ namespace RadiologyAgent {
       var title=new Label{Text="HARONEX  /  SUGGESTED CORRECTION",
          Dock=DockStyle.Top,Height=35,Padding=new Padding(22,12,0,0),
          ForeColor=Color.White,Font=new Font("Segoe UI",11.5f,FontStyle.Bold)};
-      var sub=new Label{Text="Review the exact text below, then apply one change.",
+      var sub=new Label{Text=relatedCount>0?
+         ("One change · "+relatedCount+" linked note(s) will be checked and resolved"):
+         "One change · independent comments remain open",
          Dock=DockStyle.Top,Height=30,Padding=new Padding(22,1,0,0),
          ForeColor=Color.FromArgb(208,224,249),Font=new Font("Segoe UI",9.2f)};
       header.Controls.Add(sub);header.Controls.Add(title);
@@ -79,7 +81,7 @@ namespace RadiologyAgent {
          ScrollBars=RichTextBoxScrollBars.Vertical};
       bool literal=IsLiteralReplacement(proposed);
       suggestion.Text=literal?proposed.Trim():"";
-      state=new Label{Dock=DockStyle.Bottom,Height=29,
+      state=new Label{Dock=DockStyle.Bottom,Height=39,
          ForeColor=Color.FromArgb(104,116,132),Font=new Font("Segoe UI",8.5f),
          Text=literal?"Only the text shown above will be replaced.":
           "No safe literal suggestion. Type the exact replacement to enable Apply."};
