@@ -117,6 +117,15 @@ OFF_TOPIC_EMPLOYMENT = re.compile(
     r"(?:developer|accountant|engineer|teacher|student|employee)\b"
 )
 
+# Narrow repeated-motif detector; not a dictionary and not a medical
+# spellchecker. Clinical abbreviations and unfamiliar real terms must never
+# be silently rewritten. Only transparent physician-verify annotations.
+REPEATED_GIBBERISH = re.compile(r"(?i)^([a-z]{2})\1(?:\1|[a-z])$")
+
+def repeated_gibberish_tokens(line):
+    return [m.group(0) for m in re.finditer(r"\b[A-Za-z]{5,12}\b", line)
+            if REPEATED_GIBBERISH.fullmatch(m.group(0))]
+
 def obvious_nonmedical_conclusion_issues(report):
     section = conclusion_section(report)
     if not section:
@@ -127,18 +136,23 @@ def obvious_nonmedical_conclusion_issues(report):
         line = raw.strip().lstrip("o•◦- \t").strip()
         if not line or len(line) > 300:
             continue
-        if not OFF_TOPIC_EMPLOYMENT.search(line):
-            continue
-        # Only flag a clearly off-topic statement. Do not flag clinical notes
-        # like occupational exposure / employment history from Findings.
-        issues.append({
-            "quote": line,
-            "category": "unrelated",
-            "explanation": ("Non-medical employment or personal statement "
-                            "appears in the clinical conclusion."),
-            "suggestion": "Ask the reporting radiologist to verify and remove if unintended.",
-            "section": "conclusion",
-        })
+        if OFF_TOPIC_EMPLOYMENT.search(line):
+            issues.append({
+                "quote": line,
+                "category": "unrelated",
+                "explanation": ("Non-medical employment or personal statement "
+                                "appears in the clinical conclusion."),
+                "suggestion": "Ask the reporting radiologist to verify and remove if unintended.",
+                "section": "conclusion",
+            })
+        for token in repeated_gibberish_tokens(line):
+            issues.append({
+                "quote": token,
+                "category": "unrelated",
+                "explanation": "Unintelligible repeated-letter token in the clinical conclusion.",
+                "suggestion": "Confirm the intended text with the reporting radiologist.",
+                "section": "conclusion",
+            })
     return issues
 
 def distribute_conclusion_issues(chunks, issues):
@@ -372,7 +386,7 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep,
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/json",
                  "Accept": "application/json",
-                 "User-Agent": "Haronex-Radiology-Agent/10.18"})
+                 "User-Agent": "Haronex-Radiology-Agent/10.19"})
     # Semantic format errors get only one additional fresh response.
     # HTTP 400/auth/content filtering or clinical safety failures are never retried.
     recoverable_formats = {
@@ -450,7 +464,7 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v10-18":
+        if version != "haronex-groq-qwen38-v10-19":
             raise ValueError("Unsupported review version")
         # Two independent reviews run concurrently rather than sequentially.
         # Both are still mandatory, and their results are combined only after
@@ -542,12 +556,19 @@ def self_test():
         a = pool.submit(simulated, "general")
         b = pool.submit(simulated, "conclusion")
         assert a.result() == "general" and b.result() == "conclusion"
+    nonsense = ("Findings: Bilateral cysts.\rConclusion:\r"
+                "Element of dsdsd urinary cystitis.\rThanks;")
+    nonsense_issues = obvious_nonmedical_conclusion_issues(nonsense)
+    assert len(nonsense_issues) == 1
+    assert nonsense_issues[0]["quote"] == "dsdsd"
+    assert nonsense_issues[0]["category"] == "unrelated"
+    assert repeated_gibberish_tokens("Bilateral renal cortical cysts.") == []
     assert MODEL == "qwen/qwen3.8-27b"
     class FakeError:
         def read(self, limit):
             return b'{"error":{"message":"unsupported reasoning effort"}}'
     assert classify_http_400(FakeError()) == "GROQ_REQUEST_400_REASONING"
-    assert "Haronex-Radiology-Agent/10.18" in str(api_review.__code__.co_consts)
+    assert "Haronex-Radiology-Agent/10.19" in str(api_review.__code__.co_consts)
     assert MAX_COMPLETION_TOKENS == 8192
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
