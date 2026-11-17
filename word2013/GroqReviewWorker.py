@@ -126,7 +126,7 @@ OFF_TOPIC_EMPLOYMENT = re.compile(
 # Narrow repeated-motif detector; not a dictionary and not a medical
 # spellchecker. Clinical abbreviations and unfamiliar real terms must never
 # be silently rewritten. Only transparent physician-verify annotations.
-REPEATED_GIBBERISH = re.compile(r"^([a-z]{2})\1(?:\1|[a-z])$")
+REPEATED_GIBBERISH = re.compile(r"^([a-z]{2})\1+[a-z]?$")
 
 def repeated_gibberish_tokens(line):
     return [m.group(0) for m in re.finditer(r"\b[A-Za-z]{5,12}\b", line)
@@ -596,6 +596,13 @@ def self_test():
     assert repeated_gibberish_tokens("Bilateral renal cortical cysts.") == []
     assert repeated_gibberish_tokens("MRI MRCP IHBR PETCT BMD 2026/2027") == []
     assert repeated_gibberish_tokens("dsdsd") == ["dsdsd"]
+    assert repeated_gibberish_tokens("***sasasasas ***") == ["sasasasas"]
+    assert whole_report_gibberish_groups(["Findings: sasasasas"]) == [[{
+        "quote": "sasasasas", "category": "unrelated",
+        "explanation": "Unintelligible repeated-letter token in radiology report.",
+        "suggestion": "Verify intended wording with reporting radiologist.",
+        "section": "body",
+    }]]
     assert [i["quote"] for i in whole_report_gibberish_groups(
         ["Findings: ***dsdsd ***", "Conclusion:\\rElement of dsdsd urinary cystitis."])[0]] == ["dsdsd"]
     assert whole_report_gibberish_groups(["CT, MRCP, IHBR, MRI, 2026/2027."]) == [[]]
