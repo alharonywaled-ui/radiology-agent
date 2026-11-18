@@ -56,6 +56,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Browser worker packaging failed' }
           $test=& word2013/bin/HaronexGroqWorker/HaronexGroqWorker.exe --self-test
           if ($LASTEXITCODE -ne 0 -or $test -notmatch '"ok": true') { throw "Groq review parser smoke test failed: $test" }
+          python word2013/PerformanceQualityRegression.py word2013/bin/HaronexGroqWorker/HaronexGroqWorker.exe
+          if ($LASTEXITCODE -ne 0) { throw "Packaged resident-worker protocol regression failed" }
       - name: Compile native 32-bit COM Ribbon add-in and smoke-test binary
         shell: pwsh
         run: |
@@ -126,6 +128,8 @@ jobs:
             throw "Installed optimized Groq worker self-test failed"
           }
           Write-Host "INSTALLED_OPTIMIZED_GROQ_WORKER_SELF_TEST_OK startup_ms=$($start.ElapsedMilliseconds)"
+          python word2013/PerformanceQualityRegression.py $worker
+          if ($LASTEXITCODE -ne 0) { throw "Installed persistent worker protocol failed" }
           $enabled=Get-ItemProperty -Path 'HKCU:\Software\Haronex' -ErrorAction SilentlyContinue
           if ($enabled -and $enabled.WebTransferAllowed -eq 1) { throw 'Silent installer must not grant consent automatically' }
           & word2013/bin/NativeSmoke.exe
