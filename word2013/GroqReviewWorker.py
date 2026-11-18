@@ -471,7 +471,7 @@ def conclusion_issue_groups(key, chunks, reviewer=None):
             key, content, system_prompt=CONCLUSION_SYSTEM,
             user_prefix="Audit every assertion in the Conclusion against the Findings:\n\n")
     issues = []
-    is_partial = len(contexts) > 1
+    is_partial = len(full_report) > 5900
     for context in contexts:
         candidate = reviewer(context)
         # The same Conclusion is included with multiple *partial* excerpts.
@@ -897,6 +897,18 @@ def main(raw_request=None):
             existing = {(x["quote"], x["category"]) for x in groups[i]}
             groups[i].extend(x for x in added
                              if (x["quote"], x["category"]) not in existing)
+        # General chunk-level audits cannot establish that a clinical fact is
+        # absent from the full Findings when the report was split. Screen their
+        # unsupported-absence logic too, not only the Conclusion specialist.
+        if len("".join(texts)) > 5900:
+            for i, group in enumerate(groups):
+                safe_group = []
+                for item in group:
+                    if is_unverifiable_partial_logic(item):
+                        metric("suppressed_partial_logic")
+                    else:
+                        safe_group.append(item)
+                groups[i] = safe_group
         print(json.dumps({"ok": True, "mode": "groq", "passes": 2,
                           "review_version": version, "groups": groups,
                           "discarded_issues": DISCARDED_ISSUES["count"],
