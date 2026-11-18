@@ -739,6 +739,7 @@ def full_review_concurrently(key, texts, general_review=None,
 def main(raw_request=None):
     started=time.monotonic()
     reset_metrics()
+    DISCARDED_ISSUES["count"] = 0
     try:
         incoming = json.loads(raw_request if raw_request is not None else sys.stdin.read())
         key = incoming.get("api_key")
