@@ -323,6 +323,7 @@ namespace RadiologyAgent {
           "suppressed_partial_logic","supported_conclusion_claims",
           "unsupported_conclusion_candidates","direct_conflicts",
           "logic_proposed","logic_returned","clinical_audit_completed",
+          "clinical_coverage_flags",
           "concurrency"};
         var safe=new StringBuilder(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
         safe.Append(" host_ms=").Append(Math.Max(0,hostElapsedMs));
