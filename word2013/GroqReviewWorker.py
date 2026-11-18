@@ -864,7 +864,7 @@ def self_test():
     except ReviewFailure as exc:
         assert exc.code == "GROQ_CLINICAL_CONCLUSION_NOT_FOUND"
     # Logic anchored to Findings MUST survive the dedicated audit.
-    findings_quote = {"quote": "Bilateral renal cortical cysts",
+    findings_quote = {"quote": "bilateral renal cortical cysts",
                       "category": "logic",
                       "explanation": "Contradicts normal kidney Conclusion",
                       "suggestion": "Verify conflicting kidney status"}
