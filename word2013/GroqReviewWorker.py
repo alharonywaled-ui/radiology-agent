@@ -33,7 +33,8 @@ def reset_metrics():
     with _METRICS_LOCK:
         _METRICS.clear()
         _METRICS.update(http_requests=0, cache_hits=0, retries=0,
-                        rate_limits=0, backoff_ms=0, json_generation_retries=0)
+                        rate_limits=0, backoff_ms=0, json_generation_retries=0,
+                        suppressed_partial_logic=0)
 def metric(name, increment=1):
     with _METRICS_LOCK:
         _METRICS[name] = _METRICS.get(name, 0) + increment
@@ -152,6 +153,14 @@ SYSTEM = (
 CONCLUSION_SYSTEM = (
     "You are a careful radiology Conclusion-versus-Findings consistency auditor. "
     "Read every assertion of the Conclusion/Impression and cross-check with Findings. "
+    "If the supplied Findings is marked INCOMPLETE, it is only an EXCERPT. "
+    "NEVER infer that a Conclusion claim is absent from the COMPLETE Findings "
+    "because it is not mentioned in the currently supplied excerpt. "
+    "For incomplete excerpts, flag only positive contradictions where the "
+    "visible excerpt explicitly and directly disagrees with a Conclusion. "
+    "Do not conflate inflammatory FDG activity with neoplastic FDG activity. "
+    "Interpret 'any other' as excluding abnormalities already described. "
+    "Ambiguous scope or wording is not an established internal contradiction. "
     "Flag clinically meaningful contradictions, unrelated or nonsensical claims, "
     "wrong laterality, negation, organ, size, severity, disease, and any diagnosis "
     "or conclusion assertion not supported by the supplied Findings. "
@@ -407,11 +416,52 @@ def clinical_context_windows(full_report, max_chars=5900):
     windows = []
     for pos in range(0, len(source), available):
         piece = source[pos:pos+available]
-        windows.append("Findings/context portion:\n" + piece +
-                       "\nConclusion (verify against this portion):\n" + conclusion)
+        windows.append(
+            "[INCOMPLETE FINDINGS EXCERPT — NOT THE FULL FINDINGS]\n"
+            "The following excerpt is only one of several disjoint parts "
+            "of the Findings. Missing detail in this excerpt is NOT proof "
+            "that it is absent from the complete report. Never label an "
+            "assertion unsupported solely because you cannot see its source "
+            "here. Report only DIRECT, POSITIVE contradictions visible in "
+            "this excerpt; ignore omissions and unresolved absence claims.\n"
+            "Partial Findings/context excerpt:\n" + piece +
+            "\nComplete Conclusion (compare against this excerpt only):\n" +
+            conclusion)
     if not windows:
         raise ReviewFailure("GROQ_CLINICAL_CONTEXT_UNAVAILABLE")
     return windows
+
+# Absence of evidence in ONE Findings window is not evidence of absence in
+# the entire radiology report. Never represent it as a clinical contradiction.
+_ABSENCE_INFERENCE = re.compile(
+    r"(?i)(?:"
+    r"(?:do(?:es)?\s+not|doesn['’]t|did\s+not|not)\s+"
+    r"(?:contain|mention|describe|document|include|note|show|state|provide)"
+    r"|(?:no|without)\s+(?:description|mention|documentation|evidence)\s+of"
+    r"|(?:not|isn['’]t)\s+(?:described|documented|mentioned|included|provided)"
+    r"|(?:unsupported|not\s+supported)\s+by\s+(?:the\s+)?"
+    r"(?:available|provided|supplied|shown|partial)?\s*findings"
+    r"|(?:absent|missing)\s+from\s+(?:the\s+)?"
+    r"(?:provided|available|supplied|shown|partial)?\s*findings"
+    r")"
+)
+def is_unverifiable_partial_logic(issue):
+    if issue.get("category") != "logic":
+        return False
+    explanation = str(issue.get("explanation", ""))
+    suggestion = str(issue.get("suggestion", ""))
+    if _ABSENCE_INFERENCE.search(explanation) or _ABSENCE_INFERENCE.search(suggestion):
+        return True
+    # "Other" can refer to additional lesions, excluding ones already listed.
+    # Positive inflammatory uptake in earlier Findings is not automatically
+    # contradictory to "no OTHER active lesions". Require full context.
+    quote = str(issue.get("quote", "")).lower()
+    if ("rest of the body" in quote and "other" in quote and
+        any(x in explanation.lower() for x in
+            ("inflammat", "ground glass", "other", "neoplastic"))):
+        return True
+    return False
+
 
 def conclusion_issue_groups(key, chunks, reviewer=None):
     full_report = "".join(chunks)
@@ -421,8 +471,21 @@ def conclusion_issue_groups(key, chunks, reviewer=None):
             key, content, system_prompt=CONCLUSION_SYSTEM,
             user_prefix="Audit every assertion in the Conclusion against the Findings:\n\n")
     issues = []
+    is_partial = len(contexts) > 1
     for context in contexts:
-        issues.extend(reviewer(context))
+        candidate = reviewer(context)
+        # The same Conclusion is included with multiple *partial* excerpts.
+        # Treat every claim of "not in Findings" as unverified unless the
+        # model has really seen the entire report. This guard cannot add
+        # or invent clinical statements.
+        if is_partial:
+            for item in candidate:
+                if is_unverifiable_partial_logic(item):
+                    metric("suppressed_partial_logic")
+                else:
+                    issues.append(item)
+        else:
+            issues.extend(candidate)
     return distribute_conclusion_issues(chunks, issues)
 
 def normalize(text, issues):
