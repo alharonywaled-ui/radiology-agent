@@ -73,8 +73,10 @@ namespace RadiologyAgent {
       ticker.Tick+=(s,e)=>{
         if(IsDisposed)return;
         spinnerPhase=(spinnerPhase+1)%12;
-        if(!UpdatePlacement()) {Close();return;}
-        Invalidate();
+        if(!UpdatePlacement()) {End();return;}
+        if(Visible)Invalidate(new Rectangle(
+          Math.Max(0,ClientSize.Width/2-198),
+          Math.Max(0,ClientSize.Height/2-148),396,330));
       };
       Shown+=(s,e)=>ticker.Start();
       FormClosed+=(s,e)=>{
@@ -137,15 +139,25 @@ namespace RadiologyAgent {
     private bool UpdatePlacement() {
       if(wordHwnd==IntPtr.Zero||!IsWindow(wordHwnd)||IsIconic(wordHwnd))
         return false;
+      IntPtr active=GetForegroundWindow();
+      uint activePid=0,wordPid=0;
+      if(active!=IntPtr.Zero)GetWindowThreadProcessId(active,out activePid);
+      GetWindowThreadProcessId(wordHwnd,out wordPid);
+      // Don't cover another application when the user Alt-Tabs away from Word.
+      // Reappear as soon as the pinned Word window regains the foreground.
+      if(activePid!=wordPid&&activePid!=(uint)Process.GetCurrentProcess().Id) {
+        if(Visible)Hide();
+        return true;
+      }
       NativeRect r;
       if(!GetWindowRect(wordHwnd,out r))return false;
       Rectangle target=Rectangle.FromLTRB(r.Left,r.Top,r.Right,r.Bottom);
       if(target.Width<200||target.Height<150)return false;
       if(Bounds!=target) {
         Bounds=target;
-        // We cannot re-use the captured bitmap after resize without scaling;
-        // the form stretches it temporarily and remains fully click-blocking.
+        // The captured bitmap stretches on resize. No second screen capture.
       }
+      if(!Visible&&!cancelled)Show();
       return true;
     }
 
