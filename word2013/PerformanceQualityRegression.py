@@ -93,8 +93,12 @@ def run():
 
     # A persistent worker serves TWO separate requests in one process; input
     # invalid on purpose so the smoke never touches network.
-    proc=subprocess.run([sys.executable,MODULE,"--server"],
-        input='{}\n{}\n',text=True,capture_output=True,timeout=20)
+    binary=sys.argv[1] if len(sys.argv)>1 else None
+    command=([binary,"--server"] if binary else
+             [sys.executable,MODULE,"--server"])
+    proc=subprocess.run(command,
+        input='{}\n{}\n',text=True,capture_output=True,timeout=20,
+        encoding="utf-8")
     replies=[json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
     assert proc.returncode==0 and len(replies)==2
     assert all(x.get("ok") is False for x in replies)
