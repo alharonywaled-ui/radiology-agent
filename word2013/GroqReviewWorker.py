@@ -986,6 +986,72 @@ def self_test():
         return []
     combined = conclusion_issue_groups("offline",[long_report],reviewer=audit_window)
     assert len(all_seen)==len(windows) and combined[0][0]["category"]=="logic"
+    # Regression: a complete report contains supporting lung/prostate Findings,
+    # but each isolated context window may omit them. The AI must not convert
+    # missing evidence in an EXCERPT into a false contradiction.
+    false_claims = [
+        ("The provided Findings do not contain any description of the left "
+         "upper lobe mass.", "left upper lobe mass"),
+        ("The available Findings do not mention the right pulmonary nodule.",
+         "right pulmonary nodule"),
+        ("The provided Findings do not describe the prostate size or uptake.",
+         "enlarged prostate"),
+    ]
+    for explanation, _ in false_claims:
+        assert is_unverifiable_partial_logic({
+            "category": "logic", "quote": "Stable lesion",
+            "explanation": explanation, "suggestion": "Verify section was included"})
+    assert is_unverifiable_partial_logic({
+        "category": "logic",
+        "quote": "The rest of the body is free from any other metabolically active lesions.",
+        "explanation": "The inflammatory FDG activity makes this ambiguous.",
+        "suggestion": "Consider neoplastic lesions."})
+    # A direct positive conflict must still be reported.
+    assert not is_unverifiable_partial_logic({
+        "category": "logic", "quote": "Normal kidneys with no cysts.",
+        "explanation": "Findings explicitly describe bilateral renal cortical cysts.",
+        "suggestion": "Verify contradictory statements."})
+    assert not is_unverifiable_partial_logic({
+        "category": "language", "quote": "Average sized",
+        "explanation": "Consider hyphenation.", "suggestion": "Average-sized"})
+    source_findings = (
+        "Findings:\r"
+        "Left upper lobe mass 2.3 x 2.9 cm, mildly FDG avid.\r" +
+        "Other unrelated findings.\r" * 400 +
+        "Right lower lobe nodule without FDG uptake.\r"
+        "Markedly enlarged heterogeneous prostate with nodules.\r"
+    )
+    source_conclusion = (
+        "Conclusion:\r"
+        "Mild regression of left upper lobe mass.\r"
+        "Sustained remission of right pulmonary nodule.\r"
+        "Enlarged prostate with metabolically active nodules.\r"
+        "The rest of the body is free from any other metabolically active lesions.\r"
+    )
+    full_source = source_findings + source_conclusion
+    assert len(full_source) > 5900
+    def false_window_audit(window):
+        assert "[INCOMPLETE FINDINGS EXCERPT" in window
+        return [
+            {"quote": "Mild regression of left upper lobe mass.",
+             "category": "logic", "explanation": false_claims[0][0],
+             "suggestion": "Confirm full Findings included."},
+            {"quote": "Sustained remission of right pulmonary nodule.",
+             "category": "logic", "explanation": false_claims[1][0],
+             "suggestion": "Confirm full Findings included."},
+            {"quote": "Enlarged prostate with metabolically active nodules.",
+             "category": "logic", "explanation": false_claims[2][0],
+             "suggestion": "Confirm full Findings included."},
+            {"quote": "The rest of the body is free from any other metabolically active lesions.",
+             "category": "logic",
+             "explanation": "Inflammatory ground glass uptake is described.",
+             "suggestion": "Consider any other neoplastic lesions."},
+        ]
+    reset_metrics()
+    protected = conclusion_issue_groups(
+        "offline", [full_source], reviewer=false_window_audit)
+    assert protected == [[]]
+    assert snapshot_metrics()["suppressed_partial_logic"] >= 4
     off_topic = clinical.replace("Normal kidneys with no cysts.", "Haron work at dokki scan")
     outside = {"quote": "Haron work at dokki scan", "category": "unrelated",
                "explanation": "Statement is not a radiology finding",
