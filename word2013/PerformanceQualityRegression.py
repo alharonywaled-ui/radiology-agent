@@ -108,10 +108,10 @@ def run():
         "Patient: Alex\rFindings:\rUterine mass.\rConclusion:\rMass.\r"])[0]
     # Clinical omissions and certainty mismatch must produce real Logic
     # cards, each tied to an exact quote, even with AI disabled.
-    pet = ("Patient data: Male patient 78 years old.\\r"
-           "Clinical background: History of ? prostatic cancer.\\r"
-           "Findings:\\rProgression of the mild pericardial effusion.\\r"
-           "Conclusion:\\rHistory of prostatic malignancy on hormonal therapy.\\r")
+    pet = ("Patient data: Male patient 78 years old.\r"
+           "Clinical background: History of ? prostatic cancer.\r"
+           "Findings:\rProgression of the mild pericardial effusion.\r"
+           "Conclusion:\rHistory of prostatic malignancy on hormonal therapy.\r")
     coverage = w.independent_clinical_coverage_groups([pet])[0]
     assert len(coverage) == 2, coverage
     assert all(row["category"] == "logic" and row["quote"] in pet
