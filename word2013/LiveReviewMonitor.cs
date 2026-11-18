@@ -72,9 +72,9 @@ namespace RadiologyAgent {
   // Gemini browser work uses its own subprocess and is never allowed to modify Word.
   internal sealed class LiveReviewMonitor : Form {
     // Adaptive polling avoids 2.5 full-document COM reads per second while idle.
-    private const int PollMilliseconds=1300;
+    private const int PollMilliseconds=2000;
     private const int ActivePollMilliseconds=300;
-    private const int SidebarPollMilliseconds=1050;
+    private const int SidebarPollMilliseconds=1500;
     private const int DebounceMilliseconds=1200;
     private readonly System.Windows.Forms.Timer timer;
     private object word;
@@ -1208,7 +1208,7 @@ namespace RadiologyAgent {
           && SuggestionReplacementPlan.SelfTest()
           && MandatoryApproval.SelfTest()
           && DebounceMilliseconds==1200
-          && PollMilliseconds==400
+          && PollMilliseconds==2000
           && ValidateResponse(json,report)!=null
           && ValidateResponse(json,report.Replace("Left kidney","Spleen"))==null
           && ValidateResponse(json.Replace("\"groq\"","\"account\""),report)==null;

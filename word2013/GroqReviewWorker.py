@@ -9,6 +9,12 @@ import email.utils
 import datetime
 import re
 from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
+from threading import Condition, RLock
+import hashlib
+import io
+import os
+import urllib3
 
 MODEL = "qwen/qwen3.8-27b"
 RETRY_DELAYS = (2, 6, 15)  # Bounded exponential backoff, four total HTTP attempts.
@@ -19,6 +25,87 @@ FORMAT_RETRIES = 1
 DISCARDED_ISSUES = {"count": 0}
 
 ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+
+# Only performance counters are reported; never include PHI, prompt or key.
+_METRICS_LOCK = RLock()
+_METRICS = {}
+def reset_metrics():
+    with _METRICS_LOCK:
+        _METRICS.clear()
+        _METRICS.update(http_requests=0, cache_hits=0, retries=0,
+                        rate_limits=0, backoff_ms=0)
+def metric(name, increment=1):
+    with _METRICS_LOCK:
+        _METRICS[name] = _METRICS.get(name, 0) + increment
+def snapshot_metrics():
+    with _METRICS_LOCK:
+        return dict(_METRICS)
+
+class AdaptiveLimiter:
+    """Bounded live concurrency, with additive increase / multiplicative decrease.
+    No extra/reduced review passes and no unbounded request creation.
+    """
+    def __init__(self):
+        self.condition = Condition()
+        self.limit = 4
+        self.active = 0
+        self.successes = 0
+    def acquire(self):
+        with self.condition:
+            while self.active >= self.limit:
+                self.condition.wait()
+            self.active += 1
+    def release(self, rate_limited=False, success=False):
+        with self.condition:
+            self.active = max(0, self.active - 1)
+            if rate_limited:
+                self.limit = max(1, self.limit // 2)
+                self.successes = 0
+            elif success:
+                self.successes += 1
+                if self.successes >= 10 and self.limit < 6:
+                    self.limit += 1
+                    self.successes = 0
+            self.condition.notify_all()
+
+LIMITER = AdaptiveLimiter()
+# Thread-safe HTTP(S) keep-alive and connection pool. Never cache the API key.
+HTTP_POOL = urllib3.PoolManager(num_pools=2, maxsize=6, block=True,
+    retries=False, timeout=urllib3.Timeout(connect=12, read=70))
+
+class ShortLivedSectionCache:
+    """Only independent exact-text passes. Conclusion context ALWAYS re-runs.
+    RAM-only, bounded to 96 items / 10min, hash-only keys, no disk artifacts.
+    """
+    def __init__(self):
+        self.data = OrderedDict()
+        self.lock = RLock()
+        self.ttl = 600
+        self.maximum = 96
+    def get_or_run(self, pass_name, key, text, fn):
+        identity = hashlib.sha256((
+            "v11.14|" + MODEL + "|" + pass_name + "|" +
+            hashlib.sha256(key.encode("utf-8")).hexdigest() + "|" +
+            text).encode("utf-8")).digest()
+        now = time.monotonic()
+        with self.lock:
+            for old_id, (expiry, _) in list(self.data.items()):
+                if expiry <= now: self.data.pop(old_id, None)
+            if identity in self.data:
+                expiry, value = self.data.pop(identity)
+                self.data[identity] = (expiry, value)
+                metric("cache_hits")
+                return [dict(x) for x in value]
+        result = fn(text)
+        with self.lock:
+            self.data[identity] = (time.monotonic() + self.ttl,
+                                   [dict(x) for x in result])
+            while len(self.data) > self.maximum:
+                self.data.popitem(last=False)
+        return result
+SECTION_CACHE = ShortLivedSectionCache()
+
+
 SYSTEM = (
     "You are Haronex, a careful English radiology report proofreader. "
     "Prioritize clinically meaningful INTERNAL contradictions before language errors. "
@@ -462,30 +549,65 @@ def retry_after_seconds(headers):
 
 
 def transport_request(req, open_url=urllib.request.urlopen):
+    """Persistent HTTPS pool for production, injectable urllib path for tests."""
+    LIMITER.acquire()
+    successful = False
+    limited = False
     try:
-        with open_url(req, timeout=70) as response:
-            return response.read(3 * 1024 * 1024)
-    except urllib.error.HTTPError as exc:
-        code = exc.code
-        if code == 400:
-            raise ReviewFailure(classify_http_400(exc))
-        if code == 401:
-            raise ReviewFailure("GROQ_AUTH_401")
-        if code == 403:
-            raise ReviewFailure("GROQ_FORBIDDEN_403")
-        if code == 404:
-            raise ReviewFailure("GROQ_MODEL_404")
-        if code == 499:
-            raise ReviewFailure("GROQ_CLIENT_DISCONNECTED", True)
-        if code == 408 or code == 429:
-            raise ReviewFailure("GROQ_HTTP_" + str(code), True, retry_after_seconds(exc.headers))
-        if code == 503:
-            raise ReviewFailure("GROQ_SERVER_OVER_CAPACITY", True, retry_after_seconds(exc.headers))
-        if code in (500, 502, 504):
-            raise ReviewFailure("GROQ_HTTP_" + str(code), True, retry_after_seconds(exc.headers))
-        raise ReviewFailure("GROQ_HTTP_" + str(code))
-    except (urllib.error.URLError, TimeoutError, ConnectionError):
-        raise ReviewFailure("GROQ_NETWORK", True)
+        metric("http_requests")
+        try:
+            if open_url is urllib.request.urlopen:
+                response = HTTP_POOL.request(
+                    "POST", ENDPOINT, body=req.data,
+                    headers=dict(req.header_items()),
+                    timeout=urllib3.Timeout(connect=12, read=70),
+                    retries=False, preload_content=True)
+                status = response.status
+                raw = response.data
+                headers = response.headers
+                response.release_conn()
+                if status >= 400:
+                    raise urllib.error.HTTPError(
+                        ENDPOINT, status, "Groq request failed",
+                        headers, io.BytesIO(raw))
+            else:
+                with open_url(req, timeout=70) as response:
+                    raw = response.read(3 * 1024 * 1024)
+            if len(raw) > 3 * 1024 * 1024:
+                raise ReviewFailure("GROQ_INVALID_ENVELOPE")
+            successful = True
+            return raw
+        except urllib.error.HTTPError as exc:
+            code = exc.code
+            if code == 400:
+                raise ReviewFailure(classify_http_400(exc))
+            if code == 401:
+                raise ReviewFailure("GROQ_AUTH_401")
+            if code == 403:
+                raise ReviewFailure("GROQ_FORBIDDEN_403")
+            if code == 404:
+                raise ReviewFailure("GROQ_MODEL_404")
+            if code == 499:
+                raise ReviewFailure("GROQ_CLIENT_DISCONNECTED", True)
+            if code == 408 or code == 429:
+                limited = code == 429
+                if limited: metric("rate_limits")
+                raise ReviewFailure("GROQ_HTTP_" + str(code), True,
+                                    retry_after_seconds(exc.headers))
+            if code == 503:
+                limited = True
+                metric("rate_limits")
+                raise ReviewFailure("GROQ_SERVER_OVER_CAPACITY", True,
+                                    retry_after_seconds(exc.headers))
+            if code in (500, 502, 504):
+                raise ReviewFailure("GROQ_HTTP_" + str(code), True,
+                                    retry_after_seconds(exc.headers))
+            raise ReviewFailure("GROQ_HTTP_" + str(code))
+        except (urllib3.exceptions.HTTPError, urllib.error.URLError,
+                TimeoutError, ConnectionError, OSError):
+            raise ReviewFailure("GROQ_NETWORK", True)
+    finally:
+        LIMITER.release(rate_limited=limited, success=successful)
 
 
 def api_review(key, text, requester=transport_request, sleeper=time.sleep,
@@ -527,6 +649,8 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep,
                 delay = RETRY_DELAYS[attempt]
                 if exc.retry_after is not None:
                     delay = max(delay, exc.retry_after)
+                metric("retries")
+                metric("backoff_ms", int(delay * 1000))
                 sleeper(delay)
         try:
             return parse_review_response(raw, text)
@@ -583,13 +707,18 @@ def full_review_concurrently(key, texts, general_review=None,
     if not texts or len(texts) > 40:
         raise ValueError("Invalid report parts")
     if general_review is None:
-        general_review = lambda text: review_with_recovery(key, text)
+        general_review = lambda text: SECTION_CACHE.get_or_run(
+            "general", key, text, lambda part: review_with_recovery(key, part))
     if conclusion_review is None:
         conclusion_review = lambda parts: conclusion_issue_groups(key, parts)
     if unrelated_review is None:
-        unrelated_review = lambda text: contextual_unrelated_groups(key, [text])[0]
+        unrelated_review = lambda text: SECTION_CACHE.get_or_run(
+            "unrelated", key, text,
+            lambda part: contextual_unrelated_groups(key, [part])[0])
     if language_review is None:
-        language_review = lambda text: language_audit_groups(key, [text])[0]
+        language_review = lambda text: SECTION_CACHE.get_or_run(
+            "language", key, text,
+            lambda part: language_audit_groups(key, [part])[0])
     max_workers = min(6, max(4, len(texts) * 2))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         general = [pool.submit(general_review, t) for t in texts]
@@ -607,9 +736,12 @@ def full_review_concurrently(key, texts, general_review=None,
     return general_groups, clinical_groups, unrelated_groups, language_groups
 
 
-def main():
+def main(raw_request=None):
+    started=time.monotonic()
+    reset_metrics()
+    DISCARDED_ISSUES["count"] = 0
     try:
-        incoming = json.loads(sys.stdin.read())
+        incoming = json.loads(raw_request if raw_request is not None else sys.stdin.read())
         key = incoming.get("api_key")
         texts = incoming.get("texts")
         version = incoming.get("review_version")
@@ -619,7 +751,7 @@ def main():
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v11-12":
+        if version != "haronex-groq-qwen38-v11-14":
             raise ValueError("Unsupported review version")
         # Preserve ALL four independent audit passes; parallelize each report
         # chunk inside each pass instead of processing chunks serially. Bounded
@@ -652,7 +784,10 @@ def main():
                              if (x["quote"], x["category"]) not in existing)
         print(json.dumps({"ok": True, "mode": "groq", "passes": 2,
                           "review_version": version, "groups": groups,
-                          "discarded_issues": DISCARDED_ISSUES["count"]},
+                          "discarded_issues": DISCARDED_ISSUES["count"],
+                          "performance": dict(snapshot_metrics(),
+                            elapsed_ms=int((time.monotonic()-started)*1000),
+                            concurrency=LIMITER.limit)},
                          ensure_ascii=False))
     except Exception as exc:
         # No error bodies, secrets or reports in stdout.
@@ -670,7 +805,9 @@ def main():
                       "GROQ_HTTP_502", "GROQ_HTTP_503", "GROQ_HTTP_504",
                       "GROQ_SERVER_OVER_CAPACITY", "GROQ_CLIENT_DISCONNECTED"}
         code = message if (message in safe_codes or message.startswith("GROQ_REQUEST_400_")) else "WORKER_" + type(exc).__name__.upper()
-        print(json.dumps({"ok": False, "error": code}))
+        print(json.dumps({"ok": False, "error": code,
+                          "performance": dict(snapshot_metrics(),
+                            elapsed_ms=int((time.monotonic()-started)*1000))}))
 
 def self_test():
     sample = "Mild fatty hepatomegaly. Small fat containing umbilical hernia."
@@ -932,8 +1069,23 @@ def self_test():
         assert exc.code == "GROQ_INVALID_JSON" and len(calls) == 2
     print(json.dumps({"ok": True, "test": "groq_parser_offline"}))
 
+def serve():
+    # Private stdin/stdout protocol; no listening ports, sockets or HTTP API.
+    # Each request returns exactly one JSON line and flushes immediately.
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        if len(line) > 900000:
+            print(json.dumps({"ok": False, "error": "WORKER_REQUEST_TOO_LARGE"}), flush=True)
+            continue
+        main(line)
+        sys.stdout.flush()
+
+
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         self_test()
+    elif "--server" in sys.argv:
+        serve()
     else:
         main()
