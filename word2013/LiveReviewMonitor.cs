@@ -1394,9 +1394,9 @@ namespace RadiologyAgent {
         }
         var ordered=new List<Tuple<string,string,string,string,string>>(unique.Values);
         int candidateCount=ordered.Count,wordApplied=0,wordFailed=0;
-        int logicCandidates=ordered.Count(x=>x.Item2=="logic");
-        int languageCandidates=ordered.Count(x=>x.Item2=="language");
-        int unrelatedCandidates=ordered.Count(x=>x.Item2=="unrelated");
+        int logicCandidates=ordered.FindAll(x=>x.Item2=="logic").Count;
+        int languageCandidates=ordered.FindAll(x=>x.Item2=="language").Count;
+        int unrelatedCandidates=ordered.FindAll(x=>x.Item2=="unrelated").Count;
         WriteDword("ReviewLogicCandidates",(uint)logicCandidates);
         WriteDword("ReviewLanguageCandidates",(uint)languageCandidates);
         WriteDword("ReviewUnrelatedCandidates",(uint)unrelatedCandidates);
