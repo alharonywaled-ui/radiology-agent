@@ -91,6 +91,21 @@ def run():
         limiter.release(success=True)
     assert limiter.limit==3 and limiter.active==0
 
+    # V12 zero-Logic regression: a deterministic positive-vs-negative
+    # contradiction survives independently of stochastic Qwen outputs.
+    contradictory = ("Findings:\rBilateral renal cortical cysts detected.\r"
+                     "Conclusion:\rNo renal cysts.\r")
+    matched=w.independent_direct_contradiction_groups([contradictory])
+    assert len(matched[0])==1 and matched[0][0]["category"]=="logic"
+    assert not w.independent_direct_contradiction_groups([
+        "Findings:\rNo renal cysts.\rConclusion:\rNo renal cysts.\r"])[0]
+    # Explicit patient metadata warning, no gender guessing from names.
+    sex_mismatch=w.patient_anatomy_consistency_groups([
+        "Sex: Male\rFindings:\rUterine mass is present.\r"
+        "Conclusion:\rUterine mass.\r"])
+    assert len(sex_mismatch[0])==1
+    assert not w.patient_anatomy_consistency_groups([
+        "Patient: Alex\rFindings:\rUterine mass.\rConclusion:\rMass.\r"])[0]
     # A persistent worker serves TWO separate requests in one process; input
     # invalid on purpose so the smoke never touches network.
     binary=sys.argv[1] if len(sys.argv)>1 else None
@@ -103,7 +118,7 @@ def run():
     assert proc.returncode==0 and len(replies)==2
     assert all(x.get("ok") is False for x in replies)
     assert all("texts" not in x and "api_key" not in x for x in replies)
-    print(json.dumps({"ok":True,"test":"v11.14_performance_quality_offline",
+    print(json.dumps({"ok":True,"test":"v12_evidence_first_quality_offline",
                       "four_passes":True,"persistent_protocol":True,
                       "section_cache":True,"clinical_rerun":True,
                       "adaptive_scheduler":True}))
