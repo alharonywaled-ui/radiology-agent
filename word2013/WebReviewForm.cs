@@ -260,43 +260,131 @@ namespace RadiologyAgent {
         }
       } catch { try {process.Kill();} catch {} }
     }
+    // One resident per-user worker reused between reviews. No TCP listener,
+    // no local web server, no password file, no plaintext report logging.
+    private static readonly SemaphoreSlim workerGate=new SemaphoreSlim(1,1);
+    private static Process residentWorker;
+    private static DateTime workerLastUsedUtc=DateTime.MinValue;
+    private static readonly System.Threading.Timer workerIdleTimer;
+    static WebReviewForm() {
+      workerIdleTimer=new System.Threading.Timer(_=> {
+        if(!workerGate.Wait(0))return;
+        try {
+          if(residentWorker!=null&&
+             DateTime.UtcNow-workerLastUsedUtc>TimeSpan.FromMinutes(3))
+            StopResidentWorker();
+        } finally {workerGate.Release();}
+      },null,60000,60000);
+      AppDomain.CurrentDomain.ProcessExit+=(sender,args)=>{
+        // The OS also closes stdin on unexpected parent termination.
+        if(!workerGate.Wait(200))return;
+        try {StopResidentWorker();}finally{workerGate.Release();}
+      };
+    }
+    private static void StopResidentWorker() {
+      var old=residentWorker;residentWorker=null;
+      if(old==null)return;
+      try {if(!old.HasExited)KillWorkerTree(old);}catch{}
+      try {old.Dispose();}catch{}
+    }
+    private static Process EnsureResidentWorker() {
+      try {
+        if(residentWorker!=null&&!residentWorker.HasExited)
+          return residentWorker;
+      } catch {}
+      StopResidentWorker();
+      string executable=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+                                     "HaronexGroqWorker.exe");
+      if(!File.Exists(executable))
+        throw new Exception("Groq worker missing. Reinstall Haronex.");
+      var info=new ProcessStartInfo(executable,"--server"){
+        UseShellExecute=false,CreateNoWindow=true,
+        WindowStyle=ProcessWindowStyle.Hidden,
+        RedirectStandardInput=true,RedirectStandardOutput=true,
+        StandardOutputEncoding=new UTF8Encoding(false),
+        StandardInputEncoding=new UTF8Encoding(false)
+      };
+      residentWorker=Process.Start(info);
+      if(residentWorker==null)throw new Exception("Groq worker failed to start.");
+      return residentWorker;
+    }
+    private static void WritePerformance(string response,long hostElapsedMs,long memoryMb) {
+      try {
+        var parser=new JavaScriptSerializer{MaxJsonLength=2000000};
+        var root=parser.DeserializeObject(response) as Dictionary<string,object>;
+        if(root==null||!root.ContainsKey("performance"))return;
+        var perf=root["performance"] as Dictionary<string,object>;
+        if(perf==null)return;
+        string[] fields={"elapsed_ms","http_requests","cache_hits",
+          "retries","rate_limits","backoff_ms","concurrency"};
+        var safe=new StringBuilder(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+        safe.Append(" host_ms=").Append(Math.Max(0,hostElapsedMs));
+        safe.Append(" worker_mb=").Append(Math.Max(0,memoryMb));
+        foreach(string name in fields) {
+          if(!perf.ContainsKey(name))continue;
+          int value;
+          if(Int32.TryParse(Convert.ToString(perf[name]),out value))
+            safe.Append(" ").Append(name).Append("=")
+              .Append(Math.Max(0,value));
+        }
+        string folder=Path.Combine(
+          Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+          "Haronex");
+        Directory.CreateDirectory(folder);
+        string target=Path.Combine(folder,"performance.log");
+        if(File.Exists(target)&&new FileInfo(target).Length>32000)
+          File.Delete(target);
+        File.AppendAllText(target,safe.ToString()+"\r\n");
+      } catch { /* Performance logging never blocks or exposes PHI. */ }
+    }
     internal static string CallBrowserWorker(string payload,int count) {
       return CallBrowserWorker(payload,count,CancellationToken.None);
     }
-    internal static string CallBrowserWorker(string payload,int count,CancellationToken cancellation) {
-      string executable=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"HaronexGroqWorker.exe");
-      if(!File.Exists(executable))throw new Exception("Web worker missing. Reinstall Haronex.");
-      var info=new ProcessStartInfo(executable){
-        UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,
-        RedirectStandardInput=true,RedirectStandardOutput=true,
-        StandardOutputEncoding=new UTF8Encoding(false)
-      };
-      using(var process=Process.Start(info)) {
-        if(process==null)throw new Exception("Unable to start Haronex browser worker.");
-        var bytes=new UTF8Encoding(false).GetBytes(payload);
-        process.StandardInput.BaseStream.Write(bytes,0,bytes.Length);
-        process.StandardInput.BaseStream.Flush();
-        process.StandardInput.Close();
-        // Read output asynchronously so an unresponsive browser cannot block timeout handling.
-        var outputTask=process.StandardOutput.ReadToEndAsync();
-        var watch=Stopwatch.StartNew();
-        // Four transport attempts (45 seconds each) plus 2/5/10 second backoff.
-        // Longer documents may have multiple chunks. Keep a finite upper bound.
-        int maxMs=(int)Math.Min(2400000L,Math.Max(340000L,(long)count*340000L));
-        while(!process.WaitForExit(250)) {
+    internal static string CallBrowserWorker(string payload,int count,
+                                             CancellationToken cancellation) {
+      workerGate.Wait(cancellation);
+      var watch=Stopwatch.StartNew();
+      try {
+        cancellation.ThrowIfCancellationRequested();
+        Process process=EnsureResidentWorker();
+        // Exactly one JSON line in/out. The subprocess is private to this
+        // user's ReviewHost; concurrent forms serialize on workerGate.
+        if(payload.IndexOf('\r')>=0||payload.IndexOf('\n')>=0)
+          throw new Exception("Invalid worker transport framing.");
+        process.StandardInput.WriteLine(payload);
+        process.StandardInput.Flush();
+        Task<string> output=process.StandardOutput.ReadLineAsync();
+        int maxMs=(int)Math.Min(2400000L,
+                   Math.Max(340000L,(long)count*340000L));
+        while(!output.Wait(150)) {
           if(cancellation.IsCancellationRequested) {
-            KillWorkerTree(process);
-            cancellation.ThrowIfCancellationRequested();
+            StopResidentWorker();cancellation.ThrowIfCancellationRequested();
+          }
+          if(process.HasExited) {
+            StopResidentWorker();
+            throw new Exception("Groq worker unexpectedly exited.");
           }
           if(watch.ElapsedMilliseconds>maxMs) {
-            KillWorkerTree(process);
-            throw new Exception("Browser review timed out.");
+            StopResidentWorker();
+            throw new Exception("Groq review timed out.");
           }
         }
         cancellation.ThrowIfCancellationRequested();
-        string output=outputTask.GetAwaiter().GetResult();
-        if(String.IsNullOrWhiteSpace(output))throw new Exception("Browser worker returned no result.");
-        return output.Trim();
+        string response=output.Result;
+        if(String.IsNullOrWhiteSpace(response)) {
+          StopResidentWorker();
+          throw new Exception("Groq worker sent no response.");
+        }
+        workerLastUsedUtc=DateTime.UtcNow;
+        long memory=0;
+        try {process.Refresh();memory=process.PrivateMemorySize64/(1024*1024);}catch{}
+        WritePerformance(response,watch.ElapsedMilliseconds,memory);
+        return response.Trim();
+      } catch {
+        StopResidentWorker();
+        throw;
+      } finally {
+        workerGate.Release();
       }
     }
   }
