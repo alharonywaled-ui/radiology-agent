@@ -1402,6 +1402,8 @@ namespace RadiologyAgent {
         WriteDword("ReviewUnrelatedCandidates",(uint)unrelatedCandidates);
         WriteDword("ReviewLogicApplied",0);
         WriteDword("ReviewLogicSkipped",0);
+        WriteDword("ReviewDuplicateQuoteSkipped",0);
+        WriteDword("ReviewDuplicateQuoteScoped",0);
         ordered.Sort((a,b)=>{
           int priority=String.CompareOrdinal(a.Item2,b.Item2);
           if(a.Item2=="unrelated"&&b.Item2!="unrelated")return -1;
@@ -1453,6 +1455,15 @@ namespace RadiologyAgent {
               }
               region=doc.Range((int)heading.Start,end);
             }
+            // Do not discard a Conclusion finding merely because the same
+            // quote ALSO appears in Findings. Count matches in the actual
+            // Word section before Find collapses the range to one match.
+            // This is never a guess: scoped match must be EXACT and UNIQUE.
+            string scopedText=Convert.ToString(region.Text);
+            int scopedAt=scopedText.IndexOf(issue.Item1,StringComparison.Ordinal);
+            bool scopedUnique=scopedAt>=0&&
+              scopedText.IndexOf(issue.Item1,scopedAt+issue.Item1.Length,
+                                 StringComparison.Ordinal)<0;
             dynamic find=region.Find;
             find.ClearFormatting();find.Text=issue.Item1;
             find.Forward=true;find.Wrap=0;find.MatchCase=true;find.MatchWildcards=false;
@@ -1463,19 +1474,42 @@ namespace RadiologyAgent {
               currentText.IndexOf(issue.Item1,snapshotAt+issue.Item1.Length,
                                   StringComparison.Ordinal)<0;
             if(!(bool)find.Execute()) {
-              if(!snapshotUnique) {wordFailed++;LogFailure("WORD_FIND_MISSING_AMBIGUOUS");continue;}
+              if(!snapshotUnique) {
+                wordFailed++;
+                WriteDword("ReviewDuplicateQuoteSkipped",
+                  ReadDword("ReviewDuplicateQuoteSkipped")+1);
+                if(issue.Item2=="logic")
+                  WriteDword("ReviewLogicSkipped",
+                    ReadDword("ReviewLogicSkipped")+1);
+                LogFailure("WORD_FIND_MISSING_AMBIGUOUS");continue;
+              }
               region=doc.Range(start+snapshotAt,start+snapshotAt+issue.Item1.Length);
               if(!String.Equals(Convert.ToString(region.Text),issue.Item1,
                                 StringComparison.Ordinal)) {
                 wordFailed++;LogFailure("WORD_FIND_RANGE_MISMATCH");continue;
               }
             } else if(!snapshotUnique) {
-              // If several literal occurrences exist, do not guess which
-              // instance the AI meant without an exact clinical anchor.
-              wordFailed++;
-              if(issue.Item2=="logic")
-                WriteDword("ReviewLogicSkipped",ReadDword("ReviewLogicSkipped")+1);
-              LogFailure("WORD_FIND_DUPLICATE_QUOTE");continue;
+              // A globally repeated quote may be unique inside the explicitly
+              // labeled Conclusion / Impression section. Never use this
+              // exception for generic/body findings.
+              bool uniquelyScoped=
+                String.Equals(issue.Item5,"conclusion",
+                              StringComparison.OrdinalIgnoreCase)&&
+                scopedUnique&&
+                String.Equals(Convert.ToString(region.Text),issue.Item1,
+                              StringComparison.Ordinal);
+              if(uniquelyScoped) {
+                WriteDword("ReviewDuplicateQuoteScoped",
+                  ReadDword("ReviewDuplicateQuoteScoped")+1);
+              } else {
+                wordFailed++;
+                WriteDword("ReviewDuplicateQuoteSkipped",
+                  ReadDword("ReviewDuplicateQuoteSkipped")+1);
+                if(issue.Item2=="logic")
+                  WriteDword("ReviewLogicSkipped",
+                    ReadDword("ReviewLogicSkipped")+1);
+                LogFailure("WORD_FIND_DUPLICATE_QUOTE");continue;
+              }
             }
             string anchorId=((int)region.Start).ToString()+":"+((int)region.End).ToString();
             if(existing.Contains(anchorId)) {
