@@ -98,6 +98,7 @@ namespace RadiologyAgent {
     private string sidebarSignature;
     private int sidebarPollCounter;
     private bool sidebarDismissed;
+    private HaronexReviewLoadingOverlay reviewOverlay;
 
 
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
@@ -116,6 +117,7 @@ namespace RadiologyAgent {
       Shown+=(sender,args)=>timer.Start();
       FormClosing+=(sender,args)=>{
         timer.Stop();
+        CloseReviewOverlay();
         if(runningCancellation!=null)runningCancellation.Cancel();
       };
     }
@@ -305,6 +307,7 @@ namespace RadiologyAgent {
     }
 
     private void ClearDocument() {
+      CloseReviewOverlay();
       if(sidebar!=null&&!sidebar.IsDisposed)sidebar.Hide();
       sidebarSignature=null;sidebarPollCounter=0;sidebarDismissed=false;
       if(suggestionPopup!=null&&!suggestionPopup.IsDisposed)suggestionPopup.Close();
@@ -313,6 +316,34 @@ namespace RadiologyAgent {
       documentId=null;currentText=null;snapshotToken=null;
       readyResponse=null;failed=false;
       WebReviewForm.SetReviewStatus(0);
+    }
+
+    // This visual blocker never suspends Word and never alters the report.
+    private void StartReviewOverlay() {
+      if(reviewOverlay!=null&&!reviewOverlay.IsDisposed)return;
+      uint hwnd=boundWordHwnd!=0?boundWordHwnd:ReadDword("WordWindowHwnd");
+      if(hwnd==0)return;
+      try {
+        if(sidebar!=null&&!sidebar.IsDisposed&&sidebar.Visible)sidebar.Hide();
+        var overlay=new HaronexReviewLoadingOverlay(
+          new IntPtr(unchecked((int)hwnd)),CancelReviewOverlay);
+        if(!overlay.Begin()){overlay.Dispose();return;}
+        reviewOverlay=overlay;
+      } catch(Exception ex) {
+        LogFailure("REVIEW_OVERLAY_START_"+ex.GetType().Name);
+        CloseReviewOverlay();
+      }
+    }
+    private void CloseReviewOverlay() {
+      var overlay=reviewOverlay;reviewOverlay=null;
+      if(overlay==null)return;
+      try {if(!overlay.IsDisposed)overlay.End();}catch{}
+      try {overlay.Dispose();}catch{}
+    }
+    private void CancelReviewOverlay() {
+      pendingClick=false;awaitingDocument=false;failed=false;
+      if(runningCancellation!=null)runningCancellation.Cancel();
+      CloseReviewOverlay();
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -993,8 +1024,10 @@ namespace RadiologyAgent {
         // Word may be starting or its COM document snapshot not yet available.
         awaitingDocument=true;
         documentWaitStarted=DateTime.UtcNow;
+        StartReviewOverlay();
         return;
       }
+      if(working){StartReviewOverlay();return;}
       if(readyResponse!=null){ApplyReady();return;}
       if(failed) {
         // A new click after an exhausted attempt starts a fresh analysis
@@ -1002,12 +1035,14 @@ namespace RadiologyAgent {
         failed=false;
         readyResponse=null;
         pendingClick=true;
+        StartReviewOverlay();
         if(!working)StartAnalysis();
         return;
       }
       // The user clicked before review was ready. Show the final popup after the
       // current version has completed, never falsely apply stale results.
       pendingClick=true;
+      StartReviewOverlay();
       if(!working)StartAnalysis();
     }
 
@@ -1016,12 +1051,13 @@ namespace RadiologyAgent {
       if(currentText!=null) {
         awaitingDocument=false;
         if(readyResponse!=null)ApplyReady();
-        else {pendingClick=true;if(!working)StartAnalysis();}
+        else {pendingClick=true;StartReviewOverlay();if(!working)StartAnalysis();}
         return;
       }
       if((DateTime.UtcNow-documentWaitStarted).TotalSeconds>=12) {
         awaitingDocument=false;
         LogFailure(lastWordProblem);
+        CloseReviewOverlay();
         Notify(false);
       }
     }
@@ -1112,12 +1148,13 @@ namespace RadiologyAgent {
           if(ex.Message!="Invalid review response")LogFailure("HOST_"+ex.GetType().Name);
           failed=true;
           WebReviewForm.SetReviewStatus(2);
-          if(pendingClick){pendingClick=false;Notify(false);}
+          if(pendingClick){pendingClick=false;CloseReviewOverlay();Notify(false);}
         }
       } finally {
         if(ReferenceEquals(runningCancellation,token))runningCancellation=null;
         token.Dispose();
         working=false;
+        CloseReviewOverlay();
       }
     }
 
@@ -1167,6 +1204,7 @@ namespace RadiologyAgent {
         return duplicateCase.Count==1
           && found.Count==1&&found[0]=="Haron work at dokki scan"&&control.Count==0
           && RelatedIssueResolution.SelfTest()
+          && HaronexReviewLoadingOverlay.SelfTest()
           && SuggestionReplacementPlan.SelfTest()
           && MandatoryApproval.SelfTest()
           && DebounceMilliseconds==1200
@@ -1462,21 +1500,23 @@ namespace RadiologyAgent {
         }
         if(wordApplied==0&&purpleApplied==0&&candidateCount>0) {
           LogFailure("ANNOTATIONS_ZERO_WITH_CANDIDATES");
+          CloseReviewOverlay();
           NotifyAnnotationResult(candidateCount,0,wordFailed+(int)purpleSkipped);
           pendingClick=false;return;
         }
         if(!MandatoryApproval.Approve(doc,currentText,unchecked((uint)hwnd))) {
           LogFailure("MANDATORY_APPROVAL_NOT_STORED");
-          pendingClick=false;Notify(false);return;
+          pendingClick=false;CloseReviewOverlay();Notify(false);return;
         }
         pendingClick=false;
+        CloseReviewOverlay();
         ShowSidebar();
         NotifyAnnotationResult(candidateCount,Math.Max(wordApplied,(int)purpleApplied),
                                wordFailed+(int)purpleSkipped);
       } catch(Exception ex) {
         LogFailure("WORD_ANNOTATE_"+ex.GetType().Name);
-        pendingClick=false;Notify(false);
-      }
+        pendingClick=false;CloseReviewOverlay();Notify(false);
+      } finally {CloseReviewOverlay();}
     }
   }
 }
