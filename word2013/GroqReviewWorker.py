@@ -538,10 +538,11 @@ def classify_http_400(exc):
     # A model-side JSON generation failure is not a malformed request.
     # The service may return invalid_request_error as its generic "type";
     # detect the specific generation failure before that catch-all.
-    if any(token in diagnostic for token in (
+    if ("failed_generation" in error or
+        any(token in diagnostic for token in (
         "json_validate_failed", "json validation failed",
         "failed_generation", "failed to generate valid json",
-        "failed to produce valid json", "json_mode_failed")):
+        "failed to produce valid json", "json_mode_failed"))):
         return "GROQ_REQUEST_400_JSON_GENERATION"
     if "response_format" in diagnostic or "json_object" in diagnostic or "json_schema" in diagnostic:
         return "GROQ_REQUEST_400_JSON_FORMAT"
@@ -687,7 +688,7 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep,
                 break
             except ReviewFailure as exc:
                 if exc.code == "GROQ_REQUEST_400_JSON_GENERATION":
-                    if json_generation_retry_used:
+                    if json_generation_retry_used or attempt >= len(RETRY_DELAYS):
                         raise
                     json_generation_retry_used = True
                     metric("retries")
