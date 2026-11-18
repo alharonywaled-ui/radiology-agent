@@ -1046,18 +1046,42 @@ def main(raw_request=None):
             existing = {(x["quote"], x["category"]) for x in groups[i]}
             groups[i].extend(x for x in added
                              if (x["quote"], x["category"]) not in existing)
-        # General chunk-level audits cannot establish that a clinical fact is
-        # absent from the full Findings when the report was split. Screen their
-        # unsupported-absence logic too, not only the Conclusion specialist.
-        if len("".join(texts)) > 5900:
+        # Reconcile ALL chunk-level "not found in Findings" observations
+        # against the FULL report. True unsupported Conclusion assertions stay
+        # visible, but partial-window omissions cannot become false warnings.
+        full_report="".join(texts)
+        if len(full_report)>5900:
+            conclusion=conclusion_section(full_report) or ""
+            verified_absences={}
             for i, group in enumerate(groups):
-                safe_group = []
+                safe_group=[]
                 for item in group:
-                    if is_unverifiable_partial_logic(item):
-                        metric("suppressed_partial_logic")
-                    else:
+                    if not is_unverifiable_partial_logic(item):
                         safe_group.append(item)
-                groups[i] = safe_group
+                        continue
+                    claim=item.get("quote","")
+                    if "rest of the body" in claim.lower() and "other" in claim.lower():
+                        metric("suppressed_partial_logic")
+                        continue
+                    if not claim or claim not in conclusion:
+                        metric("suppressed_partial_logic")
+                        continue
+                    if claim not in verified_absences:
+                        verified_absences[claim]=adjudicate_partial_absence(
+                            key,full_report,claim)
+                    if verified_absences[claim]:
+                        amended=dict(item)
+                        amended["explanation"]=(
+                            "No supporting evidence was identified after "
+                            "checking all Findings excerpts. The reporting "
+                            "radiologist should verify this Conclusion assertion.")
+                        amended["suggestion"]=(
+                            "Confirm the finding, or document supporting "
+                            "Findings before changing the Conclusion.")
+                        safe_group.append(amended)
+                    else:
+                        metric("suppressed_partial_logic")
+                groups[i]=safe_group
         print(json.dumps({"ok": True, "mode": "groq", "passes": 2,
                           "review_version": version, "groups": groups,
                           "discarded_issues": DISCARDED_ISSUES["count"],
@@ -1197,10 +1221,47 @@ def self_test():
              "suggestion": "Consider any other neoplastic lesions."},
         ]
     reset_metrics()
+    evidence_terms={
+        "Mild regression of left upper lobe mass.":"Left upper lobe mass",
+        "Sustained remission of right pulmonary nodule.":"Right lower lobe nodule",
+        "Enlarged prostate with metabolically active nodules.":"enlarged heterogeneous prostate"
+    }
+    checked=[]
+    def located_evidence(claim, excerpt):
+        checked.append((claim,excerpt))
+        term=evidence_terms.get(claim)
+        return bool(term and term.lower() in excerpt.lower())
     protected = conclusion_issue_groups(
-        "offline", [full_source], reviewer=false_window_audit)
+        "offline", [full_source], reviewer=false_window_audit,
+        evidence_reviewer=located_evidence)
     assert protected == [[]]
-    assert snapshot_metrics()["suppressed_partial_logic"] >= 4
+    assert checked and snapshot_metrics()["suppressed_partial_logic"] >= 4
+    # A genuinely absent assertion must remain visible after *all* windows
+    # were checked. Never treat a partial window as the entire Findings.
+    absent_claim="Sustained remission of right pulmonary nodule."
+    absent_report=full_source.replace(
+        "Right lower lobe nodule without FDG uptake.\r","")
+    def one_missing(window):
+        return [{"quote":absent_claim,"category":"logic",
+                 "explanation":"The provided Findings do not mention a "
+                               "right pulmonary nodule.",
+                 "suggestion":"Confirm full Findings were provided."}]
+    actual_missing=conclusion_issue_groups(
+        "offline",[absent_report],reviewer=one_missing,
+        evidence_reviewer=lambda claim, excerpt: False)
+    assert len(actual_missing[0])==1
+    assert "full Findings review" in actual_missing[0][0]["explanation"]
+    # Only *explicit* metadata can trigger possible patient–anatomy mismatch.
+    male_report="Patient Name: Alex Smith\rMale patient 70 years old.\rFindings:\rUterine mass.\rConclusion:\rMass.\r"
+    female_report="Sex: Female\rFindings:\rMarkedly enlarged prostate.\rConclusion:\rNeeds clinical review.\r"
+    assert patient_anatomy_consistency_groups([male_report])[0][0]["category"]=="logic"
+    assert patient_anatomy_consistency_groups([female_report])[0][0]["quote"]=="prostate"
+    assert patient_anatomy_consistency_groups([
+        "Patient Name: Maria\rFindings:\rProstate is enlarged.\rConclusion:\rFollow-up."])==[[]]
+    assert patient_anatomy_consistency_groups([
+        "Sex: Male\rFindings:\rNo uterus is identified.\rConclusion:\rNormal."])==[[]]
+    assert patient_anatomy_consistency_groups([
+        "Sex: Female\rFindings:\rProstate cancer in family history.\rConclusion:\rNormal."])==[[]]
     off_topic = clinical.replace("Normal kidneys with no cysts.", "Haron work at dokki scan")
     outside = {"quote": "Haron work at dokki scan", "category": "unrelated",
                "explanation": "Statement is not a radiology finding",
