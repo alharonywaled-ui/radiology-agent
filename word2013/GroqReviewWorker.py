@@ -33,7 +33,10 @@ def reset_metrics():
     with _METRICS_LOCK:
         _METRICS.clear()
         _METRICS.update(http_requests=0, cache_hits=0, retries=0,
-                        rate_limits=0, backoff_ms=0, json_generation_retries=0)
+                        rate_limits=0, backoff_ms=0, json_generation_retries=0,
+                        suppressed_partial_logic=0,
+                        supported_conclusion_claims=0,
+                        unsupported_conclusion_candidates=0)
 def metric(name, increment=1):
     with _METRICS_LOCK:
         _METRICS[name] = _METRICS.get(name, 0) + increment
@@ -84,7 +87,7 @@ class ShortLivedSectionCache:
         self.maximum = 96
     def get_or_run(self, pass_name, key, text, fn):
         identity = hashlib.sha256((
-            "v11.18|" + MODEL + "|" + pass_name + "|" +
+            "v11.19|" + MODEL + "|" + pass_name + "|" +
             hashlib.sha256(key.encode("utf-8")).hexdigest() + "|" +
             text).encode("utf-8")).digest()
         now = time.monotonic()
@@ -152,6 +155,14 @@ SYSTEM = (
 CONCLUSION_SYSTEM = (
     "You are a careful radiology Conclusion-versus-Findings consistency auditor. "
     "Read every assertion of the Conclusion/Impression and cross-check with Findings. "
+    "If the supplied Findings is marked INCOMPLETE, it is only an EXCERPT. "
+    "NEVER infer that a Conclusion claim is absent from the COMPLETE Findings "
+    "because it is not mentioned in the currently supplied excerpt. "
+    "For incomplete excerpts, flag only positive contradictions where the "
+    "visible excerpt explicitly and directly disagrees with a Conclusion. "
+    "Do not conflate inflammatory FDG activity with neoplastic FDG activity. "
+    "Interpret 'any other' as excluding abnormalities already described. "
+    "Ambiguous scope or wording is not an established internal contradiction. "
     "Flag clinically meaningful contradictions, unrelated or nonsensical claims, "
     "wrong laterality, negation, organ, size, severity, disease, and any diagnosis "
     "or conclusion assertion not supported by the supplied Findings. "
@@ -407,23 +418,221 @@ def clinical_context_windows(full_report, max_chars=5900):
     windows = []
     for pos in range(0, len(source), available):
         piece = source[pos:pos+available]
-        windows.append("Findings/context portion:\n" + piece +
-                       "\nConclusion (verify against this portion):\n" + conclusion)
+        windows.append(
+            "[INCOMPLETE FINDINGS EXCERPT — NOT THE FULL FINDINGS]\n"
+            "The following excerpt is only one of several disjoint parts "
+            "of the Findings. Missing detail in this excerpt is NOT proof "
+            "that it is absent from the complete report. Never label an "
+            "assertion unsupported solely because you cannot see its source "
+            "here. Report only DIRECT, POSITIVE contradictions visible in "
+            "this excerpt; ignore omissions and unresolved absence claims.\n"
+            "Partial Findings/context excerpt:\n" + piece +
+            "\nComplete Conclusion (compare against this excerpt only):\n" +
+            conclusion)
     if not windows:
         raise ReviewFailure("GROQ_CLINICAL_CONTEXT_UNAVAILABLE")
     return windows
 
-def conclusion_issue_groups(key, chunks, reviewer=None):
+# Absence of evidence in ONE Findings window is not evidence of absence in
+# the entire radiology report. Never represent it as a clinical contradiction.
+_ABSENCE_INFERENCE = re.compile(
+    r"(?i)(?:"
+    r"(?:do(?:es)?\s+not|doesn['’]t|did\s+not|not)\s+"
+    r"(?:contain|mention|describe|document|include|note|show|state|provide)"
+    r"|(?:no|without)\s+(?:description|mention|documentation|evidence)\s+of"
+    r"|(?:not|isn['’]t)\s+(?:described|documented|mentioned|included|provided)"
+    r"|(?:unsupported|not\s+supported)\s+by\s+(?:the\s+)?"
+    r"(?:available|provided|supplied|shown|partial)?\s*findings"
+    r"|(?:absent|missing)\s+from\s+(?:the\s+)?"
+    r"(?:provided|available|supplied|shown|partial)?\s*findings"
+    r")"
+)
+def is_unverifiable_partial_logic(issue):
+    if issue.get("category") != "logic":
+        return False
+    explanation = str(issue.get("explanation", ""))
+    suggestion = str(issue.get("suggestion", ""))
+    if _ABSENCE_INFERENCE.search(explanation) or _ABSENCE_INFERENCE.search(suggestion):
+        return True
+    # "Other" can refer to additional lesions, excluding ones already listed.
+    # Positive inflammatory uptake in earlier Findings is not automatically
+    # contradictory to "no OTHER active lesions". Require full context.
+    quote = str(issue.get("quote", "")).lower()
+    if ("rest of the body" in quote and "other" in quote and
+        any(x in explanation.lower() for x in
+            ("inflammat", "ground glass", "other", "neoplastic"))):
+        return True
+    return False
+
+
+EVIDENCE_CHECK_SYSTEM = (
+    "You are a radiology evidence locator, NOT a contradiction judge. "
+    "Given a specific Conclusion assertion and ONE PARTIAL Findings excerpt, "
+    "find any positive supporting evidence for that assertion in this excerpt. "
+    "Paraphrases and equivalent clinical descriptions count as support. "
+    "If evidence is present, return JSON {\"issues\":[{\"quote\":\"EXACT "
+    "supporting excerpt from FINDINGS only\",\"category\":\"logic\","
+    "\"explanation\":\"EVIDENCE_PRESENT\",\"suggestion\":\"\"}]}. "
+    "If not present, return {\"issues\":[]}. Never infer absence from the "
+    "excerpt, never invent findings and never copy text from Conclusion as evidence."
+)
+def clinical_evidence_in_window(key, conclusion_claim, findings_excerpt):
+    # Limit input to one Findings window. Require exact source evidence quote.
+    evidence = api_review(
+        key, findings_excerpt,
+        system_prompt=EVIDENCE_CHECK_SYSTEM,
+        user_prefix="Conclusion claim to seek support for (NOT evidence):\n" +
+                    conclusion_claim +
+                    "\nSearch ONLY this Findings excerpt for matching support:\n")
+    return any(row.get("quote","") in findings_excerpt and
+               row.get("quote","").strip() and
+               len(row["quote"]) >= 5 and
+               row.get("explanation") == "EVIDENCE_PRESENT"
+               for row in evidence)
+
+def adjudicate_partial_absence(key, report, conclusion_claim,
+                               evidence_reviewer=None):
+    """Across ALL findings windows, suppress a missing-support claim if ANY
+    piece gives supporting evidence. Lack of evidence in a single window is
+    never enough. Fail closed on API errors, not false clinical success.
+    """
+    complete_conclusion = conclusion_section(report)
+    if not complete_conclusion or conclusion_claim not in complete_conclusion:
+        return False
+    source_start=report.find(complete_conclusion)
+    source=report[:source_start] + report[source_start+len(complete_conclusion):]
+    # Reserve input for separate claim+instructions, split all evidence text.
+    per_window=max(500, min(4000, 5100-len(conclusion_claim)))
+    for pos in range(0,len(source),per_window):
+        excerpt=source[pos:pos+per_window]
+        if evidence_reviewer is None:
+            found=clinical_evidence_in_window(key, conclusion_claim, excerpt)
+        else:
+            found=evidence_reviewer(conclusion_claim, excerpt)
+        if found:
+            metric("supported_conclusion_claims")
+            return False
+    metric("unsupported_conclusion_candidates")
+    return True
+
+def conclusion_issue_groups(key, chunks, reviewer=None, evidence_reviewer=None):
     full_report = "".join(chunks)
     contexts = clinical_context_windows(full_report)
     if reviewer is None:
         reviewer = lambda content: api_review(
             key, content, system_prompt=CONCLUSION_SYSTEM,
             user_prefix="Audit every assertion in the Conclusion against the Findings:\n\n")
-    issues = []
+    issues, possible_absences = [], []
+    is_partial = len(full_report) > 5900
     for context in contexts:
-        issues.extend(reviewer(context))
+        for item in reviewer(context):
+            if is_partial and is_unverifiable_partial_logic(item):
+                quote=item.get("quote","")
+                # Scope-dependent ambiguous "other" phrases are wording
+                # questions, not verified contradictions.
+                if ("rest of the body" in quote.lower() and
+                    "other" in quote.lower()):
+                    metric("suppressed_partial_logic")
+                    continue
+                possible_absences.append(item)
+            else:
+                issues.append(item)
+    # Check EACH questioned Conclusion assertion against every Findings
+    # excerpt, even if a different audit window did not see its evidence.
+    # Never silently discard genuine missing claims from the full report.
+    for item in {row.get("quote",""):row for row in possible_absences
+                 if row.get("quote","")}.values():
+        if adjudicate_partial_absence(key,full_report,item["quote"],
+                                      evidence_reviewer):
+            verified=dict(item)
+            verified["explanation"]=(
+                "No supporting evidence was identified across the full "
+                "Findings review; confirm with the reporting radiologist.")
+            verified["suggestion"]=(
+                "Verify or document supporting Findings for this "
+                "Conclusion assertion.")
+            issues.append(verified)
+        else:
+            metric("suppressed_partial_logic")
     return distribute_conclusion_issues(chunks, issues)
+
+# Patient/organ cross-check uses EXPLICIT recorded sex ONLY. Names, titles
+# and perceived identity are not reliable evidence of anatomical inventory.
+_RECORDED_SEX=re.compile(
+    r"(?i)\b(?:patient\s*(?:sex|gender)|sex|gender)\s*[:=\-]\s*"
+    r"(male|female|m|f)\b|\b(male|female)\s+patient\b"
+)
+_FINDINGS_START=re.compile(r"(?i)\bfindings\s*[:：\-]")
+_MALE_SPECIFIC=re.compile(r"(?i)\b(?:prostate|prostatic|testis|testes|"
+                          r"testicle|testicular|seminal\s+vesicles?)\b")
+_FEMALE_SPECIFIC=re.compile(r"(?i)\b(?:uterus|uterine|ovary|ovaries|"
+                            r"ovarian|endometrium|endometrial|cervix|"
+                            r"pregnancy|pregnant)\b")
+_NEGATED_ANATOMY=re.compile(
+    r"(?i)\b(?:no|absent|without|prior\s+removal\s+of|"
+    r"history\s+of|status\s+post|post[\s-]operative)\b"
+)
+def patient_anatomy_consistency_groups(chunks):
+    """Conservative *verification* flag, never an automatic sex determination.
+    Avoid using names or assuming gender defines anatomy. Scan only Findings,
+    not family history, patient metadata or differential context.
+    """
+    full="".join(chunks)
+    start_match=_FINDINGS_START.search(full)
+    if not start_match:
+        return [[] for _ in chunks]
+    header=full[:start_match.start()][:1600]
+    sexes=set()
+    for m in _RECORDED_SEX.finditer(header):
+        found=(m.group(1) or m.group(2)).lower()
+        sexes.add("male" if found in ("male","m") else "female")
+    if len(sexes)!=1:
+        return [[] for _ in chunks]
+    sex=next(iter(sexes))
+    conclusion=conclusion_section(full)
+    body_end=full.find(conclusion) if conclusion else len(full)
+    findings=full[start_match.end():body_end]
+    matcher=_FEMALE_SPECIFIC if sex=="male" else _MALE_SPECIFIC
+    groups=[[] for _ in chunks]
+    offsets=[]
+    position=0
+    for chunk in chunks:
+        offsets.append((position,position+len(chunk)))
+        position+=len(chunk)
+    used=set()
+    for m in matcher.finditer(findings):
+        before=findings[max(0,m.start()-90):m.start()]
+        # Explicit negation, surgical history or quoted history is not a
+        # current contradiction. Do not over-interpret uncertain anatomy.
+        line=before.split("\r")[-1].split("\n")[-1]
+        after=findings[m.end():m.end()+80]
+        if (_NEGATED_ANATOMY.search(line) or
+            re.search(r"(?i)\b(?:family\s+history|family\s+member|"
+                      r"relative|mother|father|sister|brother)\b",after)):
+            continue
+        term=m.group(0)
+        if term.lower() in used:
+            continue
+        used.add(term.lower())
+        at=start_match.end()+m.start()
+        for i,(left,right) in enumerate(offsets):
+            if left<=at<right and at+len(term)<=right:
+                groups[i].append({
+                  "quote":term,
+                  "category":"logic",
+                  "explanation":(
+                    "The report explicitly records sex as "+sex+
+                    " while Findings describe "+term+
+                    ". This is a possible metadata–anatomy mismatch, "
+                    "not a definitive medical impossibility. Verify "
+                    "recorded sex, anatomy, treatment and surgical history."),
+                  "suggestion":"Verify patient information and anatomy "
+                               "with the reporting clinician; do not "
+                               "automatically alter this report.",
+                  "section":"body"})
+                break
+    return groups
+
 
 def normalize(text, issues):
     output, seen = [], set()
@@ -803,7 +1012,7 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v11-18":
+        if version != "haronex-groq-qwen38-v11-19":
             raise ValueError("Unsupported review version")
         # Preserve ALL four independent audit passes; parallelize each report
         # chunk inside each pass instead of processing chunks serially. Bounded
@@ -834,6 +1043,48 @@ def main(raw_request=None):
             existing = {(x["quote"], x["category"]) for x in groups[i]}
             groups[i].extend(x for x in added
                              if (x["quote"], x["category"]) not in existing)
+        # Patient data vs anatomy: independent deterministic safety check,
+        # only using an explicit recorded sex, never a patient name.
+        for i, added in enumerate(patient_anatomy_consistency_groups(texts)):
+            existing = {(x["quote"], x["category"]) for x in groups[i]}
+            groups[i].extend(x for x in added
+                             if (x["quote"], x["category"]) not in existing)
+        # Reconcile ALL chunk-level "not found in Findings" observations
+        # against the FULL report. True unsupported Conclusion assertions stay
+        # visible, but partial-window omissions cannot become false warnings.
+        full_report="".join(texts)
+        if len(full_report)>5900:
+            conclusion=conclusion_section(full_report) or ""
+            verified_absences={}
+            for i, group in enumerate(groups):
+                safe_group=[]
+                for item in group:
+                    if not is_unverifiable_partial_logic(item):
+                        safe_group.append(item)
+                        continue
+                    claim=item.get("quote","")
+                    if "rest of the body" in claim.lower() and "other" in claim.lower():
+                        metric("suppressed_partial_logic")
+                        continue
+                    if not claim or claim not in conclusion:
+                        metric("suppressed_partial_logic")
+                        continue
+                    if claim not in verified_absences:
+                        verified_absences[claim]=adjudicate_partial_absence(
+                            key,full_report,claim)
+                    if verified_absences[claim]:
+                        amended=dict(item)
+                        amended["explanation"]=(
+                            "No supporting evidence was identified after "
+                            "checking all Findings excerpts. The reporting "
+                            "radiologist should verify this Conclusion assertion.")
+                        amended["suggestion"]=(
+                            "Confirm the finding, or document supporting "
+                            "Findings before changing the Conclusion.")
+                        safe_group.append(amended)
+                    else:
+                        metric("suppressed_partial_logic")
+                groups[i]=safe_group
         print(json.dumps({"ok": True, "mode": "groq", "passes": 2,
                           "review_version": version, "groups": groups,
                           "discarded_issues": DISCARDED_ISSUES["count"],
@@ -911,6 +1162,109 @@ def self_test():
         return []
     combined = conclusion_issue_groups("offline",[long_report],reviewer=audit_window)
     assert len(all_seen)==len(windows) and combined[0][0]["category"]=="logic"
+    # Regression: a complete report contains supporting lung/prostate Findings,
+    # but each isolated context window may omit them. The AI must not convert
+    # missing evidence in an EXCERPT into a false contradiction.
+    false_claims = [
+        ("The provided Findings do not contain any description of the left "
+         "upper lobe mass.", "left upper lobe mass"),
+        ("The available Findings do not mention the right pulmonary nodule.",
+         "right pulmonary nodule"),
+        ("The provided Findings do not describe the prostate size or uptake.",
+         "enlarged prostate"),
+    ]
+    for explanation, _ in false_claims:
+        assert is_unverifiable_partial_logic({
+            "category": "logic", "quote": "Stable lesion",
+            "explanation": explanation, "suggestion": "Verify section was included"})
+    assert is_unverifiable_partial_logic({
+        "category": "logic",
+        "quote": "The rest of the body is free from any other metabolically active lesions.",
+        "explanation": "The inflammatory FDG activity makes this ambiguous.",
+        "suggestion": "Consider neoplastic lesions."})
+    # A direct positive conflict must still be reported.
+    assert not is_unverifiable_partial_logic({
+        "category": "logic", "quote": "Normal kidneys with no cysts.",
+        "explanation": "Findings explicitly describe bilateral renal cortical cysts.",
+        "suggestion": "Verify contradictory statements."})
+    assert not is_unverifiable_partial_logic({
+        "category": "language", "quote": "Average sized",
+        "explanation": "Consider hyphenation.", "suggestion": "Average-sized"})
+    source_findings = (
+        "Findings:\r"
+        "Left upper lobe mass 2.3 x 2.9 cm, mildly FDG avid.\r" +
+        "Other unrelated findings.\r" * 400 +
+        "Right lower lobe nodule without FDG uptake.\r"
+        "Markedly enlarged heterogeneous prostate with nodules.\r"
+    )
+    source_conclusion = (
+        "Conclusion:\r"
+        "Mild regression of left upper lobe mass.\r"
+        "Sustained remission of right pulmonary nodule.\r"
+        "Enlarged prostate with metabolically active nodules.\r"
+        "The rest of the body is free from any other metabolically active lesions.\r"
+    )
+    full_source = source_findings + source_conclusion
+    assert len(full_source) > 5900
+    def false_window_audit(window):
+        assert "[INCOMPLETE FINDINGS EXCERPT" in window
+        return [
+            {"quote": "Mild regression of left upper lobe mass.",
+             "category": "logic", "explanation": false_claims[0][0],
+             "suggestion": "Confirm full Findings included."},
+            {"quote": "Sustained remission of right pulmonary nodule.",
+             "category": "logic", "explanation": false_claims[1][0],
+             "suggestion": "Confirm full Findings included."},
+            {"quote": "Enlarged prostate with metabolically active nodules.",
+             "category": "logic", "explanation": false_claims[2][0],
+             "suggestion": "Confirm full Findings included."},
+            {"quote": "The rest of the body is free from any other metabolically active lesions.",
+             "category": "logic",
+             "explanation": "Inflammatory ground glass uptake is described.",
+             "suggestion": "Consider any other neoplastic lesions."},
+        ]
+    reset_metrics()
+    evidence_terms={
+        "Mild regression of left upper lobe mass.":"Left upper lobe mass",
+        "Sustained remission of right pulmonary nodule.":"Right lower lobe nodule",
+        "Enlarged prostate with metabolically active nodules.":"enlarged heterogeneous prostate"
+    }
+    checked=[]
+    def located_evidence(claim, excerpt):
+        checked.append((claim,excerpt))
+        term=evidence_terms.get(claim)
+        return bool(term and term.lower() in excerpt.lower())
+    protected = conclusion_issue_groups(
+        "offline", [full_source], reviewer=false_window_audit,
+        evidence_reviewer=located_evidence)
+    assert protected == [[]]
+    assert checked and snapshot_metrics()["suppressed_partial_logic"] >= 4
+    # A genuinely absent assertion must remain visible after *all* windows
+    # were checked. Never treat a partial window as the entire Findings.
+    absent_claim="Sustained remission of right pulmonary nodule."
+    absent_report=full_source.replace(
+        "Right lower lobe nodule without FDG uptake.\r","")
+    def one_missing(window):
+        return [{"quote":absent_claim,"category":"logic",
+                 "explanation":"The provided Findings do not mention a "
+                               "right pulmonary nodule.",
+                 "suggestion":"Confirm full Findings were provided."}]
+    actual_missing=conclusion_issue_groups(
+        "offline",[absent_report],reviewer=one_missing,
+        evidence_reviewer=lambda claim, excerpt: False)
+    assert len(actual_missing[0])==1
+    assert "full Findings review" in actual_missing[0][0]["explanation"]
+    # Only *explicit* metadata can trigger possible patient–anatomy mismatch.
+    male_report="Patient Name: Alex Smith\rMale patient 70 years old.\rFindings:\rUterine mass.\rConclusion:\rMass.\r"
+    female_report="Sex: Female\rFindings:\rMarkedly enlarged prostate.\rConclusion:\rNeeds clinical review.\r"
+    assert patient_anatomy_consistency_groups([male_report])[0][0]["category"]=="logic"
+    assert patient_anatomy_consistency_groups([female_report])[0][0]["quote"]=="prostate"
+    assert patient_anatomy_consistency_groups([
+        "Patient Name: Maria\rFindings:\rProstate is enlarged.\rConclusion:\rFollow-up."])==[[]]
+    assert patient_anatomy_consistency_groups([
+        "Sex: Male\rFindings:\rNo uterus is identified.\rConclusion:\rNormal."])==[[]]
+    assert patient_anatomy_consistency_groups([
+        "Sex: Female\rFindings:\rProstate cancer in family history.\rConclusion:\rNormal."])==[[]]
     off_topic = clinical.replace("Normal kidneys with no cysts.", "Haron work at dokki scan")
     outside = {"quote": "Haron work at dokki scan", "category": "unrelated",
                "explanation": "Statement is not a radiology finding",
