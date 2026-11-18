@@ -319,7 +319,8 @@ namespace RadiologyAgent {
         var perf=root["performance"] as Dictionary<string,object>;
         if(perf==null)return;
         string[] fields={"elapsed_ms","http_requests","cache_hits",
-          "retries","rate_limits","backoff_ms","json_generation_retries","concurrency"};
+          "retries","rate_limits","backoff_ms","json_generation_retries",
+          "suppressed_partial_logic","concurrency"};
         var safe=new StringBuilder(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
         safe.Append(" host_ms=").Append(Math.Max(0,hostElapsedMs));
         safe.Append(" worker_mb=").Append(Math.Max(0,memoryMb));
