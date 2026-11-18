@@ -46,10 +46,12 @@ jobs:
       - name: Build direct Groq API worker
         shell: pwsh
         run: |
-          python -m pip install --disable-pip-version-check pyinstaller
+          python -m pip install --disable-pip-version-check pyinstaller 'urllib3>=2.2,<3'
           if ($LASTEXITCODE -ne 0) { throw 'PyInstaller dependencies failed' }
           python word2013/GroqReviewWorker.py --self-test
           if ($LASTEXITCODE -ne 0) { throw 'Offline retry/backoff regression tests failed' }
+          python word2013/PerformanceQualityRegression.py
+          if ($LASTEXITCODE -ne 0) { throw 'V11.14 performance and four-pass quality contract failed' }
           python -m PyInstaller --noconfirm --onedir --console --contents-directory _HaronexRuntime --name HaronexGroqWorker --distpath word2013/bin --workpath word2013/pybuild/work --specpath word2013/pybuild word2013/GroqReviewWorker.py
           if ($LASTEXITCODE -ne 0) { throw 'Browser worker packaging failed' }
           $test=& word2013/bin/HaronexGroqWorker/HaronexGroqWorker.exe --self-test
