@@ -362,39 +362,68 @@ def obvious_nonmedical_conclusion_issues(report):
     return issues
 
 def distribute_conclusion_issues(chunks, issues):
+    """Do not throw away findings-side contradictions just because the quote
+    points to Findings rather than Conclusion. Preserve exact Word anchoring.
+    """
     section = conclusion_section("".join(chunks))
     groups = [[] for _ in chunks]
-    if not section:
-        return groups
     seen = set()
     for issue in issues:
         quote = issue.get("quote", "")
-        if not quote or quote not in section or issue.get("category") not in ("logic", "unrelated"):
+        if not quote or issue.get("category") not in ("logic", "unrelated"):
             continue
         candidates = [i for i, chunk in enumerate(chunks) if quote in chunk]
         if not candidates:
             continue
-        index = candidates[-1]
+        in_conclusion = bool(section and quote in section)
+        index = candidates[-1] if in_conclusion else candidates[0]
         ident = (index, quote, issue["category"])
         if ident in seen:
             continue
         seen.add(ident)
         tagged = dict(issue)
-        tagged["section"] = "conclusion"
+        tagged["section"] = "conclusion" if in_conclusion else "body"
         groups[index].append(tagged)
     return groups
 
+def clinical_context_windows(full_report, max_chars=5900):
+    """Lossless Findings coverage across every section of a long report.
+    Re-run the independent clinical audit with the entire Conclusion in each
+    bounded window. Never silently truncate Findings or skip clinical checks.
+    """
+    conclusion = conclusion_section(full_report)
+    if not conclusion:
+        raise ReviewFailure("GROQ_CLINICAL_CONCLUSION_NOT_FOUND")
+    if len(full_report) <= max_chars:
+        return [full_report]
+    available = max_chars - len(conclusion) - 75
+    if available < MIN_SPLIT_CHARS:
+        raise ReviewFailure("GROQ_CLINICAL_CONTEXT_TOO_LONG")
+    start = full_report.find(conclusion)
+    findings = full_report[:start]
+    # Include any clinical text after the Conclusion, before signing.
+    post = full_report[start+len(conclusion):]
+    source = findings + post
+    windows = []
+    for pos in range(0, len(source), available):
+        piece = source[pos:pos+available]
+        windows.append("Findings/context portion:\n" + piece +
+                       "\nConclusion (verify against this portion):\n" + conclusion)
+    if not windows:
+        raise ReviewFailure("GROQ_CLINICAL_CONTEXT_UNAVAILABLE")
+    return windows
+
 def conclusion_issue_groups(key, chunks, reviewer=None):
     full_report = "".join(chunks)
-    context, section = conclusion_audit_context(full_report)
-    groups = [[] for _ in chunks]
-    if not context:
-        return groups
+    contexts = clinical_context_windows(full_report)
     if reviewer is None:
         reviewer = lambda content: api_review(
             key, content, system_prompt=CONCLUSION_SYSTEM,
             user_prefix="Audit every assertion in the Conclusion against the Findings:\n\n")
-    return distribute_conclusion_issues(chunks, reviewer(context))
+    issues = []
+    for context in contexts:
+        issues.extend(reviewer(context))
+    return distribute_conclusion_issues(chunks, issues)
 
 def normalize(text, issues):
     output, seen = [], set()
@@ -803,7 +832,10 @@ def main(raw_request=None):
                       "GROQ_INVALID_WORDING", "GROQ_ALL_ISSUES_INVALID",
                       "GROQ_HTTP_408", "GROQ_HTTP_429", "GROQ_HTTP_500",
                       "GROQ_HTTP_502", "GROQ_HTTP_503", "GROQ_HTTP_504",
-                      "GROQ_SERVER_OVER_CAPACITY", "GROQ_CLIENT_DISCONNECTED"}
+                      "GROQ_SERVER_OVER_CAPACITY", "GROQ_CLIENT_DISCONNECTED",
+                      "GROQ_CLINICAL_CONCLUSION_NOT_FOUND",
+                      "GROQ_CLINICAL_CONTEXT_TOO_LONG",
+                      "GROQ_CLINICAL_CONTEXT_UNAVAILABLE"}
         code = message if (message in safe_codes or message.startswith("GROQ_REQUEST_400_")) else "WORKER_" + type(exc).__name__.upper()
         print(json.dumps({"ok": False, "error": code,
                           "performance": dict(snapshot_metrics(),
@@ -825,8 +857,37 @@ def self_test():
             "suggestion": "Reconcile with Findings after physician verification."}
     assert conclusion_issue_groups("offline", [clinical],
         reviewer=lambda context: [fake]) == [[dict(fake, section="conclusion")]]
-    assert conclusion_issue_groups("offline", ["Normal report."],
-        reviewer=lambda context: [fake]) == [[]]
+    try:
+        conclusion_issue_groups("offline", ["Normal report."],
+                                reviewer=lambda context: [fake])
+        raise AssertionError("Missing Conclusion silently bypassed logic audit")
+    except ReviewFailure as exc:
+        assert exc.code == "GROQ_CLINICAL_CONCLUSION_NOT_FOUND"
+    # Logic anchored to Findings MUST survive the dedicated audit.
+    findings_quote = {"quote": "Bilateral renal cortical cysts",
+                      "category": "logic",
+                      "explanation": "Contradicts normal kidney Conclusion",
+                      "suggestion": "Verify conflicting kidney status"}
+    assert conclusion_issue_groups("offline", [clinical],
+          reviewer=lambda context: [findings_quote])[0][0]["section"] == "body"
+    # Full Findings text must be covered; no first-5900-chars-only shortcut.
+    long_report = ("Findings:\r" + "Normal interim finding.\r" * 400 +
+                   "Unique contradiction near end of findings.\r" +
+                   "Conclusion:\rNo abnormal findings.\r")
+    windows = clinical_context_windows(long_report)
+    assert len(windows)>1
+    assert "Unique contradiction near end" in windows[-1]
+    assert all("No abnormal findings" in w for w in windows)
+    all_seen = []
+    def audit_window(value):
+        all_seen.append(value)
+        if "Unique contradiction near end" in value:
+            return [{"quote": "Unique contradiction near end of findings.",
+                     "category": "logic", "explanation": "Conflicts with Conclusion",
+                     "suggestion": "Verify discrepancy"}]
+        return []
+    combined = conclusion_issue_groups("offline",[long_report],reviewer=audit_window)
+    assert len(all_seen)==len(windows) and combined[0][0]["category"]=="logic"
     off_topic = clinical.replace("Normal kidneys with no cysts.", "Haron work at dokki scan")
     outside = {"quote": "Haron work at dokki scan", "category": "unrelated",
                "explanation": "Statement is not a radiology finding",
