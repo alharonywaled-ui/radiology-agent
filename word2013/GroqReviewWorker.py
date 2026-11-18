@@ -84,7 +84,7 @@ class ShortLivedSectionCache:
         self.maximum = 96
     def get_or_run(self, pass_name, key, text, fn):
         identity = hashlib.sha256((
-            "v11.16|" + MODEL + "|" + pass_name + "|" +
+            "v11.17|" + MODEL + "|" + pass_name + "|" +
             hashlib.sha256(key.encode("utf-8")).hexdigest() + "|" +
             text).encode("utf-8")).digest()
         now = time.monotonic()
@@ -780,7 +780,7 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v11-16":
+        if version != "haronex-groq-qwen38-v11-17":
             raise ValueError("Unsupported review version")
         # Preserve ALL four independent audit passes; parallelize each report
         # chunk inside each pass instead of processing chunks serially. Bounded
