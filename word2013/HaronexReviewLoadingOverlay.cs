@@ -19,6 +19,7 @@ namespace RadiologyAgent {
     [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hwnd,uint flags);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
     [DllImport("user32.dll")] private static extern bool SetWindowPos(
       IntPtr hwnd,IntPtr after,int x,int y,int cx,int cy,uint flags);
@@ -145,7 +146,10 @@ namespace RadiologyAgent {
       GetWindowThreadProcessId(wordHwnd,out wordPid);
       // Don't cover another application when the user Alt-Tabs away from Word.
       // Reappear as soon as the pinned Word window regains the foreground.
-      if(activePid!=wordPid&&activePid!=(uint)Process.GetCurrentProcess().Id) {
+      IntPtr activeRoot=active==IntPtr.Zero?IntPtr.Zero:GetAncestor(active,2);
+      bool otherWordWindow=activePid==wordPid&&activeRoot!=wordHwnd;
+      if(otherWordWindow||
+         (activePid!=wordPid&&activePid!=(uint)Process.GetCurrentProcess().Id)) {
         if(Visible)Hide();
         return true;
       }
