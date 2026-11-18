@@ -1088,11 +1088,16 @@ def unicode_protocol_self_test():
 def serve():
     # Private stdin/stdout protocol; no listening ports, sockets or HTTP API.
     # Each request returns exactly one JSON line and flushes immediately.
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        if len(line) > 900000:
+    for raw_line in sys.stdin.buffer:
+        if len(raw_line) > 900000:
             print(json.dumps({"ok": False, "error": "WORKER_REQUEST_TOO_LARGE"}), flush=True)
+            continue
+        try:
+            line = raw_line.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            print(json.dumps({"ok": False, "error": "WORKER_INVALID_UTF8"}), flush=True)
+            continue
+        if not line.strip():
             continue
         main(line)
         sys.stdout.flush()
