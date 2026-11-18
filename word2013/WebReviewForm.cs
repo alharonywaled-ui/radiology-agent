@@ -301,9 +301,11 @@ namespace RadiologyAgent {
         UseShellExecute=false,CreateNoWindow=true,
         WindowStyle=ProcessWindowStyle.Hidden,
         RedirectStandardInput=true,RedirectStandardOutput=true,
-        StandardOutputEncoding=new UTF8Encoding(false),
-        StandardInputEncoding=new UTF8Encoding(false)
+        StandardOutputEncoding=new UTF8Encoding(false)
       };
+      // .NET Framework 4.8 doesn't expose ProcessStartInfo.StandardInputEncoding.
+      // Force Python UTF-8 and send raw UTF-8 bytes with newline framing.
+      info.EnvironmentVariables["PYTHONUTF8"]="1";
       residentWorker=Process.Start(info);
       if(residentWorker==null)throw new Exception("Groq worker failed to start.");
       return residentWorker;
@@ -351,8 +353,9 @@ namespace RadiologyAgent {
         // user's ReviewHost; concurrent forms serialize on workerGate.
         if(payload.IndexOf('\r')>=0||payload.IndexOf('\n')>=0)
           throw new Exception("Invalid worker transport framing.");
-        process.StandardInput.WriteLine(payload);
-        process.StandardInput.Flush();
+        byte[] rawInput=new UTF8Encoding(false).GetBytes(payload+"\n");
+        process.StandardInput.BaseStream.Write(rawInput,0,rawInput.Length);
+        process.StandardInput.BaseStream.Flush();
         Task<string> output=process.StandardOutput.ReadLineAsync();
         int maxMs=(int)Math.Min(2400000L,
                    Math.Max(340000L,(long)count*340000L));
