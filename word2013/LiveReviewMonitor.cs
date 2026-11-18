@@ -1368,7 +1368,9 @@ namespace RadiologyAgent {
             string quote=get("quote"),category=get("category");
             if(quote.Length<2||!currentText.Contains(quote))continue;
             string section=get("section");
-            string key=quote+"\u001f"+section;
+            // Preserve independent Logic and Language findings even when they
+            // quote exactly the same phrase in the same section.
+            string key=quote+"\u001f"+section+"\u001f"+category;
             var record=Tuple.Create(quote,category,get("explanation"),get("suggestion"),section);
             if(!unique.ContainsKey(key)||(category=="logic"||category=="unrelated"))unique[key]=record;
           }
@@ -1392,6 +1394,14 @@ namespace RadiologyAgent {
         }
         var ordered=new List<Tuple<string,string,string,string,string>>(unique.Values);
         int candidateCount=ordered.Count,wordApplied=0,wordFailed=0;
+        int logicCandidates=ordered.Count(x=>x.Item2=="logic");
+        int languageCandidates=ordered.Count(x=>x.Item2=="language");
+        int unrelatedCandidates=ordered.Count(x=>x.Item2=="unrelated");
+        WriteDword("ReviewLogicCandidates",(uint)logicCandidates);
+        WriteDword("ReviewLanguageCandidates",(uint)languageCandidates);
+        WriteDword("ReviewUnrelatedCandidates",(uint)unrelatedCandidates);
+        WriteDword("ReviewLogicApplied",0);
+        WriteDword("ReviewLogicSkipped",0);
         ordered.Sort((a,b)=>{
           int priority=String.CompareOrdinal(a.Item2,b.Item2);
           if(a.Item2=="unrelated"&&b.Item2!="unrelated")return -1;
@@ -1462,10 +1472,18 @@ namespace RadiologyAgent {
             } else if(!snapshotUnique) {
               // If several literal occurrences exist, do not guess which
               // instance the AI meant without an exact clinical anchor.
-              wordFailed++;LogFailure("WORD_FIND_DUPLICATE_QUOTE");continue;
+              wordFailed++;
+              if(issue.Item2=="logic")
+                WriteDword("ReviewLogicSkipped",ReadDword("ReviewLogicSkipped")+1);
+              LogFailure("WORD_FIND_DUPLICATE_QUOTE");continue;
             }
             string anchorId=((int)region.Start).ToString()+":"+((int)region.End).ToString();
-            if(existing.Contains(anchorId)) {wordApplied++;continue;}
+            if(existing.Contains(anchorId)) {
+              wordApplied++;
+              if(issue.Item2=="logic")
+                WriteDword("ReviewLogicApplied",ReadDword("ReviewLogicApplied")+1);
+              continue;
+            }
             string comment="[Haronex: "+(issue.Item2=="unrelated"?"Unrelated content":(issue.Item2=="logic"?"Potential internal contradiction":"Language"))+"]\r\n"+
               WebReviewForm.Safe(issue.Item3,500)+
               (issue.Item4.Length>0?"\r\nSuggestion: "+WebReviewForm.Safe(issue.Item4,250):"")+
@@ -1474,11 +1492,15 @@ namespace RadiologyAgent {
             dynamic createdComment=doc.Comments.Add(region,comment);
             BoldSuggestionInComment(createdComment);
             wordApplied++;
+            if(issue.Item2=="logic")
+              WriteDword("ReviewLogicApplied",ReadDword("ReviewLogicApplied")+1);
             if(issue.Item2=="unrelated")
               WriteDword("UnrelatedAppliedCount",ReadDword("UnrelatedAppliedCount")+1);
             existing.Add(anchorId);
           } catch(Exception ex) {
             wordFailed++;
+            if(issue.Item2=="logic")
+              WriteDword("ReviewLogicSkipped",ReadDword("ReviewLogicSkipped")+1);
             LogFailure("ANNOTATION_"+ex.GetType().Name);
             if(issue.Item2=="unrelated")
               WriteDword("UnrelatedSkippedCount",ReadDword("UnrelatedSkippedCount")+1);
