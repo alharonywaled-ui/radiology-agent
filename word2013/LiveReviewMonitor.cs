@@ -1148,7 +1148,7 @@ namespace RadiologyAgent {
           if(ex.Message!="Invalid review response")LogFailure("HOST_"+ex.GetType().Name);
           failed=true;
           WebReviewForm.SetReviewStatus(2);
-          if(pendingClick){pendingClick=false;Notify(false);}
+          if(pendingClick){pendingClick=false;CloseReviewOverlay();Notify(false);}
         }
       } finally {
         if(ReferenceEquals(runningCancellation,token))runningCancellation=null;
