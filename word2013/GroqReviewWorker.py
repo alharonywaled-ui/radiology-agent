@@ -38,7 +38,8 @@ def reset_metrics():
                         supported_conclusion_claims=0,
                         unsupported_conclusion_candidates=0,
                         direct_conflicts=0, logic_proposed=0,
-                        logic_returned=0, clinical_audit_completed=0)
+                        logic_returned=0, clinical_audit_completed=0,
+                        clinical_coverage_flags=0)
 def metric(name, increment=1):
     with _METRICS_LOCK:
         _METRICS[name] = _METRICS.get(name, 0) + increment
@@ -89,7 +90,7 @@ class ShortLivedSectionCache:
         self.maximum = 96
     def get_or_run(self, pass_name, key, text, fn):
         identity = hashlib.sha256((
-            "v12.0|" + MODEL + "|" + pass_name + "|" +
+            "v12.1|" + MODEL + "|" + pass_name + "|" +
             hashlib.sha256(key.encode("utf-8")).hexdigest() + "|" +
             text).encode("utf-8")).digest()
         now = time.monotonic()
@@ -706,6 +707,112 @@ def independent_direct_contradiction_groups(chunks):
     return groups
 
 
+def independent_clinical_coverage_groups(chunks):
+    """Evidence-anchored checks missing from generic direct-negation Logic.
+
+    Detect only (1) explicit uncertainty in a source history that is lost when
+    repeated as an unqualified diagnosis in Conclusion; and (2) documented
+    progression of pericardial effusion omitted entirely from Conclusion.
+    These are CLINICIAN-VERIFY issues, not automated medical conclusions.
+    Work on full report, never independently on partial Findings windows.
+    """
+    full = "".join(chunks)
+    groups = [[] for _ in chunks]
+    conclusion = conclusion_section(full)
+    findings_match = _FINDINGS_START.search(full)
+    if not conclusion or not findings_match:
+        return groups
+    conclusion_at = full.find(conclusion)
+    if conclusion_at <= findings_match.end():
+        return groups
+    header = full[:findings_match.start()]
+    findings = full[findings_match.end():conclusion_at]
+    starts, offset = [], 0
+    for part in chunks:
+        starts.append((offset,offset+len(part)))
+        offset += len(part)
+
+    def attach(absolute_offset, quote, explanation, suggestion, section):
+        if not quote or quote not in full[absolute_offset:absolute_offset+len(quote)]:
+            return
+        for index,(left,right) in enumerate(starts):
+            if left <= absolute_offset and absolute_offset+len(quote) <= right:
+                groups[index].append({
+                    "quote": quote,
+                    "category": "logic",
+                    "explanation": explanation,
+                    "suggestion": suggestion,
+                    "section": section,
+                })
+                metric("clinical_coverage_flags")
+                break
+
+    # Require an explicit '?' or equivalent qualifier immediately preceding
+    # prostate malignancy in HISTORY, plus an unqualified positive diagnosis
+    # in Conclusion. Do not flag if Conclusion preserves 'possible' or '?'.
+    history_uncertain = re.search(
+        r"(?i)\b(?:history\s+of\s*)?(?:\?\s*|suspected\s+|possible\s+|"
+        r"questionable\s+)(?:prostatic\s+cancer|prostate\s+cancer|"
+        r"prostatic\s+malignancy|prostate\s+malignancy)\b", header)
+    if history_uncertain:
+        definite = re.search(
+            r"(?i)\b(?:history\s+of\s+)?(?:prostatic\s+malignancy|"
+            r"prostate\s+malignancy|prostatic\s+cancer|"
+            r"prostate\s+cancer)\b", conclusion)
+        if definite:
+            # Check the immediately preceding phrase; an uncertain Conclusion
+            # should never be classified as an unjustified certainty increase.
+            ahead = conclusion[max(0,definite.start()-35):definite.start()]
+            around = conclusion[definite.start():definite.end()+16]
+            if not re.search(
+                r"(?i)(?:\?|possible|suspected|questionable|probable|likely|"
+                r"not\s+confirmed)\s*(?:history\s+of\s+)?$",
+                ahead) and not re.search(r"(?i)\b(?:\?|suspected|possible|"
+                                         r"questionable)\b",around):
+                phrase=definite.group(0)
+                attach(conclusion_at+definite.start(),phrase,
+                    "Clinical certainty mismatch: the history qualifies "
+                    "prostate malignancy as uncertain, but the Conclusion "
+                    "states the diagnosis without that qualification. "
+                    "Confirm pathology or clinical history before deciding "
+                    "whether the qualifier should be retained.",
+                    "Verify whether the prostate cancer diagnosis is "
+                    "confirmed; do not automatically change the diagnosis.",
+                    "conclusion")
+
+    # Progression is clinically more salient than stable small effusion.
+    # Limit this to explicitly progressive pericardial effusion, not any
+    # incidental effusion, and do not warn when Conclusion already mentions it.
+    if not re.search(r"(?i)\bpericardial\s+effusion\b",conclusion):
+        for match in re.finditer(
+            r"(?i)\b(?:progression|increase|increased|worsening)\b"
+            r"[^\r\n.!?]{0,90}\bpericardial\s+effusion\b",findings):
+            line_start=max(findings.rfind("\r",0,match.start()),
+                           findings.rfind("\n",0,match.start()))+1
+            line_end=min(
+                [e for e in (findings.find("\r",match.end()),
+                             findings.find("\n",match.end()))
+                 if e>=0] or [len(findings)])
+            # Anchor the precise positive progression clause, never invent
+            # a phrase or prepend a guess about its clinical significance.
+            quote=findings[match.start():match.end()]
+            before=findings[line_start:match.start()]
+            if re.search(r"(?i)\b(?:no|without|rule\s+out|possibly|"
+                         r"suspected)\b[^.!?\r\n]{0,35}$",before):
+                continue
+            attach(findings_match.end()+match.start(),quote,
+                "Potential significant omission: Findings explicitly "
+                "describe progression of pericardial effusion, but the "
+                "Conclusion does not mention pericardial effusion. "
+                "Ask the reporting radiologist whether this change warrants "
+                "inclusion; importance cannot be decided automatically.",
+                "Verify whether the progressing pericardial effusion "
+                "should be included in the Conclusion.",
+                "body")
+            break
+    return groups
+
+
 def normalize(text, issues):
     output, seen = [], set()
     if not isinstance(issues, list):
@@ -1084,7 +1191,7 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v12-0":
+        if version != "haronex-groq-qwen38-v12-1":
             raise ValueError("Unsupported review version")
         # Preserve ALL four independent audit passes; parallelize each report
         # chunk inside each pass instead of processing chunks serially. Bounded
@@ -1123,6 +1230,11 @@ def main(raw_request=None):
                              if (x["quote"], x["category"]) not in existing)
         # Independent deterministic positive-vs-negative safety net.
         for i, added in enumerate(independent_direct_contradiction_groups(texts)):
+            existing = {(x["quote"], x["category"]) for x in groups[i]}
+            groups[i].extend(x for x in added
+                             if (x["quote"], x["category"]) not in existing)
+        # Evidence-anchored certainty and progressive-finding omissions.
+        for i, added in enumerate(independent_clinical_coverage_groups(texts)):
             existing = {(x["quote"], x["category"]) for x in groups[i]}
             groups[i].extend(x for x in added
                              if (x["quote"], x["category"]) not in existing)
@@ -1349,6 +1461,46 @@ def self_test():
         "Sex: Male\rFindings:\rNo uterus is identified.\rConclusion:\rNormal."])==[[]]
     assert patient_anatomy_consistency_groups([
         "Sex: Female\rFindings:\rProstate cancer in family history.\rConclusion:\rNormal."])==[[]]
+    # V12.1 regression based on a complete PET/CT-style report. Both
+    # qualified-history certainty and progressive clinically relevant
+    # omissions must reach the Word comment groups on exact source quotes.
+    pet_report=(
+        "Male patient 78 years old.\r"
+        "Clinical background:\rHistory of ? prostatic cancer received "
+        "hormonal therapy.\r"
+        "Findings:\rLeft upper lung mass with mild metabolic regression.\r"
+        "Progression of the mild pericardial effusion.\r"
+        "Markedly enlarged prostate with heterogeneous nodules.\r"
+        "Conclusion:\rHistory of prostatic malignancy on hormonal therapy.\r"
+        "Mild metabolic regression of the left upper lung mass.\r"
+        "The rest of the body is free from any other metabolically active lesions.\r")
+    pet_logic=independent_clinical_coverage_groups([pet_report])[0]
+    assert len(pet_logic)==2, pet_logic
+    assert {x["section"] for x in pet_logic}=={"body","conclusion"}
+    assert all(x["quote"] in pet_report for x in pet_logic)
+    assert "Clinical certainty mismatch" in pet_logic[0]["explanation"]
+    assert "Potential significant omission" in pet_logic[1]["explanation"]
+    # Qualifier retained, effusion covered => no invented warning.
+    corrected_pet=pet_report.replace(
+        "History of prostatic malignancy on hormonal therapy.",
+        "History of possible prostatic malignancy on hormonal therapy."
+    ).replace(
+        "Mild metabolic regression of the left upper lung mass.\r",
+        "Mild metabolic regression of the left upper lung mass.\r"
+        "Progression of mild pericardial effusion.\r")
+    assert independent_clinical_coverage_groups([corrected_pet])==[[]]
+    # Completely unqualified history, and stable effusion, should not create
+    # clinical verification flags merely to inflate a count.
+    quiet_pet=pet_report.replace("? prostatic","prostatic").replace(
+        "Progression of the mild pericardial effusion.",
+        "Stable small pericardial effusion.")
+    assert independent_clinical_coverage_groups([quiet_pet])==[[]]
+    # Preserve both issues when paragraphs are in different report chunks.
+    cut=pet_report.index("Findings:")
+    pieces=[pet_report[:cut],pet_report[cut:]]
+    split_logic=independent_clinical_coverage_groups(pieces)
+    assert sum(len(x) for x in split_logic)==2
+
     # V12 zero-Logic regression: an explicit positive Findings and explicit
     # negation in Conclusion must remain visible independently of AI output.
     definite=("Findings:\rBilateral renal cortical cysts measuring 2 cm.\r"
