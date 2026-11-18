@@ -96,6 +96,8 @@ namespace RadiologyAgent {
       cards=new FlowLayoutPanel{Dock=DockStyle.Fill,AutoScroll=true,
         WrapContents=false,FlowDirection=FlowDirection.TopDown,
         BackColor=Back,Padding=new Padding(8,8,8,12)};
+      // Resize only when actual available width changes. Don't rebuild on
+      // every Word COM polling tick or transient layout scroll event.
       cards.SizeChanged+=(s,e)=>ResizeCards();
       Controls.Add(cards);cards.BringToFront();
     }
@@ -224,8 +226,10 @@ namespace RadiologyAgent {
       parent.Controls.Add(name);
       y+=21;
       string value=content??"";
-      int height=TextHeight(value,width-4,
-        new Font("Segoe UI",9,bold?FontStyle.Bold:FontStyle.Regular),34,117);
+      int height;
+      using(var measureFont=new Font("Segoe UI",9,
+          bold?FontStyle.Bold:FontStyle.Regular))
+        height=TextHeight(value,width-4,measureFont,34,117);
       var text=new TextBox{Text=value,Location=new Point(x,y),
         Size=new Size(width-3,height),Multiline=true,ReadOnly=!bold,
         BorderStyle=BorderStyle.None,ScrollBars=ScrollBars.Vertical,
