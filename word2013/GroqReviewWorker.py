@@ -556,6 +556,81 @@ def conclusion_issue_groups(key, chunks, reviewer=None, evidence_reviewer=None):
             metric("suppressed_partial_logic")
     return distribute_conclusion_issues(chunks, issues)
 
+# Patient/organ cross-check uses EXPLICIT recorded sex ONLY. Names, titles
+# and perceived identity are not reliable evidence of anatomical inventory.
+_RECORDED_SEX=re.compile(
+    r"(?i)\b(?:patient\s*(?:sex|gender)|sex|gender)\s*[:=\-]\s*"
+    r"(male|female|m|f)\b|\b(male|female)\s+patient\b"
+)
+_FINDINGS_START=re.compile(r"(?i)\bfindings\s*[:：\-]")
+_MALE_SPECIFIC=re.compile(r"(?i)\b(?:prostate|prostatic|testis|testes|"
+                          r"testicle|testicular|seminal\s+vesicles?)\b")
+_FEMALE_SPECIFIC=re.compile(r"(?i)\b(?:uterus|uterine|ovary|ovaries|"
+                            r"ovarian|endometrium|endometrial|cervix|"
+                            r"pregnancy|pregnant)\b")
+_NEGATED_ANATOMY=re.compile(
+    r"(?i)\b(?:no|absent|without|prior\s+removal\s+of|"
+    r"history\s+of|status\s+post|post[\s-]operative)\b"
+)
+def patient_anatomy_consistency_groups(chunks):
+    """Conservative *verification* flag, never an automatic sex determination.
+    Avoid using names or assuming gender defines anatomy. Scan only Findings,
+    not family history, patient metadata or differential context.
+    """
+    full="".join(chunks)
+    start_match=_FINDINGS_START.search(full)
+    if not start_match:
+        return [[] for _ in chunks]
+    header=full[:start_match.start()][:1600]
+    sexes=set()
+    for m in _RECORDED_SEX.finditer(header):
+        found=(m.group(1) or m.group(2)).lower()
+        sexes.add("male" if found in ("male","m") else "female")
+    if len(sexes)!=1:
+        return [[] for _ in chunks]
+    sex=next(iter(sexes))
+    conclusion=conclusion_section(full)
+    body_end=full.find(conclusion) if conclusion else len(full)
+    findings=full[start_match.end():body_end]
+    matcher=_FEMALE_SPECIFIC if sex=="male" else _MALE_SPECIFIC
+    groups=[[] for _ in chunks]
+    offsets=[]
+    position=0
+    for chunk in chunks:
+        offsets.append((position,position+len(chunk)))
+        position+=len(chunk)
+    used=set()
+    for m in matcher.finditer(findings):
+        before=findings[max(0,m.start()-90):m.start()]
+        # Explicit negation, surgical history or quoted history is not a
+        # current contradiction. Do not over-interpret uncertain anatomy.
+        line=before.split("\r")[-1].split("\n")[-1]
+        if _NEGATED_ANATOMY.search(line):
+            continue
+        term=m.group(0)
+        if term.lower() in used:
+            continue
+        used.add(term.lower())
+        at=start_match.end()+m.start()
+        for i,(left,right) in enumerate(offsets):
+            if left<=at<right and at+len(term)<=right:
+                groups[i].append({
+                  "quote":term,
+                  "category":"logic",
+                  "explanation":(
+                    "The report explicitly records sex as "+sex+
+                    " while Findings describe "+term+
+                    ". This is a possible metadata–anatomy mismatch, "
+                    "not a definitive medical impossibility. Verify "
+                    "recorded sex, anatomy, treatment and surgical history."),
+                  "suggestion":"Verify patient information and anatomy "
+                               "with the reporting clinician; do not "
+                               "automatically alter this report.",
+                  "section":"body"})
+                break
+    return groups
+
+
 def normalize(text, issues):
     output, seen = [], set()
     if not isinstance(issues, list):
@@ -962,6 +1037,12 @@ def main(raw_request=None):
             groups[i].extend(x for x in added
                              if (x["quote"], x["category"]) not in existing)
         for i, added in enumerate(local_offtopic):
+            existing = {(x["quote"], x["category"]) for x in groups[i]}
+            groups[i].extend(x for x in added
+                             if (x["quote"], x["category"]) not in existing)
+        # Patient data vs anatomy: independent deterministic safety check,
+        # only using an explicit recorded sex, never a patient name.
+        for i, added in enumerate(patient_anatomy_consistency_groups(texts)):
             existing = {(x["quote"], x["category"]) for x in groups[i]}
             groups[i].extend(x for x in added
                              if (x["quote"], x["category"]) not in existing)
