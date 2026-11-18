@@ -34,7 +34,9 @@ def reset_metrics():
         _METRICS.clear()
         _METRICS.update(http_requests=0, cache_hits=0, retries=0,
                         rate_limits=0, backoff_ms=0, json_generation_retries=0,
-                        suppressed_partial_logic=0)
+                        suppressed_partial_logic=0,
+                        supported_conclusion_claims=0,
+                        unsupported_conclusion_candidates=0)
 def metric(name, increment=1):
     with _METRICS_LOCK:
         _METRICS[name] = _METRICS.get(name, 0) + increment
@@ -463,29 +465,95 @@ def is_unverifiable_partial_logic(issue):
     return False
 
 
-def conclusion_issue_groups(key, chunks, reviewer=None):
+EVIDENCE_CHECK_SYSTEM = (
+    "You are a radiology evidence locator, NOT a contradiction judge. "
+    "Given a specific Conclusion assertion and ONE PARTIAL Findings excerpt, "
+    "find any positive supporting evidence for that assertion in this excerpt. "
+    "Paraphrases and equivalent clinical descriptions count as support. "
+    "If evidence is present, return JSON {\"issues\":[{\"quote\":\"EXACT "
+    "supporting excerpt from FINDINGS only\",\"category\":\"logic\","
+    "\"explanation\":\"EVIDENCE_PRESENT\",\"suggestion\":\"\"}]}. "
+    "If not present, return {\"issues\":[]}. Never infer absence from the "
+    "excerpt, never invent findings and never copy text from Conclusion as evidence."
+)
+def clinical_evidence_in_window(key, conclusion_claim, findings_excerpt):
+    # Limit input to one Findings window. Require exact source evidence quote.
+    evidence = api_review(
+        key, findings_excerpt,
+        system_prompt=EVIDENCE_CHECK_SYSTEM,
+        user_prefix="Conclusion claim to seek support for (NOT evidence):\n" +
+                    conclusion_claim +
+                    "\nSearch ONLY this Findings excerpt for matching support:\n")
+    return any(row.get("quote","") in findings_excerpt and
+               row.get("quote","").strip() and
+               len(row["quote"]) >= 5 and
+               row.get("explanation") == "EVIDENCE_PRESENT"
+               for row in evidence)
+
+def adjudicate_partial_absence(key, report, conclusion_claim,
+                               evidence_reviewer=None):
+    """Across ALL findings windows, suppress a missing-support claim if ANY
+    piece gives supporting evidence. Lack of evidence in a single window is
+    never enough. Fail closed on API errors, not false clinical success.
+    """
+    complete_conclusion = conclusion_section(report)
+    if not complete_conclusion or conclusion_claim not in complete_conclusion:
+        return False
+    source_start=report.find(complete_conclusion)
+    source=report[:source_start] + report[source_start+len(complete_conclusion):]
+    # Reserve input for separate claim+instructions, split all evidence text.
+    per_window=max(500, min(4000, 5100-len(conclusion_claim)))
+    for pos in range(0,len(source),per_window):
+        excerpt=source[pos:pos+per_window]
+        if evidence_reviewer is None:
+            found=clinical_evidence_in_window(key, conclusion_claim, excerpt)
+        else:
+            found=evidence_reviewer(conclusion_claim, excerpt)
+        if found:
+            metric("supported_conclusion_claims")
+            return False
+    metric("unsupported_conclusion_candidates")
+    return True
+
+def conclusion_issue_groups(key, chunks, reviewer=None, evidence_reviewer=None):
     full_report = "".join(chunks)
     contexts = clinical_context_windows(full_report)
     if reviewer is None:
         reviewer = lambda content: api_review(
             key, content, system_prompt=CONCLUSION_SYSTEM,
             user_prefix="Audit every assertion in the Conclusion against the Findings:\n\n")
-    issues = []
+    issues, possible_absences = [], []
     is_partial = len(full_report) > 5900
     for context in contexts:
-        candidate = reviewer(context)
-        # The same Conclusion is included with multiple *partial* excerpts.
-        # Treat every claim of "not in Findings" as unverified unless the
-        # model has really seen the entire report. This guard cannot add
-        # or invent clinical statements.
-        if is_partial:
-            for item in candidate:
-                if is_unverifiable_partial_logic(item):
+        for item in reviewer(context):
+            if is_partial and is_unverifiable_partial_logic(item):
+                quote=item.get("quote","")
+                # Scope-dependent ambiguous "other" phrases are wording
+                # questions, not verified contradictions.
+                if ("rest of the body" in quote.lower() and
+                    "other" in quote.lower()):
                     metric("suppressed_partial_logic")
-                else:
-                    issues.append(item)
+                    continue
+                possible_absences.append(item)
+            else:
+                issues.append(item)
+    # Check EACH questioned Conclusion assertion against every Findings
+    # excerpt, even if a different audit window did not see its evidence.
+    # Never silently discard genuine missing claims from the full report.
+    for item in {row.get("quote",""):row for row in possible_absences
+                 if row.get("quote","")}.values():
+        if adjudicate_partial_absence(key,full_report,item["quote"],
+                                      evidence_reviewer):
+            verified=dict(item)
+            verified["explanation"]=(
+                "No supporting evidence was identified across the full "
+                "Findings review; confirm with the reporting radiologist.")
+            verified["suggestion"]=(
+                "Verify or document supporting Findings for this "
+                "Conclusion assertion.")
+            issues.append(verified)
         else:
-            issues.extend(candidate)
+            metric("suppressed_partial_logic")
     return distribute_conclusion_issues(chunks, issues)
 
 def normalize(text, issues):
