@@ -1349,6 +1349,27 @@ def self_test():
         "Sex: Male\rFindings:\rNo uterus is identified.\rConclusion:\rNormal."])==[[]]
     assert patient_anatomy_consistency_groups([
         "Sex: Female\rFindings:\rProstate cancer in family history.\rConclusion:\rNormal."])==[[]]
+    # V12 zero-Logic regression: an explicit positive Findings and explicit
+    # negation in Conclusion must remain visible independently of AI output.
+    definite=("Findings:\rBilateral renal cortical cysts measuring 2 cm.\r"
+              "Conclusion:\rNo renal cysts.\r")
+    definite_issues=independent_direct_contradiction_groups([definite])
+    assert len(definite_issues[0])==1
+    assert definite_issues[0][0]["category"]=="logic"
+    assert definite_issues[0][0]["quote"]=="No renal cysts"
+    # A matching report, a qualified history, or a negated Findings must NOT
+    # produce artificial Logic just to increase the numeric count.
+    assert independent_direct_contradiction_groups([
+        "Findings:\rNo renal cysts.\rConclusion:\rNo renal cysts.\r"])==[[]]
+    assert independent_direct_contradiction_groups([
+        "Findings:\rBilateral renal cortical cysts.\r"
+        "Conclusion:\rBilateral renal cortical cysts.\r"])==[[]]
+    assert independent_direct_contradiction_groups([
+        "Findings:\rHistory of pleural effusion.\r"
+        "Conclusion:\rNo pleural effusion.\r"])==[[]]
+    assert independent_direct_contradiction_groups([
+        "Findings:\rNo pulmonary embolism.\r"
+        "Conclusion:\rNo pulmonary embolism.\r"])==[[]]
     off_topic = clinical.replace("Normal kidneys with no cysts.", "Haron work at dokki scan")
     outside = {"quote": "Haron work at dokki scan", "category": "unrelated",
                "explanation": "Statement is not a radiology finding",
