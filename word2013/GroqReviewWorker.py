@@ -751,7 +751,7 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v11-14":
+        if version != "haronex-groq-qwen38-v11-15":
             raise ValueError("Unsupported review version")
         # Preserve ALL four independent audit passes; parallelize each report
         # chunk inside each pass instead of processing chunks serially. Bounded
