@@ -1205,6 +1205,7 @@ namespace RadiologyAgent {
           && found.Count==1&&found[0]=="Haron work at dokki scan"&&control.Count==0
           && RelatedIssueResolution.SelfTest()
           && HaronexReviewLoadingOverlay.SelfTest()
+          && DuplicateScopeSelfTest()
           && SuggestionReplacementPlan.SelfTest()
           && MandatoryApproval.SelfTest()
           && DebounceMilliseconds==1200
@@ -1343,6 +1344,19 @@ namespace RadiologyAgent {
       } catch {}
     }
 
+    private static bool IsUniqueExactQuote(string scope,string quote) {
+      if(String.IsNullOrEmpty(scope)||String.IsNullOrEmpty(quote))return false;
+      int at=scope.IndexOf(quote,StringComparison.Ordinal);
+      return at>=0&&scope.IndexOf(quote,at+quote.Length,
+                                  StringComparison.Ordinal)<0;
+    }
+    private static bool DuplicateScopeSelfTest() {
+      return IsUniqueExactQuote("Findings: cyst.\\rConclusion: no cyst.","no cyst")
+        && !IsUniqueExactQuote("no cyst / no cyst","no cyst")
+        && !IsUniqueExactQuote("normal findings","no cyst")
+        && IsUniqueExactQuote("Conclusion: no cyst","no cyst");
+    }
+
     private void ApplyReady() {
       if(readyResponse==null||currentText==null){Notify(false);return;}
       try {
@@ -1460,10 +1474,7 @@ namespace RadiologyAgent {
             // Word section before Find collapses the range to one match.
             // This is never a guess: scoped match must be EXACT and UNIQUE.
             string scopedText=Convert.ToString(region.Text);
-            int scopedAt=scopedText.IndexOf(issue.Item1,StringComparison.Ordinal);
-            bool scopedUnique=scopedAt>=0&&
-              scopedText.IndexOf(issue.Item1,scopedAt+issue.Item1.Length,
-                                 StringComparison.Ordinal)<0;
+            bool scopedUnique=IsUniqueExactQuote(scopedText,issue.Item1);
             dynamic find=region.Find;
             find.ClearFormatting();find.Text=issue.Item1;
             find.Forward=true;find.Wrap=0;find.MatchCase=true;find.MatchWildcards=false;
