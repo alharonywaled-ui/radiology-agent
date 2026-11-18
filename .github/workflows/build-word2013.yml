@@ -52,10 +52,33 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Offline retry/backoff regression tests failed' }
           python word2013/PerformanceQualityRegression.py
           if ($LASTEXITCODE -ne 0) { throw 'V11.14 performance and four-pass quality contract failed' }
+          $oldCodePage=$env:PYTHONIOENCODING
+          try {
+            $env:PYTHONIOENCODING='cp1252:strict'
+            $unicodeTest=python word2013/GroqReviewWorker.py --unicode-self-test
+            if ($LASTEXITCODE -ne 0) { throw 'Unicode worker protocol test failed on ANSI code page' }
+            $unicodeData=$unicodeTest | ConvertFrom-Json
+            if ($unicodeData.ok -ne $true -or
+                $unicodeData.groups[0][0].explanation -notmatch 'مراجعة' -or
+                $unicodeData.groups[0][0].explanation -notmatch 'phleboliths') {
+              throw 'Unicode JSON did not round trip under simulated Windows cp1252'
+            }
+          } finally { $env:PYTHONIOENCODING=$oldCodePage }
           python -m PyInstaller --noconfirm --onedir --console --contents-directory _HaronexRuntime --name HaronexGroqWorker --distpath word2013/bin --workpath word2013/pybuild/work --specpath word2013/pybuild word2013/GroqReviewWorker.py
           if ($LASTEXITCODE -ne 0) { throw 'Browser worker packaging failed' }
           $test=& word2013/bin/HaronexGroqWorker/HaronexGroqWorker.exe --self-test
           if ($LASTEXITCODE -ne 0 -or $test -notmatch '"ok": true') { throw "Groq review parser smoke test failed: $test" }
+          $savedEncoding=$env:PYTHONIOENCODING
+          try {
+            $env:PYTHONIOENCODING='cp1252:strict'
+            $wire=& word2013/bin/HaronexGroqWorker/HaronexGroqWorker.exe --unicode-self-test
+            if ($LASTEXITCODE -ne 0) { throw "Frozen Groq Unicode smoke test failed" }
+            $roundtrip=$wire | ConvertFrom-Json
+            if ($roundtrip.groups[0][0].explanation -notmatch 'مراجعة') {
+              throw 'Frozen worker lost Unicode text under cp1252'
+            }
+          } finally { $env:PYTHONIOENCODING=$savedEncoding }
+          Write-Host 'WINDOWS_CP1252_UNICODE_ROUNDTRIP_OK'
           python word2013/PerformanceQualityRegression.py word2013/bin/HaronexGroqWorker/HaronexGroqWorker.exe
           if ($LASTEXITCODE -ne 0) { throw "Packaged resident-worker protocol regression failed" }
       - name: Compile native 32-bit COM Ribbon add-in and smoke-test binary
@@ -104,12 +127,12 @@ jobs:
           $compiler=Join-Path $env:SystemDrive 'Program Files (x86)\Inno Setup 6\ISCC.exe'
           & $compiler word2013/installer_setup.iss
           if ($LASTEXITCODE -ne 0) { throw "Installer compile failed" }
-          if (!(Test-Path word2013/output/Haronex_Word2013_Groq_Qwen38_V11_14_Setup.exe)) { throw "Setup missing" }
+          if (!(Test-Path word2013/output/Haronex_Word2013_Groq_Qwen38_V11_15_Setup.exe)) { throw "Setup missing" }
       - name: Smoke test Web Mode installer and native COM Ribbon
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $installer=(Resolve-Path word2013/output/Haronex_Word2013_Groq_Qwen38_V11_14_Setup.exe).Path
+          $installer=(Resolve-Path word2013/output/Haronex_Word2013_Groq_Qwen38_V11_15_Setup.exe).Path
           $p=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
           if($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
           $reg=Get-ItemProperty 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word2013.Safe'
@@ -128,6 +151,12 @@ jobs:
             throw "Installed optimized Groq worker self-test failed"
           }
           Write-Host "INSTALLED_OPTIMIZED_GROQ_WORKER_SELF_TEST_OK startup_ms=$($start.ElapsedMilliseconds)"
+          $unicodeOutput=& $worker --unicode-self-test
+          if ($LASTEXITCODE -ne 0) { throw "Installed Unicode protocol test failed" }
+          $unicodeCheck=$unicodeOutput | ConvertFrom-Json
+          if ($unicodeCheck.groups[0][0].explanation -notmatch 'مراجعة') {
+            throw 'Installed worker did not preserve Unicode clinical explanation'
+          }
           python word2013/PerformanceQualityRegression.py $worker
           if ($LASTEXITCODE -ne 0) { throw "Installed persistent worker protocol failed" }
           $enabled=Get-ItemProperty -Path 'HKCU:\Software\Haronex' -ErrorAction SilentlyContinue
@@ -138,8 +167,8 @@ jobs:
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: Haronex_Word2013_Groq_Qwen38_V11_14
-          path: word2013/output/Haronex_Word2013_Groq_Qwen38_V11_14_Setup.exe
+          name: Haronex_Word2013_Groq_Qwen38_V11_15
+          path: word2013/output/Haronex_Word2013_Groq_Qwen38_V11_15_Setup.exe
           if-no-files-found: error
 
       - name: Publish direct-download EXE as GitHub Release
@@ -149,13 +178,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference='Stop'
-          $exe='word2013/output/Haronex_Word2013_Groq_Qwen38_V11_14_Setup.exe'
+          $exe='word2013/output/Haronex_Word2013_Groq_Qwen38_V11_15_Setup.exe'
           if (!(Test-Path $exe)) { throw 'Tested EXE missing' }
-          $tag='haronex-v11-14-high-performance'
+          $tag='haronex-v11-15-unicode-fix'
           gh release view $tag --repo ${{ github.repository }} *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag $exe --repo ${{ github.repository }} --clobber
           } else {
-            gh release create $tag $exe --repo ${{ github.repository }} --title 'Haronex V11.14 High Performance' --notes 'Word 2013 x86 installer: context-aware review, inline suggestion popup, single-click Apply. Offline CI smoke tested; clinical and real Word end-to-end validation still required.'
+            gh release create $tag $exe --repo ${{ github.repository }} --title 'Haronex V11.15 Unicode Fix' --notes 'Word 2013 x86 installer: context-aware review, inline suggestion popup, single-click Apply. Offline CI smoke tested; clinical and real Word end-to-end validation still required.'
           }
           if ($LASTEXITCODE -ne 0) { throw 'Direct EXE release publishing failed' }

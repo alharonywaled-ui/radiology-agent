@@ -751,7 +751,7 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v11-14":
+        if version != "haronex-groq-qwen38-v11-15":
             raise ValueError("Unsupported review version")
         # Preserve ALL four independent audit passes; parallelize each report
         # chunk inside each pass instead of processing chunks serially. Bounded
@@ -788,7 +788,7 @@ def main(raw_request=None):
                           "performance": dict(snapshot_metrics(),
                             elapsed_ms=int((time.monotonic()-started)*1000),
                             concurrency=LIMITER.limit)},
-                         ensure_ascii=False))
+                         ensure_ascii=True))
     except Exception as exc:
         # No error bodies, secrets or reports in stdout.
         # Emit only fixed error categories; never expose raw server response or report.
@@ -1069,14 +1069,35 @@ def self_test():
         assert exc.code == "GROQ_INVALID_JSON" and len(calls) == 2
     print(json.dumps({"ok": True, "test": "groq_parser_offline"}))
 
+def unicode_protocol_self_test():
+    """Windows cp1252/ANSI stdout must never destroy Groq's Unicode findings.
+    The wire is ASCII-only JSON; JSON decoding restores the original Unicode.
+    This is safe even when PyInstaller redirects console output to an ANSI pipe.
+    """
+    phrase = "مراجعة — Résumé – Left phleboli → phleboliths"
+    example = {"ok": True, "mode": "groq", "passes": 2,
+               "groups": [[{"quote": "phleboli", "category": "language",
+                            "explanation": phrase,
+                            "suggestion": "phleboliths"}]]}
+    wire = json.dumps(example, ensure_ascii=True, separators=(",", ":"))
+    assert wire.isascii()
+    assert json.loads(wire)["groups"][0][0]["explanation"] == phrase
+    print(wire, flush=True)
+
+
 def serve():
     # Private stdin/stdout protocol; no listening ports, sockets or HTTP API.
     # Each request returns exactly one JSON line and flushes immediately.
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        if len(line) > 900000:
+    for raw_line in sys.stdin.buffer:
+        if len(raw_line) > 900000:
             print(json.dumps({"ok": False, "error": "WORKER_REQUEST_TOO_LARGE"}), flush=True)
+            continue
+        try:
+            line = raw_line.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            print(json.dumps({"ok": False, "error": "WORKER_INVALID_UTF8"}), flush=True)
+            continue
+        if not line.strip():
             continue
         main(line)
         sys.stdout.flush()
@@ -1085,6 +1106,8 @@ def serve():
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         self_test()
+    elif "--unicode-self-test" in sys.argv:
+        unicode_protocol_self_test()
     elif "--server" in sys.argv:
         serve()
     else:

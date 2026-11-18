@@ -16,7 +16,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    internal const string ReviewAlgorithmVersion="haronex-groq-qwen38-v11-14";
+    internal const string ReviewAlgorithmVersion="haronex-groq-qwen38-v11-15";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=1; Height=1;
@@ -306,6 +306,7 @@ namespace RadiologyAgent {
       // .NET Framework 4.8 doesn't expose ProcessStartInfo.StandardInputEncoding.
       // Force Python UTF-8 and send raw UTF-8 bytes with newline framing.
       info.EnvironmentVariables["PYTHONUTF8"]="1";
+      info.EnvironmentVariables["PYTHONIOENCODING"]="utf-8:strict";
       residentWorker=Process.Start(info);
       if(residentWorker==null)throw new Exception("Groq worker failed to start.");
       return residentWorker;
