@@ -33,7 +33,7 @@ def reset_metrics():
     with _METRICS_LOCK:
         _METRICS.clear()
         _METRICS.update(http_requests=0, cache_hits=0, retries=0,
-                        rate_limits=0, backoff_ms=0)
+                        rate_limits=0, backoff_ms=0, json_generation_retries=0)
 def metric(name, increment=1):
     with _METRICS_LOCK:
         _METRICS[name] = _METRICS.get(name, 0) + increment
@@ -535,6 +535,14 @@ def classify_http_400(exc):
                       str(error.get("message", ""))).lower()
     except Exception:
         return "GROQ_REQUEST_400_UNCLASSIFIED"
+    # A model-side JSON generation failure is not a malformed request.
+    # The service may return invalid_request_error as its generic "type";
+    # detect the specific generation failure before that catch-all.
+    if any(token in diagnostic for token in (
+        "json_validate_failed", "json validation failed",
+        "failed_generation", "failed to generate valid json",
+        "failed to produce valid json", "json_mode_failed")):
+        return "GROQ_REQUEST_400_JSON_GENERATION"
     if "response_format" in diagnostic or "json_object" in diagnostic or "json_schema" in diagnostic:
         return "GROQ_REQUEST_400_JSON_FORMAT"
     if "reasoning" in diagnostic:
@@ -609,7 +617,10 @@ def transport_request(req, open_url=urllib.request.urlopen):
         except urllib.error.HTTPError as exc:
             code = exc.code
             if code == 400:
-                raise ReviewFailure(classify_http_400(exc))
+                safe_code = classify_http_400(exc)
+                raise ReviewFailure(
+                    safe_code,
+                    retryable=(safe_code == "GROQ_REQUEST_400_JSON_GENERATION"))
             if code == 401:
                 raise ReviewFailure("GROQ_AUTH_401")
             if code == 403:
@@ -658,7 +669,8 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep,
                  "Accept": "application/json",
                  "User-Agent": "Haronex-Radiology-Agent/11"})
     # Semantic format errors get only one additional fresh response.
-    # HTTP 400/auth/content filtering or clinical safety failures are never retried.
+    # An explicit model-side JSON generation error may get ONE identical retry;
+    # malformed HTTP 400 parameters, auth and safety failures never retry.
     recoverable_formats = {
         "GROQ_INVALID_ENVELOPE", "GROQ_INVALID_JSON",
         "GROQ_INVALID_STRUCTURE", "GROQ_ISSUES_NOT_ARRAY",
@@ -667,12 +679,22 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep,
         "GROQ_ALL_ISSUES_INVALID", "GROQ_EMPTY_RESPONSE",
         "GROQ_NO_CHOICES"
     }
+    json_generation_retry_used = False
     for format_attempt in range(FORMAT_RETRIES + 1):
         for attempt in range(len(RETRY_DELAYS) + 1):
             try:
                 raw = requester(req)
                 break
             except ReviewFailure as exc:
+                if exc.code == "GROQ_REQUEST_400_JSON_GENERATION":
+                    if json_generation_retry_used:
+                        raise
+                    json_generation_retry_used = True
+                    metric("retries")
+                    metric("json_generation_retries")
+                    metric("backoff_ms", 1000)
+                    sleeper(1)
+                    continue
                 if not exc.retryable or attempt >= len(RETRY_DELAYS):
                     raise
                 delay = RETRY_DELAYS[attempt]
@@ -986,6 +1008,14 @@ def self_test():
         def read(self, limit):
             return b'{"error":{"message":"unsupported reasoning effort"}}'
     assert classify_http_400(FakeError()) == "GROQ_REQUEST_400_REASONING"
+    class JsonFailed:
+        def read(self, limit):
+            return b'{"error":{"type":"invalid_request_error","code":"json_validate_failed","message":"generation failed"}}'
+    assert classify_http_400(JsonFailed()) == "GROQ_REQUEST_400_JSON_GENERATION"
+    class BadParams:
+        def read(self, limit):
+            return b'{"error":{"type":"invalid_request_error","message":"unknown parameter name"}}'
+    assert classify_http_400(BadParams()) == "GROQ_REQUEST_400_PARAMETER"
     assert "Haronex-Radiology-Agent/11" in str(api_review.__code__.co_consts)
     assert MAX_COMPLETION_TOKENS == 8192
     try:
@@ -1016,6 +1046,24 @@ def self_test():
         raise AssertionError("400 error was silently swallowed")
     except ReviewFailure as exc:
         assert exc.code == "GROQ_REQUEST_400_INVALID" and len(called) == 1
+    called.clear()
+    def json_failed_once(request):
+        called.append(1)
+        if len(called) == 1:
+            raise ReviewFailure("GROQ_REQUEST_400_JSON_GENERATION", True)
+        return fake_response
+    json_delays=[]
+    assert api_review("gsk_dummy", sample, json_failed_once, json_delays.append) == []
+    assert len(called) == 2 and json_delays == [1]
+    called.clear()
+    def always_json_failed(request):
+        called.append(1)
+        raise ReviewFailure("GROQ_REQUEST_400_JSON_GENERATION", True)
+    try:
+        api_review("gsk_dummy", sample, always_json_failed, json_delays.append)
+        raise AssertionError("Excessive JSON generation retries")
+    except ReviewFailure as exc:
+        assert exc.code == "GROQ_REQUEST_400_JSON_GENERATION" and len(called) == 2
     called.clear()
     def limited(request):
         called.append(1)
