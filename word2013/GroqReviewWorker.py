@@ -36,7 +36,9 @@ def reset_metrics():
                         rate_limits=0, backoff_ms=0, json_generation_retries=0,
                         suppressed_partial_logic=0,
                         supported_conclusion_claims=0,
-                        unsupported_conclusion_candidates=0)
+                        unsupported_conclusion_candidates=0,
+                        direct_conflicts=0, logic_proposed=0,
+                        logic_returned=0, clinical_audit_completed=0)
 def metric(name, increment=1):
     with _METRICS_LOCK:
         _METRICS[name] = _METRICS.get(name, 0) + increment
@@ -87,7 +89,7 @@ class ShortLivedSectionCache:
         self.maximum = 96
     def get_or_run(self, pass_name, key, text, fn):
         identity = hashlib.sha256((
-            "v11.19|" + MODEL + "|" + pass_name + "|" +
+            "v12.0|" + MODEL + "|" + pass_name + "|" +
             hashlib.sha256(key.encode("utf-8")).hexdigest() + "|" +
             text).encode("utf-8")).digest()
         now = time.monotonic()
@@ -634,6 +636,76 @@ def patient_anatomy_consistency_groups(chunks):
     return groups
 
 
+# V12 rule-based corroboration is deliberately HIGH PRECISION: only positive
+# explicit Findings contrasted with direct negative Conclusion for the exact
+# same anatomical concept. This is not a broad clinical reasoning substitute.
+_DIRECT_CONFLICT_CONCEPTS=(
+    ("renal cyst", r"renal\s+(?:cortical\s+)?cysts?"),
+    ("pleural effusion", r"pleural\s+effusions?"),
+    ("pericardial effusion", r"pericardial\s+effusions?"),
+    ("pulmonary embolism", r"pulmonary\s+embolis(?:m|ms)"),
+    ("hydronephrosis", r"hydronephrosis"),
+    ("ascites", r"ascites"),
+)
+def independent_direct_contradiction_groups(chunks):
+    full="".join(chunks)
+    conclusion=conclusion_section(full)
+    if not conclusion:
+        return [[] for _ in chunks]
+    findings_start=_FINDINGS_START.search(full)
+    if not findings_start or findings_start.end()>full.find(conclusion):
+        return [[] for _ in chunks]
+    findings=full[findings_start.end():full.find(conclusion)]
+    groups=[[] for _ in chunks]
+    starts=[];total=0
+    for part in chunks:
+        starts.append((total,total+len(part)));total+=len(part)
+    for label,expr in _DIRECT_CONFLICT_CONCEPTS:
+        compiled=re.compile(r"\b"+expr+r"\b",re.IGNORECASE)
+        positive=False
+        for occurrence in compiled.finditer(findings):
+            line_start=max(findings.rfind("\r",0,occurrence.start()),
+                           findings.rfind("\n",0,occurrence.start()))+1
+            before=findings[line_start:occurrence.start()]
+            if re.search(r"(?i)\b(?:no|without|absent|negative\s+for|"
+                         r"history\s+of|rule\s+out|exclude|suspected)\b"
+                         r"[^.!?\r\n]{0,70}$",before):
+                continue
+            # Require affirmative descriptor or explicit objective observation,
+            # not a hypothetical list or a differential diagnosis.
+            if re.search(r"(?i)\b(?:possible|questionable|may|might|"
+                         r"differential|versus)\b",before):
+                continue
+            positive=True;break
+        if not positive:
+            continue
+        negative=re.compile(
+            r"\b(?:no|without|absence\s+of|negative\s+for)\s+"
+            r"(?:evidence\s+of\s+)?(?:any\s+)?"+expr+r"\b",re.IGNORECASE)
+        for hit in negative.finditer(conclusion):
+            # Avoid negative boilerplate that explicitly excludes *other*
+            # disease after a described positive finding.
+            near=conclusion[max(0,hit.start()-40):hit.start()].lower()
+            if "other" in near.split(".")[-1]:
+                continue
+            quote=hit.group(0)
+            at=full.find(conclusion)+hit.start()
+            for i,(lo,hi) in enumerate(starts):
+                if lo<=at and at+len(quote)<=hi:
+                    groups[i].append({
+                        "quote":quote, "category":"logic",
+                        "explanation":(
+                            "The Conclusion explicitly negates "+label+
+                            " while Findings explicitly describe it. "
+                            "Verify the internal inconsistency with the radiologist."),
+                        "suggestion":"Verify and reconcile Findings and "
+                                     "Conclusion before changing the report.",
+                        "section":"conclusion"})
+                    metric("direct_conflicts")
+                    break
+    return groups
+
+
 def normalize(text, issues):
     output, seen = [], set()
     if not isinstance(issues, list):
@@ -1012,7 +1084,7 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v11-19":
+        if version != "haronex-groq-qwen38-v12-0":
             raise ValueError("Unsupported review version")
         # Preserve ALL four independent audit passes; parallelize each report
         # chunk inside each pass instead of processing chunks serially. Bounded
@@ -1049,6 +1121,14 @@ def main(raw_request=None):
             existing = {(x["quote"], x["category"]) for x in groups[i]}
             groups[i].extend(x for x in added
                              if (x["quote"], x["category"]) not in existing)
+        # Independent deterministic positive-vs-negative safety net.
+        for i, added in enumerate(independent_direct_contradiction_groups(texts)):
+            existing = {(x["quote"], x["category"]) for x in groups[i]}
+            groups[i].extend(x for x in added
+                             if (x["quote"], x["category"]) not in existing)
+        metric("logic_proposed",sum(
+            sum(1 for issue in g if issue.get("category")=="logic")
+            for g in groups))
         # Reconcile ALL chunk-level "not found in Findings" observations
         # against the FULL report. True unsupported Conclusion assertions stay
         # visible, but partial-window omissions cannot become false warnings.
@@ -1085,6 +1165,10 @@ def main(raw_request=None):
                     else:
                         metric("suppressed_partial_logic")
                 groups[i]=safe_group
+        metric("logic_returned",sum(
+            sum(1 for issue in g if issue.get("category")=="logic")
+            for g in groups))
+        metric("clinical_audit_completed")
         print(json.dumps({"ok": True, "mode": "groq", "passes": 2,
                           "review_version": version, "groups": groups,
                           "discarded_issues": DISCARDED_ISSUES["count"],
@@ -1265,6 +1349,27 @@ def self_test():
         "Sex: Male\rFindings:\rNo uterus is identified.\rConclusion:\rNormal."])==[[]]
     assert patient_anatomy_consistency_groups([
         "Sex: Female\rFindings:\rProstate cancer in family history.\rConclusion:\rNormal."])==[[]]
+    # V12 zero-Logic regression: an explicit positive Findings and explicit
+    # negation in Conclusion must remain visible independently of AI output.
+    definite=("Findings:\rBilateral renal cortical cysts measuring 2 cm.\r"
+              "Conclusion:\rNo renal cysts.\r")
+    definite_issues=independent_direct_contradiction_groups([definite])
+    assert len(definite_issues[0])==1
+    assert definite_issues[0][0]["category"]=="logic"
+    assert definite_issues[0][0]["quote"]=="No renal cysts"
+    # A matching report, a qualified history, or a negated Findings must NOT
+    # produce artificial Logic just to increase the numeric count.
+    assert independent_direct_contradiction_groups([
+        "Findings:\rNo renal cysts.\rConclusion:\rNo renal cysts.\r"])==[[]]
+    assert independent_direct_contradiction_groups([
+        "Findings:\rBilateral renal cortical cysts.\r"
+        "Conclusion:\rBilateral renal cortical cysts.\r"])==[[]]
+    assert independent_direct_contradiction_groups([
+        "Findings:\rHistory of pleural effusion.\r"
+        "Conclusion:\rNo pleural effusion.\r"])==[[]]
+    assert independent_direct_contradiction_groups([
+        "Findings:\rNo pulmonary embolism.\r"
+        "Conclusion:\rNo pulmonary embolism.\r"])==[[]]
     off_topic = clinical.replace("Normal kidneys with no cysts.", "Haron work at dokki scan")
     outside = {"quote": "Haron work at dokki scan", "category": "unrelated",
                "explanation": "Statement is not a radiology finding",
