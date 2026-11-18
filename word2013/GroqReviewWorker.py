@@ -1461,6 +1461,46 @@ def self_test():
         "Sex: Male\rFindings:\rNo uterus is identified.\rConclusion:\rNormal."])==[[]]
     assert patient_anatomy_consistency_groups([
         "Sex: Female\rFindings:\rProstate cancer in family history.\rConclusion:\rNormal."])==[[]]
+    # V12.1 regression based on a complete PET/CT-style report. Both
+    # qualified-history certainty and progressive clinically relevant
+    # omissions must reach the Word comment groups on exact source quotes.
+    pet_report=(
+        "Male patient 78 years old.\r"
+        "Clinical background:\rHistory of ? prostatic cancer received "
+        "hormonal therapy.\r"
+        "Findings:\rLeft upper lung mass with mild metabolic regression.\r"
+        "Progression of the mild pericardial effusion.\r"
+        "Markedly enlarged prostate with heterogeneous nodules.\r"
+        "Conclusion:\rHistory of prostatic malignancy on hormonal therapy.\r"
+        "Mild metabolic regression of the left upper lung mass.\r"
+        "The rest of the body is free from any other metabolically active lesions.\r")
+    pet_logic=independent_clinical_coverage_groups([pet_report])[0]
+    assert len(pet_logic)==2, pet_logic
+    assert {x["section"] for x in pet_logic}=={"body","conclusion"}
+    assert all(x["quote"] in pet_report for x in pet_logic)
+    assert "Clinical certainty mismatch" in pet_logic[0]["explanation"]
+    assert "Potential significant omission" in pet_logic[1]["explanation"]
+    # Qualifier retained, effusion covered => no invented warning.
+    corrected_pet=pet_report.replace(
+        "History of prostatic malignancy on hormonal therapy.",
+        "History of possible prostatic malignancy on hormonal therapy."
+    ).replace(
+        "Mild metabolic regression of the left upper lung mass.\r",
+        "Mild metabolic regression of the left upper lung mass.\r"
+        "Progression of mild pericardial effusion.\r")
+    assert independent_clinical_coverage_groups([corrected_pet])==[[]]
+    # Completely unqualified history, and stable effusion, should not create
+    # clinical verification flags merely to inflate a count.
+    quiet_pet=pet_report.replace("? prostatic","prostatic").replace(
+        "Progression of the mild pericardial effusion.",
+        "Stable small pericardial effusion.")
+    assert independent_clinical_coverage_groups([quiet_pet])==[[]]
+    # Preserve both issues when paragraphs are in different report chunks.
+    cut=pet_report.index("Findings:")
+    pieces=[pet_report[:cut],pet_report[cut:]]
+    split_logic=independent_clinical_coverage_groups(pieces)
+    assert sum(len(x) for x in split_logic)==2
+
     # V12 zero-Logic regression: an explicit positive Findings and explicit
     # negation in Conclusion must remain visible independently of AI output.
     definite=("Findings:\rBilateral renal cortical cysts measuring 2 cm.\r"
