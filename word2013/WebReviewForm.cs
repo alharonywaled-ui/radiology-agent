@@ -320,7 +320,10 @@ namespace RadiologyAgent {
         if(perf==null)return;
         string[] fields={"elapsed_ms","http_requests","cache_hits",
           "retries","rate_limits","backoff_ms","json_generation_retries",
-          "suppressed_partial_logic","concurrency"};
+          "suppressed_partial_logic","supported_conclusion_claims",
+          "unsupported_conclusion_candidates","direct_conflicts",
+          "logic_proposed","logic_returned","clinical_audit_completed",
+          "concurrency"};
         var safe=new StringBuilder(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
         safe.Append(" host_ms=").Append(Math.Max(0,hostElapsedMs));
         safe.Append(" worker_mb=").Append(Math.Max(0,memoryMb));
