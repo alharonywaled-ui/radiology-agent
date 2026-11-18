@@ -607,8 +607,8 @@ def patient_anatomy_consistency_groups(chunks):
         line=before.split("\r")[-1].split("\n")[-1]
         after=findings[m.end():m.end()+80]
         if (_NEGATED_ANATOMY.search(line) or
-            re.search(r"(?i)\\b(?:family\\s+history|family\\s+member|"
-                      r"relative|mother|father|sister|brother)\\b",after)):
+            re.search(r"(?i)\b(?:family\s+history|family\s+member|"
+                      r"relative|mother|father|sister|brother)\b",after)):
             continue
         term=m.group(0)
         if term.lower() in used:
