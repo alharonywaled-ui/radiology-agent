@@ -46,7 +46,7 @@ jobs:
       - name: Build direct Groq API worker
         shell: pwsh
         run: |
-          python -m pip install --disable-pip-version-check pyinstaller
+          python -m pip install --disable-pip-version-check pyinstaller 'urllib3>=2.2,<3'
           if ($LASTEXITCODE -ne 0) { throw 'PyInstaller dependencies failed' }
           python word2013/GroqReviewWorker.py --self-test
           if ($LASTEXITCODE -ne 0) { throw 'Offline retry/backoff regression tests failed' }
