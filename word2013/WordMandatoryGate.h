@@ -358,7 +358,7 @@ public:
   // Strict gate: native Save, Save As and Print are all blocked until
   // this document's Clear Both action is accepted. No Save Now bypass.
   static bool ShouldCancel(bool unlocked,bool,bool) {
-    return !unlocked;
+    return EnforcementEnabled()&&!unlocked;
   }
   static bool EnforcementEnabled(){
     HKEY key=nullptr;
