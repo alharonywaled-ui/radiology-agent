@@ -39,6 +39,14 @@ public:
 };
 static const GUID clsid={0x7B918AD1,0x1C42,0x4B73,{0xA4,0xBB,0x9F,0xC8,0x37,0x43,0xDD,0x6E}};
 static const GUID iid={0x000C0396,0x0000,0x0000,{0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
+static bool SetMandatoryOption(DWORD enabled) {
+  HKEY key=nullptr;
+  if(RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,nullptr,0,
+      KEY_SET_VALUE,nullptr,&key,nullptr)!=ERROR_SUCCESS)return false;
+  LONG status=RegSetValueExW(key,L"MandatoryReviewEnabled",0,REG_DWORD,
+      reinterpret_cast<const BYTE*>(&enabled),sizeof(enabled));
+  RegCloseKey(key);return status==ERROR_SUCCESS;
+}
 int main(){
   HRESULT hr=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
   if(FAILED(hr))return 10;
@@ -133,7 +141,8 @@ int main(){
   }
   // V10.9 strict policy: no Save Now bypass before Clear Both; after release
   // Save, Save As and Print remain enabled.
-  bool policy=HaronexMandatory::Gate::EnforcementEnabled() &&
+  bool policy=SetMandatoryOption(1) &&
+    HaronexMandatory::Gate::EnforcementEnabled() &&
     HaronexMandatory::Gate::ShouldCancel(false,true,false) &&
     HaronexMandatory::Gate::ShouldCancel(false,false,false) &&
     HaronexMandatory::Gate::ShouldCancel(false,true,true) &&
@@ -204,8 +213,34 @@ int main(){
   DISPPARAMS malformed={nullptr,nullptr,0,0};
   bool safe=SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
                       &malformed,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
+  // Installer option OFF allows Save/Save As and Print. When ON, the
+  // shared policy blocks both operations until the document is released.
+  FakeDoc* lockedForTest=new FakeDoc();
+  VARIANT_BOOL disabledSaveCancel=VARIANT_FALSE,disabledPrintCancel=VARIANT_FALSE;
+  VARIANTARG disabledSave[3];for(int i=0;i<3;++i)VariantInit(&disabledSave[i]);
+  disabledSave[0].vt=VT_DISPATCH;disabledSave[0].pdispVal=lockedForTest;
+  disabledSave[1].vt=VT_BYREF|VT_BOOL;disabledSave[1].pboolVal=&saveAsUI;
+  disabledSave[2].vt=VT_BYREF|VT_BOOL;disabledSave[2].pboolVal=&disabledSaveCancel;
+  DISPPARAMS disabledSaveArgs={disabledSave,nullptr,3,0};
+  VARIANTARG disabledPrint[2];for(int i=0;i<2;++i)VariantInit(&disabledPrint[i]);
+  disabledPrint[0].vt=VT_DISPATCH;disabledPrint[0].pdispVal=lockedForTest;
+  disabledPrint[1].vt=VT_BYREF|VT_BOOL;disabledPrint[1].pboolVal=&disabledPrintCancel;
+  DISPPARAMS disabledPrintArgs={disabledPrint,nullptr,2,0};
+  bool optionalOff=SetMandatoryOption(0)&&!HaronexMandatory::Gate::EnforcementEnabled()&&
+    !HaronexMandatory::Gate::ShouldCancel(false,true,false)&&
+    !HaronexMandatory::Gate::ShouldCancel(false,false,true)&&
+    SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,&disabledSaveArgs,nullptr,nullptr,nullptr))&&
+    disabledSaveCancel==VARIANT_FALSE&&
+    SUCCEEDED(gate.Invoke(102,IID_NULL,0,DISPATCH_METHOD,&disabledPrintArgs,nullptr,nullptr,nullptr))&&
+    disabledPrintCancel==VARIANT_FALSE;
+  bool optionalOn=SetMandatoryOption(1)&&HaronexMandatory::Gate::EnforcementEnabled()&&
+    HaronexMandatory::Gate::ShouldCancel(false,true,false)&&
+    HaronexMandatory::Gate::ShouldCancel(false,false,true)&&
+    !HaronexMandatory::Gate::ShouldCancel(true,true,false);
+  SetMandatoryOption(0);
+  lockedForTest->Release();
   gate.Detach();releasedForTest->Release();other->Release();
-  if(!separated||!saved||!printed||!safe||!forwardSaved||!forwardPrinted||!invalidFailsOpen||!correctCancelOnly) {
+  if(!separated||!saved||!printed||!safe||!forwardSaved||!forwardPrinted||!invalidFailsOpen||!correctCancelOnly||!optionalOff||!optionalOn) {
     wprintf(L"V1010_WORD_EVENT_RELEASE_FAILED\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 40;
   }
