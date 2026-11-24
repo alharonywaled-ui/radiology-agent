@@ -137,7 +137,6 @@ begin
   MandatoryCheck.Caption :=
     'Enable Mandatory Review';
   MandatoryCheck.Checked := False;
-  MandatoryCheck.WantReturns := False;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
