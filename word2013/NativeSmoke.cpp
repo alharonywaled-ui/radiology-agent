@@ -213,8 +213,8 @@ int main(){
   DISPPARAMS malformed={nullptr,nullptr,0,0};
   bool safe=SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
                       &malformed,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
-  // Installer option OFF allows native Save/Save As and Print; ON blocks
-  // both operations on an unreleased document until Clear Both.
+  // Installer option OFF allows Save/Save As and Print. When ON, the
+  // shared policy blocks both operations until the document is released.
   FakeDoc* lockedForTest=new FakeDoc();
   VARIANT_BOOL disabledSaveCancel=VARIANT_FALSE,disabledPrintCancel=VARIANT_FALSE;
   VARIANTARG disabledSave[3];for(int i=0;i<3;++i)VariantInit(&disabledSave[i]);
@@ -227,25 +227,16 @@ int main(){
   disabledPrint[1].vt=VT_BYREF|VT_BOOL;disabledPrint[1].pboolVal=&disabledPrintCancel;
   DISPPARAMS disabledPrintArgs={disabledPrint,nullptr,2,0};
   bool optionalOff=SetMandatoryOption(0)&&!HaronexMandatory::Gate::EnforcementEnabled()&&
+    !HaronexMandatory::Gate::ShouldCancel(false,true,false)&&
+    !HaronexMandatory::Gate::ShouldCancel(false,false,true)&&
     SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,&disabledSaveArgs,nullptr,nullptr,nullptr))&&
     disabledSaveCancel==VARIANT_FALSE&&
     SUCCEEDED(gate.Invoke(102,IID_NULL,0,DISPATCH_METHOD,&disabledPrintArgs,nullptr,nullptr,nullptr))&&
     disabledPrintCancel==VARIANT_FALSE;
-  VARIANT_BOOL enabledSaveCancel=VARIANT_FALSE,enabledPrintCancel=VARIANT_FALSE;
-  VARIANTARG enabledSave[3];for(int i=0;i<3;++i)VariantInit(&enabledSave[i]);
-  enabledSave[0].vt=VT_DISPATCH;enabledSave[0].pdispVal=lockedForTest;
-  enabledSave[1].vt=VT_BYREF|VT_BOOL;enabledSave[1].pboolVal=&saveAsUI;
-  enabledSave[2].vt=VT_BYREF|VT_BOOL;enabledSave[2].pboolVal=&enabledSaveCancel;
-  DISPPARAMS enabledSaveArgs={enabledSave,nullptr,3,0};
-  VARIANTARG enabledPrint[2];for(int i=0;i<2;++i)VariantInit(&enabledPrint[i]);
-  enabledPrint[0].vt=VT_DISPATCH;enabledPrint[0].pdispVal=lockedForTest;
-  enabledPrint[1].vt=VT_BYREF|VT_BOOL;enabledPrint[1].pboolVal=&enabledPrintCancel;
-  DISPPARAMS enabledPrintArgs={enabledPrint,nullptr,2,0};
   bool optionalOn=SetMandatoryOption(1)&&HaronexMandatory::Gate::EnforcementEnabled()&&
-    SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,&enabledSaveArgs,nullptr,nullptr,nullptr))&&
-    enabledSaveCancel==VARIANT_TRUE&&
-    SUCCEEDED(gate.Invoke(102,IID_NULL,0,DISPATCH_METHOD,&enabledPrintArgs,nullptr,nullptr,nullptr))&&
-    enabledPrintCancel==VARIANT_TRUE;
+    HaronexMandatory::Gate::ShouldCancel(false,true,false)&&
+    HaronexMandatory::Gate::ShouldCancel(false,false,true)&&
+    !HaronexMandatory::Gate::ShouldCancel(true,true,false);
   SetMandatoryOption(0);
   lockedForTest->Release();
   gate.Detach();releasedForTest->Release();other->Release();
