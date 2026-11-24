@@ -135,7 +135,7 @@ begin
   MandatoryCheck.Width := MandatoryPage.SurfaceWidth;
   MandatoryCheck.Height := ScaleY(44);
   MandatoryCheck.Caption :=
-    'Enable Mandatory Review (Require Review Text + Clear Both before Save, Save As or Print)';
+    'Enable Mandatory Review';
   MandatoryCheck.Checked := False;
   MandatoryCheck.WantReturns := False;
 end;
