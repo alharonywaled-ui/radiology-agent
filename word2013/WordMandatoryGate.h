@@ -358,9 +358,18 @@ public:
   // Strict gate: native Save, Save As and Print are all blocked until
   // this document's Clear Both action is accepted. No Save Now bypass.
   static bool ShouldCancel(bool unlocked,bool,bool) {
-    return !unlocked;
+    return EnforcementEnabled()&&!unlocked;
   }
-  static bool EnforcementEnabled(){return true;}
+  static bool EnforcementEnabled(){
+    HKEY key=nullptr;
+    DWORD enabled=0,size=sizeof(enabled),type=REG_DWORD;
+    if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,
+                     KEY_QUERY_VALUE,&key)!=ERROR_SUCCESS)return false;
+    LONG status=RegQueryValueExW(key,L"MandatoryReviewEnabled",nullptr,
+      &type,reinterpret_cast<BYTE*>(&enabled),&size);
+    RegCloseKey(key);
+    return status==ERROR_SUCCESS&&type==REG_DWORD&&enabled==1;
+  }
   static bool ValidCancel(VARIANTARG& arg) {
     if(arg.vt==(VT_BYREF|VT_BOOL)&&arg.pboolVal)return true;
     if(arg.vt==(VT_BYREF|VT_VARIANT)&&arg.pvarVal) {
@@ -409,6 +418,10 @@ public:
     DiagnosticValue(L"LastArg1Type",args&&args->rgvarg&&args->cArgs>1?args->rgvarg[1].vt:0);
     DiagnosticValue(L"LastArg2Type",args&&args->rgvarg&&args->cArgs>2?args->rgvarg[2].vt:0);
     const bool saving=dispid==save_,printing=dispid==print_;
+    if((saving||printing)&&!EnforcementEnabled()) {
+      IncrementDiagnostic(saving?L"SaveAllowedCount":L"PrintAllowedCount");
+      return S_OK;
+    }
     if(saving) {
       DiagnosticValue(L"SaveArgCount",args?args->cArgs:0);
       DiagnosticValue(L"SaveArg0Type",args&&args->rgvarg&&args->cArgs>0?args->rgvarg[0].vt:0);

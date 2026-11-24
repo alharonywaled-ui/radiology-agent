@@ -1,5 +1,5 @@
 #define AppName "Haronex Radiology Agent for Word 2013"
-#define AppVersion "10.19.0"
+#define AppVersion "11.12.0"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
 DefaultGroupName=Haronex
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_Groq_Qwen38_V12_1_Setup
+OutputBaseFilename=Haronex_Word2013_Groq_Qwen38_V11_12_Mandatory_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -34,6 +34,8 @@ Root: HKCU; Subkey: "Software\Classes\CLSID\{{D1FBEFD5-3B43-4516-9B7B-CDEB47AB0F
 var
   KeyPage: TInputQueryWizardPage;
   ConsentPage: TInputOptionWizardPage;
+  MandatoryPage: TWizardPage;
+  MandatoryCheck: TNewCheckBox;
 
 // Embedded official Microsoft .NET Framework 4.8 offline redistributable.
 // No Visual Studio or VC++ redistributable required: native DLL uses /MT.
@@ -122,6 +124,19 @@ begin
     False, False);
   ConsentPage.Add('I am authorized to send these medical report texts to Groq for proofreading.');
   ConsentPage.Values[0] := False;
+
+  MandatoryPage := CreateCustomPage(ConsentPage.ID,
+    'Mandatory Review',
+    'Choose whether saving and printing require a completed review.');
+  MandatoryCheck := TNewCheckBox.Create(MandatoryPage);
+  MandatoryCheck.Parent := MandatoryPage.Surface;
+  MandatoryCheck.Left := ScaleX(0);
+  MandatoryCheck.Top := ScaleY(12);
+  MandatoryCheck.Width := MandatoryPage.SurfaceWidth;
+  MandatoryCheck.Height := ScaleY(44);
+  MandatoryCheck.Caption :=
+    'Enable Mandatory Review';
+  MandatoryCheck.Checked := False;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -158,6 +173,11 @@ begin
     Exit;
   end;
   if CurStep <> ssPostInstall then Exit;
+  // Default OFF, including silent installs. When enabled, the native Word
+  // event sink blocks Save, Save As and Print until Review Text + Clear Both.
+  if not RegWriteDWordValue(HKCU, 'Software\\Haronex',
+       'MandatoryReviewEnabled', Ord(MandatoryCheck.Checked)) then
+    RaiseException('Could not save Mandatory Review installation setting.');
   if WizardSilent or HasExistingHaronexAuthorization then Exit;
   StagingPath := ExpandConstant('{localappdata}\RadiologyAgent\pending-groq.key');
   ForceDirectories(ExtractFileDir(StagingPath));
