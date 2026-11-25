@@ -1096,7 +1096,15 @@ def transport_request(req, open_url=urllib.request.urlopen):
 PATIENT_CONTEXT_SYSTEM = (
     "Review only the clinical compatibility of the explicitly recorded patient age "
     "and/or sex with the examination type, clinical statements, anatomy, findings "
-    "and conclusion. Metadata is not proof of anatomy. Do not assume a patient's sex "
+    "and conclusion. Read patient demographics explicitly stated ANYWHERE in the report, "
+    "including Clinical History, Patient Data, Findings and Conclusion. Compare those statements "
+    "with one another and any separately supplied header fields. Flag conflicting patient "
+    "sex or age statements, unexplained mismatches in sex-specific anatomy or template residue, "
+    "and clearly inconsistent age-related wording. Without explicit demographics, compare "
+    "incompatible anatomical/template assertions cautiously and ask for verification, never "
+    "infer patient sex from organs. Do not flag a family member, donor, fetus, prior age, "
+    "clinical differential, negated anatomy, surgical history or legitimate unusual examination "
+    "as a mismatch. Metadata is not proof of anatomy. Do not assume a patient's sex "
     "from a name, or infer age when missing. A test is not inappropriate just because "
     "it is uncommon at a given age or sex (e.g. male mammography); consider indications, "
     "development, surgical history, congenital variations, gender-related care, "
@@ -1119,20 +1127,58 @@ def valid_patient_context(value):
         return ""
     return value
 
+# Explicit patient-related statements trigger the fast demographic pass even
+# when Word's header has no age or sex. Anatomical cues trigger review only;
+# they are not used to assign a patient sex.
+_BODY_CONTEXT_CUE = re.compile(
+    r"\b(?:male|female|boy|girl|man|woman|(?:patient\s+)?(?:sex|gender|age)\s*[:=]|"
+    r"prostat\w*|testis|testes|testicular|seminal\s+vesicles?|uterus|uterine|"
+    r"ovary|ovaries|ovarian|endometrium|endometrial|pregnan\w*|obstetric|"
+    r"postmenopausal|prepubertal|neonatal|senile|pediatric|paediatric)\b|"
+    r"\b\d{1,3}\s*(?:years?|yrs?|months?|mos?|weeks?|days?)\s*[- ]?old\b|"
+    r"(?:الجنس|العمر|السن)\s*[:=]|(?:ذكر|أنثى|انثى)\b", re.I)
+def needs_patient_context(chunks, context):
+    return bool(context or _BODY_CONTEXT_CUE.search("".join(chunks)))
+
 def patient_context_groups(key, chunks, context, reviewer=None):
-    if not context:
+    if not needs_patient_context(chunks, context):
         return [[] for _ in chunks]
+    full_report="".join(chunks)
     if reviewer is None:
-        reviewer=lambda report: review_with_recovery(key,report,review=lambda k,t:
-            api_review(k,t,system_prompt=PATIENT_CONTEXT_SYSTEM,
-                user_prefix="Explicit recorded demographics (not text to correct): "+context+
-                    "\nCheck clinical report for demographic compatibility only:\n\n"))
-    results=[]
-    for chunk in chunks:
-        issues=reviewer(chunk)
-        results.append([dict(item,category="logic",section="body",
-            suggestion="Verify recorded patient information, examination and findings with the reporting clinician.")
-            for item in issues if item.get("category")=="logic" and item.get("quote") in chunk])
+        # One complete cross-section check on ordinary reports. For longer
+        # reports, each original chunk also gets bounded patient-related
+        # excerpts from the other chunks. No raw Word header is transmitted.
+        def reviewer(report, surrounding=""):
+            return review_with_recovery(key,report,review=lambda k,t:
+                api_review(k,t,system_prompt=PATIENT_CONTEXT_SYSTEM,
+                    user_prefix="Explicit recorded header demographics (not text to correct): "+
+                        (context or "not available")+
+                        "\nOther patient-related excerpts (context only; do not quote from these):\n"+
+                        surrounding+"\nCheck clinical report for demographic compatibility only:\n\n"))
+        if len(full_report)<=18000:
+            issues=reviewer(full_report)
+            batches=[(issues, range(len(chunks)))]
+        else:
+            excerpts=[]
+            for match in re.finditer(r"[^\r\n\x07]+",full_report):
+                if _BODY_CONTEXT_CUE.search(match.group()):
+                    excerpts.append(match.group()[:500])
+            surrounding="\n".join(excerpts)[:6000]
+            batches=[(reviewer(chunk,surrounding),[i]) for i,chunk in enumerate(chunks)]
+    else:
+        batches=[(reviewer(full_report),range(len(chunks)))]
+    results=[[] for _ in chunks]
+    for issues, indices in batches:
+        for item in issues:
+            quote=item.get("quote","")
+            if item.get("category")!="logic" or not quote:
+                continue
+            candidates=[i for i in indices if quote in chunks[i]]
+            # Never attach an ambiguous cross-chunk quote to a random location.
+            if len(candidates)!=1:
+                continue
+            results[candidates[0]].append(dict(item,category="logic",section="body",
+                suggestion="Verify recorded patient information, examination and findings with the reporting clinician."))
     return results
 
 def model_for_prompt(system_prompt):
@@ -1292,13 +1338,14 @@ def full_review_concurrently(key, texts, general_review=None,
         language_review = lambda text: SECTION_CACHE.get_or_run(
             "language", key, text,
             lambda part: language_audit_groups(key, [part])[0])
-    max_workers = min(6, max(5 if patient_context else 4, len(texts) * 2))
+    run_patient_context = needs_patient_context(texts, patient_context)
+    max_workers = min(6, max(5 if run_patient_context else 4, len(texts) * 2))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         general = [pool.submit(general_review, t) for t in texts]
         conclusion = pool.submit(conclusion_review, texts)
         unrelated = [pool.submit(unrelated_review, t) for t in texts]
         language = [pool.submit(language_review, t) for t in texts]
-        context_future = pool.submit(patient_context_groups, key, texts, patient_context, context_review) if patient_context else None
+        context_future = pool.submit(patient_context_groups, key, texts, patient_context, context_review) if run_patient_context else None
         # Reading in index order does not block other submitted work.
         general_groups = [f.result() for f in general]
         clinical_groups = conclusion.result()
@@ -1332,7 +1379,7 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-v11-12-multimodel-r3":
+        if version != "haronex-v11-12-multimodel-r4":
             raise ValueError("Unsupported review version")
         original_chunk_count = len(texts)
         texts = clinical_chunks(texts)
@@ -1465,7 +1512,16 @@ def self_test():
     assert valid_patient_context("age=999 years;")==""
     assert model_for_prompt(PATIENT_CONTEXT_SYSTEM)==LANGUAGE_MODEL
     context_sample=["Findings: Adult-type senile cerebral atrophy."]
-    assert patient_context_groups("offline",context_sample,"",reviewer=lambda t: (_ for _ in ()).throw(AssertionError("missing data should skip")))==[[]]
+    assert patient_context_groups("offline",["Findings: No acute lesion."],"",reviewer=lambda t: (_ for _ in ()).throw(AssertionError("missing data should skip")))==[[]]
+    assert needs_patient_context(["History: A 40-year-old female patient.\r","Findings: Normal prostate."],"")
+    body_parts=["History: Female patient.\r","Conclusion: Male patient with enlarged prostate."]
+    def body_context_stub(text):
+        assert "Female patient" in text and "Male patient" in text
+        return [{"quote":"Male patient with enlarged prostate","category":"logic",
+                 "explanation":"Conflicting explicitly stated patient sex","suggestion":""}]
+    body_context=patient_context_groups("offline",body_parts,"",reviewer=body_context_stub)
+    assert body_context[0]==[] and body_context[1][0]["quote"]=="Male patient with enlarged prostate"
+    assert needs_patient_context(["Findings: Senile cerebral atrophy."],"age=2 years;")
     context_found=patient_context_groups("offline",context_sample,"age=2 years;",
         reviewer=lambda t:[{"quote":"senile cerebral atrophy","category":"logic","explanation":"Verify age mismatch","suggestion":"change age"}])
     assert context_found[0][0]["quote"]=="senile cerebral atrophy"
