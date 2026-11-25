@@ -20,7 +20,8 @@ MODEL = "qwen/qwen3.8-27b"
 LOGIC_MODEL = "openai/gpt-oss-120b"
 LANGUAGE_MODEL = "openai/gpt-oss-20b"
 RETRY_DELAYS = (2, 6, 15)  # Bounded exponential backoff, four total HTTP attempts.
-MAX_COMPLETION_TOKENS = 8192
+MAX_COMPLETION_TOKENS = 8192  # Initial provider request, not a review/issue cap.
+MODEL_OUTPUT_LIMITS = {LOGIC_MODEL: 65536, LANGUAGE_MODEL: 65536, MODEL: 16384}
 MIN_SPLIT_CHARS = 600
 MAX_SPLIT_DEPTH = 3
 FORMAT_RETRIES = 1
@@ -1264,8 +1265,22 @@ def model_for_prompt(system_prompt):
 def api_review(key, text, requester=transport_request, sleeper=time.sleep,
                system_prompt=SYSTEM, user_prefix="Review this report completely:\n\n"):
     model = model_for_prompt(system_prompt)
+    def run_model(selected):
+        # Uniform initial allowance for all tasks. Expand when the provider
+        # reports truncation, up to that model's supported maximum. If the
+        # account rejects the size, recover by splitting, never accept partial JSON.
+        limit = MAX_COMPLETION_TOKENS
+        while True:
+            try:
+                return api_review_model(key, text, requester, sleeper, system_prompt,
+                                        user_prefix, selected, completion_limit=limit)
+            except ReviewFailure as exc:
+                if exc.code != "GROQ_TRUNCATED_LENGTH" or limit >= MODEL_OUTPUT_LIMITS[selected]:
+                    raise
+                limit = min(limit * 2, MODEL_OUTPUT_LIMITS[selected])
+                metric("completion_expansions")
     try:
-        return api_review_model(key, text, requester, sleeper, system_prompt, user_prefix, model)
+        return run_model(model)
     except ReviewFailure as exc:
         fallback = exc.retryable or exc.code in (
             "GROQ_MODEL_404", "GROQ_INVALID_JSON", "GROQ_INVALID_QUOTE",
@@ -1273,9 +1288,10 @@ def api_review(key, text, requester=transport_request, sleeper=time.sleep,
         if requester is not transport_request or not fallback:
             raise
         metric("model_fallbacks")
-        return api_review_model(key, text, requester, sleeper, system_prompt, user_prefix, MODEL)
+        return run_model(MODEL)
 
-def api_review_model(key, text, requester, sleeper, system_prompt, user_prefix, model):
+def api_review_model(key, text, requester, sleeper, system_prompt, user_prefix, model,
+                     completion_limit=MAX_COMPLETION_TOKENS):
     properties = {name: {"type": "string"} for name in ("quote", "explanation", "suggestion")}
     properties["category"] = {"type": "string", "enum": ["logic", "language", "unrelated"]}
     issue = {"type": "object", "properties": properties,
@@ -1300,7 +1316,7 @@ def api_review_model(key, text, requester, sleeper, system_prompt, user_prefix, 
             "name": "haronex_review", "strict": True, "schema": schema}},
         "reasoning_effort": "medium" if model == LOGIC_MODEL else "low",
         "temperature": 0.2,
-        "max_completion_tokens": 4096 if system_prompt.startswith(INTELLIGENT_VALIDATION_SYSTEM) else MAX_COMPLETION_TOKENS
+        "max_completion_tokens": completion_limit
     }
     if model == MODEL:
         request_body["reasoning_format"] = "hidden"
@@ -1380,7 +1396,7 @@ def review_with_recovery(key, text, review=api_review, depth=0):
     try:
         return review(key, text)
     except ReviewFailure as exc:
-        if exc.code != "GROQ_TRUNCATED_LENGTH" or depth >= MAX_SPLIT_DEPTH:
+        if exc.code not in ("GROQ_TRUNCATED_LENGTH", "GROQ_HTTP_413", "GROQ_REQUEST_400_CONTEXT") or depth >= MAX_SPLIT_DEPTH:
             raise
         pieces = split_report_text(text)
         if pieces is None:
@@ -1577,7 +1593,7 @@ def main(raw_request=None):
                       "GROQ_ISSUES_NOT_ARRAY", "GROQ_INVALID_ITEM",
                       "GROQ_INVALID_QUOTE", "GROQ_INVALID_CATEGORY",
                       "GROQ_INVALID_WORDING", "GROQ_ALL_ISSUES_INVALID",
-                      "GROQ_HTTP_408", "GROQ_HTTP_429", "GROQ_HTTP_500",
+                      "GROQ_HTTP_408", "GROQ_HTTP_413", "GROQ_HTTP_429", "GROQ_HTTP_500",
                       "GROQ_HTTP_502", "GROQ_HTTP_503", "GROQ_HTTP_504",
                       "GROQ_SERVER_OVER_CAPACITY", "GROQ_CLIENT_DISCONNECTED",
                       "GROQ_CLINICAL_CONCLUSION_NOT_FOUND",
@@ -1963,6 +1979,26 @@ def self_test():
     assert model_for_prompt(LANGUAGE_SYSTEM) == LANGUAGE_MODEL
     assert model_for_prompt(OFF_TOPIC_SYSTEM) == LANGUAGE_MODEL
     assert MAX_COMPLETION_TOKENS == 8192
+    assert MODEL_OUTPUT_LIMITS[LOGIC_MODEL] == MODEL_OUTPUT_LIMITS[LANGUAGE_MODEL] == 65536
+    assert MODEL_OUTPUT_LIMITS[MODEL] == 16384
+    token_requests=[]
+    def expanding_mock(request):
+        token_requests.append(json.loads(request.data.decode("utf-8"))["max_completion_tokens"])
+        choice={"finish_reason":"length" if len(token_requests)==1 else "stop",
+                "message":{"content":"{\"issues\":[]}"}}
+        return json.dumps({"choices":[choice]}).encode("utf-8")
+    assert api_review("gsk_dummy",sample,requester=expanding_mock,
+        sleeper=lambda _:None,system_prompt=INTELLIGENT_VALIDATION_SYSTEM)==[]
+    assert token_requests==[8192,16384]
+    long_parts=["Findings: "+("Normal anatomy. "*350)+"\r",
+                "Comparison: "+("Stable appearance. "*300)+"\r",
+                "Conclusion: "+("No acute findings. "*250)+"Final laterality conflict."]
+    def long_mock(report):
+        assert report=="".join(long_parts)
+        return [{"quote":"Final laterality conflict.","category":"logic",
+                 "explanation":"verify conflict","suggestion":""}]
+    long_result=intelligent_validation_groups("offline",long_parts,reviewer=long_mock)
+    assert long_result[2][0]["quote"]=="Final laterality conflict."
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
     except ValueError:

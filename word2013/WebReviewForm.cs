@@ -327,7 +327,7 @@ namespace RadiologyAgent {
           "suppressed_partial_logic","supported_conclusion_claims",
           "unsupported_conclusion_candidates","direct_conflicts",
           "logic_proposed","logic_returned","clinical_audit_completed",
-          "clinical_coverage_flags","patient_context_completed","patient_context_skipped","model_120b","model_20b","model_qwen","model_fallbacks","intelligent_validation_completed","intelligent_validation_findings","validation_ambiguous_skipped",
+          "clinical_coverage_flags","patient_context_completed","patient_context_skipped","model_120b","model_20b","model_qwen","model_fallbacks","intelligent_validation_completed","intelligent_validation_findings","validation_ambiguous_skipped","completion_expansions",
           "concurrency"};
         var safe=new StringBuilder(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
         safe.Append(" host_ms=").Append(Math.Max(0,hostElapsedMs));
