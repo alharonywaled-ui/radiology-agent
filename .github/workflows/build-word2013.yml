@@ -138,6 +138,24 @@ jobs:
           & word2013/bin/NativeSmoke.exe
           if ($LASTEXITCODE -ne 0) { throw "Native x86 COM or Ribbon test failed: $LASTEXITCODE" }
           Write-Host 'GROQ_QWEN_INSTALL_SMOKE_TEST_PASSED'
+      - name: Build enterprise machine-wide installer and test domain denial
+        shell: pwsh
+        run: |
+          $compiler=Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          & $compiler word2013/installer_enterprise.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Enterprise installer compile failed' }
+          $enterprise='word2013/output/Haronex_Word2013_V11_12_10_Enterprise_Setup.exe'
+          if (!(Test-Path $enterprise)) { throw 'Enterprise setup missing' }
+          & word2013/bin/RadiologyAgent.KeySetup.exe --authorize-uninstall
+          if ($LASTEXITCODE -eq 0) { throw 'Non-domain CI administrator unexpectedly authorized' }
+          $global:LASTEXITCODE=0
+          Write-Host 'ENTERPRISE_UNINSTALL_NON_DOMAIN_DENIED'
+      - name: Upload enterprise Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Haronex_Word2013_V11_12_10_Enterprise
+          path: word2013/output/Haronex_Word2013_V11_12_10_Enterprise_Setup.exe
+          if-no-files-found: error
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@v4
         with:

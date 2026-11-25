@@ -1,0 +1,101 @@
+#define AppName "Haronex Enterprise for Word 2013"
+#define AppVersion "11.12.10"
+[Setup]
+AppId={{56B8B1AF-99B7-4580-821E-276FF00C79B6}
+AppName={#AppName}
+AppVersion={#AppVersion}
+DefaultDirName={pf32}\Haronex
+DefaultGroupName=Haronex Enterprise
+OutputDir=output
+OutputBaseFilename=Haronex_Word2013_V11_12_10_Enterprise_Setup
+Compression=lzma2
+SolidCompression=yes
+PrivilegesRequired=admin
+DisableDirPage=yes
+UsePreviousAppDir=no
+DisableProgramGroupPage=yes
+CloseApplications=yes
+WizardStyle=modern
+UninstallDisplayName=Haronex Enterprise (Word 2013 x86)
+UninstallDisplayIcon={app}\RadiologyAgent.ReviewHost.exe
+
+[Files]
+Source: "bin\NDP48-x86-x64-AllOS-ENU.exe"; Flags: dontcopy
+Source: "bin\RadiologyAgent.KeySetup.exe"; Flags: dontcopy
+Source: "bin\RadiologyAgent.KeySetup.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\RadiologyAgent.NativeShim.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\RadiologyAgent.ReviewHost.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\HaronexGroqWorker\HaronexGroqWorker.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bin\HaronexGroqWorker\_HaronexRuntime\*"; DestDir: "{app}\_HaronexRuntime"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Registry]
+Root: HKLM32; Subkey: "Software\Haronex\Enterprise"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletekey
+Root: HKLM32; Subkey: "Software\Classes\RadiologyAgent.Word2013.Safe"; ValueType: string; ValueData: "Radiology Agent for Word 2013"; Flags: uninsdeletekey
+Root: HKLM32; Subkey: "Software\Classes\RadiologyAgent.Word2013.Safe\CLSID"; ValueType: string; ValueData: "{{7B918AD1-1C42-4B73-A4BB-9FC83743DD6E}"
+Root: HKLM32; Subkey: "Software\Classes\CLSID\{{7B918AD1-1C42-4B73-A4BB-9FC83743DD6E}"; ValueType: string; ValueData: "RadiologyAgent.Word2013.Safe"; Flags: uninsdeletekey
+Root: HKLM32; Subkey: "Software\Classes\CLSID\{{7B918AD1-1C42-4B73-A4BB-9FC83743DD6E}\InprocServer32"; ValueType: string; ValueData: "{app}\RadiologyAgent.NativeShim.dll"
+Root: HKLM32; Subkey: "Software\Classes\CLSID\{{7B918AD1-1C42-4B73-A4BB-9FC83743DD6E}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"
+Root: HKLM32; Subkey: "Software\Classes\CLSID\{{7B918AD1-1C42-4B73-A4BB-9FC83743DD6E}\ProgID"; ValueType: string; ValueData: "RadiologyAgent.Word2013.Safe"
+Root: HKLM32; Subkey: "Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word2013.Safe"; ValueType: string; ValueName: "FriendlyName"; ValueData: "Radiology Agent"; Flags: uninsdeletekey
+Root: HKLM32; Subkey: "Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word2013.Safe"; ValueType: string; ValueName: "Description"; ValueData: "AI report proofreading. Clinical verification required."
+Root: HKLM32; Subkey: "Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word2013.Safe"; ValueType: dword; ValueName: "LoadBehavior"; ValueData: "3"
+
+[Icons]
+Name: "{commonprograms}\Haronex Enterprise\Configure my account"; Filename: "{app}\RadiologyAgent.KeySetup.exe"; Parameters: "--configure"
+Name: "{commonprograms}\Haronex Enterprise\Uninstall"; Filename: "{uninstallexe}"
+
+[Code]
+function HasDotNet48: Boolean;
+var ReleaseNumber: Cardinal;
+begin
+  Result := RegQueryDWordValue(HKLM, 'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full', 'Release', ReleaseNumber) and (ReleaseNumber >= 528040);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var ExitCode: Integer;
+begin
+  Result := '';
+  NeedsRestart := False;
+  // Machine location must not be redirected into a user-writable directory.
+  if CompareText(ExpandConstant('{app}'), ExpandConstant('{pf32}\Haronex')) <> 0 then begin
+    Result := 'Haronex Enterprise must be installed in Program Files (x86)\Haronex.';
+    Exit;
+  end;
+  if not HasDotNet48 then begin
+    ExtractTemporaryFile('NDP48-x86-x64-AllOS-ENU.exe');
+    if not Exec(ExpandConstant('{tmp}\NDP48-x86-x64-AllOS-ENU.exe'), '/q /norestart', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) then begin
+      Result := 'Could not start .NET Framework 4.8 setup.';
+      Exit;
+    end;
+    if (ExitCode = 3010) or (ExitCode = 1641) then begin
+      NeedsRestart := True;
+      Result := 'Restart Windows and rerun Haronex Enterprise setup.';
+      Exit;
+    end;
+    if not HasDotNet48 then begin
+      Result := '.NET Framework 4.8 prerequisite not detected.';
+      Exit;
+    end;
+  end;
+  ExtractTemporaryFile('RadiologyAgent.KeySetup.exe');
+  if not Exec(ExpandConstant('{tmp}\RadiologyAgent.KeySetup.exe'), '--check-domain', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) then begin
+    Result := 'Unable to verify the joined domain. Contact IT.';
+    Exit;
+  end;
+  if ExitCode <> 0 then begin
+    Result := 'Haronex Enterprise requires a computer joined to dscan.corp and domain connectivity.';
+    Exit;
+  end;
+end;
+
+function InitializeUninstall: Boolean;
+var ExitCode: Integer;
+begin
+  Result := Exec(ExpandConstant('{app}\RadiologyAgent.KeySetup.exe'), '--authorize-uninstall', '', SW_HIDE, ewWaitUntilTerminated, ExitCode);
+  if Result then Result := ExitCode = 0;
+  if not Result then begin
+    Log('Haronex Enterprise: uninstall authorization denied.');
+    if not UninstallSilent then
+      MsgBox('Uninstallation requires an elevated DSCAN Domain Admin account and domain connectivity. Contact your IT Administrator.', mbError, MB_OK);
+  end;
+end;
