@@ -304,7 +304,7 @@ CONCLUSION_LABELS = (
     "plan", "advice", "comments", "comment", "remarks", "remark",
     "الخلاصة", "الملخص التشخيصي", "ملخص النتائج", "ملخص",
     "الانطباع التشخيصي", "الانطباع", "الرأي التشخيصي", "الرأي",
-    "التشخيص النهائي", "التشخيص", "النتيجة", "النتائج",
+    "التشخيص النهائي", "التشخيص", "النتيجة النهائية",
     "التوصيات", "التوصية", "التقييم", "التفسير"
 )
 _CONCLUSION_LABEL_PATTERN = "|".join(
@@ -327,6 +327,7 @@ FINDINGS_LABELS = (
     "observation", "imaging description", "examination description",
     "detailed description", "description", "report details",
     "imaging results", "results", "result", "findings", "finding",
+    "النتائج", "النتيجة",
     "النتائج التفصيلية", "نتائج الفحص", "نتائج الأشعة",
     "النتائج الإشعاعية", "الموجودات", "الملاحظات", "المشاهدات",
     "تفاصيل الفحص", "وصف الفحص", "الوصف", "النتائج", "النتيجة"
@@ -1762,7 +1763,7 @@ def self_test():
         "Impression:", "Conclusion:", "Opinion:", "Final Impression:",
         "Diagnostic Impression:", "Final Radiological Impression:",
         "Final Radiologic Impression:", "Summary:", "Interpretation:",
-        "Final Diagnosis:", "Diagnosis:", "Assessment:",
+        "Final Diagnosis:", "Diagnosis:", "Assessment:", "النتيجة النهائية:",
         "Recommendations:", "Recommendation:", "Plan:", "Advice:", "Comments:",
         "Remarks:", "Overall Impression:", "Clinical Impression:",
         "Diagnostic Opinion:", "Final Assessment:", "Report Summary:",
@@ -1776,20 +1777,21 @@ def self_test():
     # Findings headings are independent from Impression/Conclusion headings.
     for heading in (
         "Finding:", "Findings:", "Imaging Findings:", "Radiological Findings:",
-        "Diagnostic Findings:", "Key Findings:",
         "Radiologic Findings:", "Detailed Findings:", "Clinical Findings:",
         "Examination Findings:", "Observations:", "Observation:",
         "Imaging Observations:", "Description:", "Imaging Description:",
-        "Results:", "Result:", "Findings & Observations:",
+        "Results:", "Result:", "Diagnostic Findings:", "Key Findings:", "Findings & Observations:",
         "Findings and Observations:", "Findings / Observations:",
         "1. Findings:", "• Imaging Findings:", "**Findings:**",
         "النتائج:", "الموجودات:", "الملاحظات:", "المشاهدات:",
-        "وصف الفحص:", "نتائج الأشعة:", "النتائج التفصيلية:"
+        "وصف الفحص:", "نتائج الأشعة:", "النتائج التفصيلية:", "النتائج:", "النتيجة:"
     ):
         sample_findings="History: follow-up.\r"+heading+"\rA 2 cm lesion."
         match=FINDINGS_HEADING.search(sample_findings)
         assert match and match.group(0).strip(), heading
     assert _FINDINGS_START.search("Imaging Findings:\rA 2 cm lesion.")
+    assert not conclusion_section("Findings:\rA 2 cm lesion.\rResults:\rA renal cyst.")
+    assert conclusion_section("Findings:\rA 2 cm lesion.\rالنتيجة النهائية:\rRenal cyst.")
     assert clinical_context_windows("Imaging Findings:\rLeft renal cyst.\rFinal Radiological Impression:\rNo renal cyst.")
     assert not _FINDINGS_START.search("History: Findings are unchanged.")
     # Do not select a clinical-history Diagnosis heading when a final
