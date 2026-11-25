@@ -1,5 +1,5 @@
 #define AppName "Haronex Radiology Agent for Word 2013"
-#define AppVersion "11.12.12"
+#define AppVersion "11.12.13"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
 DefaultGroupName=Haronex
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_V11_12_12_MultiModel_Setup
+OutputBaseFilename=Haronex_Word2013_V11_12_13_MultiModel_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -31,6 +31,9 @@ Root: HKCU; Subkey: "Software\Microsoft\Office\Word\Addins\RadiologyAgent.WordAd
 Root: HKCU; Subkey: "Software\Microsoft\Office\15.0\Word\Addins\RadiologyAgent.WordAddin"; Flags: deletekey
 Root: HKCU; Subkey: "Software\Classes\RadiologyAgent.WordAddin"; Flags: deletekey
 Root: HKCU; Subkey: "Software\Classes\CLSID\{{D1FBEFD5-3B43-4516-9B7B-CDEB47AB0FA1}"; Flags: deletekey
+
+[Icons]
+Name: "{userprograms}\Haronex\Configure my account"; Filename: "{app}\RadiologyAgent.KeySetup.exe"; Parameters: "--configure"
 
 [Code]
 var
@@ -107,20 +110,22 @@ begin
     Result := 'Close Word before installing or repairing Haronex.';
 end;
 
-function HasExistingHaronexAuthorization: Boolean;
-var
-  Allowed: Cardinal;
+function HasExistingGroqKey: Boolean;
 begin
-  Result := FileExists(ExpandConstant('{localappdata}\RadiologyAgent\groq.key.dpapi'))
-    and RegQueryDWordValue(HKCU, 'Software\Haronex', 'WebTransferAllowed', Allowed)
-    and (Allowed = 1);
+  // Even an unreadable key is never silently replaced during an upgrade.
+  // Key repair is an explicit action in Configure my account.
+  Result := FileExists(ExpandConstant('{localappdata}\RadiologyAgent\groq.key.dpapi'));
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
-  // An in-place upgrade does not request or overwrite the user's existing
-  // DPAPI-protected key and previously granted patient-data authorization.
-  Result := HasExistingHaronexAuthorization and
+  // The review options page is always shown, including upgrade and repair.
+  if PageID = MandatoryPage.ID then begin
+    Result := False;
+    Exit;
+  end;
+  // Do not change existing credentials or authorization on reinstall.
+  Result := HasExistingGroqKey and
     ((PageID = KeyPage.ID) or (PageID = ConsentPage.ID));
 end;
 
@@ -147,9 +152,9 @@ begin
   ConsentPage.Add('I am authorized to send these medical report texts to Groq for proofreading.');
   ConsentPage.Values[0] := False;
 
-  MandatoryPage := CreateCustomPage(ConsentPage.ID,
-    'Mandatory Review',
-    'Choose whether saving and printing require a completed review.');
+  MandatoryPage := CreateCustomPage(wpWelcome,
+    'Word Review Settings',
+    'Choose both options for this installation, update or repair. Existing Groq keys are preserved.');
   MandatoryCheck := TNewCheckBox.Create(MandatoryPage);
   MandatoryCheck.Parent := MandatoryPage.Surface;
   MandatoryCheck.Left := ScaleX(0);
@@ -206,14 +211,14 @@ begin
   if not RegWriteDWordValue(HKCU, 'Software\Haronex',
        'DisableAutoRecover', Ord(RecoveryCheck.Checked)) then
     RaiseException('Could not save AutoRecover preference.');
-  if WizardSilent or HasExistingHaronexAuthorization then Exit;
+  if WizardSilent or HasExistingGroqKey then Exit;
   StagingPath := ExpandConstant('{localappdata}\RadiologyAgent\pending-groq.key');
   ForceDirectories(ExtractFileDir(StagingPath));
   try
     if not SaveStringToFile(StagingPath, Trim(KeyPage.Values[0]), False) then
       RaiseException('Could not stage Groq configuration');
     if not Exec(ExpandConstant('{app}\RadiologyAgent.KeySetup.exe'),
-        '--import "' + StagingPath + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
+        '--import-if-missing "' + StagingPath + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
        or (ResultCode <> 0) then
       RaiseException('Could not protect Groq key. Installation incomplete.');
     RegWriteDWordValue(HKCU, 'Software\Haronex', 'WebTransferAllowed', 1);

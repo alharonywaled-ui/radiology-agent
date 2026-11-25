@@ -205,18 +205,26 @@ namespace RadiologyAgent {
           return Valid(saved)?0:3;
         }
         // Installer writes one short-lived local staging file, removed in finally.
-        if(args.Length!=2||args[0]!="--import")return 2;
+        if(args.Length!=2||(args[0]!="--import"&&args[0]!="--import-if-missing"))return 2;
+        bool preserveExisting=args[0]=="--import-if-missing";
         string incoming=Path.GetFullPath(args[1]);
         try {
+          if(preserveExisting&&File.Exists(KeyFile))return 5;
           var key=File.ReadAllText(incoming,Encoding.UTF8).Trim();
           if(!Valid(key))return 3;
           Directory.CreateDirectory(Path.GetDirectoryName(KeyFile));
           byte[] bytes=ProtectedData.Protect(Encoding.UTF8.GetBytes(key),null,DataProtectionScope.CurrentUser);
-          string temp=KeyFile+".tmp";
-          File.WriteAllText(temp,Convert.ToBase64String(bytes),Encoding.ASCII);
-          if(File.Exists(KeyFile))File.Delete(KeyFile);
-          File.Move(temp,KeyFile);
-          return 0;
+          string temp=KeyFile+"."+Guid.NewGuid().ToString("N")+".tmp";
+          try {
+            File.WriteAllText(temp,Convert.ToBase64String(bytes),Encoding.ASCII);
+            // File.Move fails instead of replacing a file that appeared concurrently.
+            if(preserveExisting) {
+              if(File.Exists(KeyFile))return 5;
+              try {File.Move(temp,KeyFile);}catch(IOException){if(File.Exists(KeyFile))return 5;throw;}
+            } else if(File.Exists(KeyFile))File.Replace(temp,KeyFile,null);
+            else File.Move(temp,KeyFile);
+            return 0;
+          }finally{try{File.Delete(temp);}catch{}}
         } finally {try {File.Delete(incoming);}catch{}}
       } catch {return 1;}
     }

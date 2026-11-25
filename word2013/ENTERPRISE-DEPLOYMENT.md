@@ -1,4 +1,4 @@
-# Haronex Enterprise 11.12.12 (DSCAN)
+# Haronex Enterprise 11.12.13 (DSCAN)
 
 This is a separate machine-wide Word 2013 x86 package. Keep the existing personal installer for recovery/testing only. Install the enterprise EXE from an elevated administrator session on a computer joined to dscan.corp. Close Word and Haronex before upgrading. Files inherit Program Files ACLs. Do not grant standard users Modify or Full Control there.
 
@@ -20,3 +20,5 @@ Every interactive installer shows both options. Enterprise saves them in HKLM (3
 
 ## Recovery and installation integrity
 Setup verifies the manifest hashes of the complete application and packaged runtime, then performs a local Host/Worker protocol handshake without any Groq request. Close Word in all sessions before Enterprise installation/repair. Setup migrates loaded user profiles automatically; a visible common Startup migration shortcut handles other users at their next logon (before opening Word). If Word is already open, close it and run the migration shortcut or sign out and back in. The ordinary installer repairs its own user installation. If protected files are missing, IT must rerun the approved installer; the user-side add-in does not bypass administrator rights or security software. No silent key sharing or consent changes. If security software quarantined a file, review the detection through IT security management before repair. Run installed KeySetup --verify-install for hash diagnostics and ReviewHost --worker-health for the offline protocol probe. A successful installer probe does not validate live Groq access, domain-admin removal, or real clinical/Word behavior.
+
+Both interactive installers show Word Review Settings before credential pages on every setup run. Existing key files are preserved byte-for-byte, irrespective of whether consent is present; existing consent is not changed. Use Configure my account explicitly to repair an invalid key or change consent. Silent installs have no UI; use /MANDATORYREVIEW=1 or 0 and /DISABLEAUTORECOVER=1 or 0, or omit to preserve existing choices. Enterprise machine policy remains editable by authorized installation administrators, not ordinary employees.

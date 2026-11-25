@@ -1,5 +1,5 @@
 #define AppName "Haronex Enterprise for Word 2013"
-#define AppVersion "11.12.12"
+#define AppVersion "11.12.13"
 [Setup]
 AppId={{56B8B1AF-99B7-4580-821E-276FF00C79B6}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={pf32}\Haronex
 DefaultGroupName=Haronex Enterprise
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_V11_12_12_Enterprise_Setup
+OutputBaseFilename=Haronex_Word2013_V11_12_13_Enterprise_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=admin
@@ -65,8 +65,8 @@ end;
 
 procedure InitializeWizard;
 begin
-  PolicyPage := CreateCustomPage(wpSelectDir, 'Word Review Settings',
-    'These settings apply to all users of this computer.');
+  PolicyPage := CreateCustomPage(wpWelcome, 'Word Review Settings',
+    'Change these options on every installation, update or repair. They apply to all users; existing Groq keys are preserved.');
   MandatoryCheck := TNewCheckBox.Create(PolicyPage);
   MandatoryCheck.Parent := PolicyPage.Surface;
   MandatoryCheck.Left := 0;
@@ -83,6 +83,11 @@ begin
   RecoveryCheck.Height := ScaleY(40);
   RecoveryCheck.Caption := 'Disable AutoRecover (unsaved work may be lost)';
   RecoveryCheck.Checked := InitialPolicy('DisableAutoRecover', 'DISABLEAUTORECOVER');
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
 end;
 
 function PolicyMandatory(Param: String): String;
