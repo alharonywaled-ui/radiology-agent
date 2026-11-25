@@ -238,6 +238,15 @@ class Gate : public IDispatch {
     IUnknown* identity=Canonical(doc);if(!identity)return false;
     released_.push_back(identity);return true;
   }
+  bool HasCompletedReview(IDispatch* doc) {
+    if(IsReleased(doc))return true;
+    IUnknown* identity=Canonical(doc);if(!identity)return false;
+    bool completed=false;
+    for(const auto& item:pending_)if(item.doc==identity) {
+      completed=ReviewReceiptState(item.token,item.identity)!=0;break;
+    }
+    identity->Release();return completed;
+  }
   bool TryReleaseReviewedDocument(IDispatch* doc,bool cleanupCompleted=false) {
     if(IsReleased(doc))return true;
     IUnknown* identity=Canonical(doc);if(!identity)return false;

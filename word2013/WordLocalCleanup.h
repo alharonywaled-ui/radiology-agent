@@ -108,7 +108,9 @@ inline HRESULT SetText(IDispatch* d,const wchar_t* name,const wchar_t* value) {
   VariantClear(&arg);
   return hr;
 }
-inline bool ExecuteFind(IDispatch* find) {
+// Distinguish a clean end of the search from a COM/formatting failure.
+inline bool ExecuteFind(IDispatch* find,bool& searchOk) {
+  searchOk=false;
   DISPID id;
   if(FAILED(Member(find,L"Execute",id)))return false;
   DISPPARAMS params={nullptr,nullptr,0,0};
@@ -116,8 +118,8 @@ inline bool ExecuteFind(IDispatch* find) {
   HRESULT hr=find->Invoke(id,IID_NULL,LOCALE_USER_DEFAULT,DISPATCH_METHOD,
                            &params,&result,nullptr,nullptr);
   VARIANT answer;VariantInit(&answer);
-  bool found=SUCCEEDED(hr)&&SUCCEEDED(VariantChangeType(&answer,&result,0,VT_BOOL))
-             &&answer.boolVal==VARIANT_TRUE;
+  searchOk=SUCCEEDED(hr)&&SUCCEEDED(VariantChangeType(&answer,&result,0,VT_BOOL));
+  bool found=searchOk&&answer.boolVal==VARIANT_TRUE;
   VariantClear(&answer);VariantClear(&result);
   return found;
 }
@@ -182,12 +184,15 @@ inline bool RemoveRedYellowHighlights(IDispatch* word) {
   // Word story type IDs 1..17; unavailable types are skipped.
   for(long type=1;type<=17&&!limitReached;++type) {
     Obj story=IndexedObject(stories.p,type);
+    if(type==1&&!story){errors=true;break;}
     int linked=0;
     while(story&&linked++<100&&!limitReached) {
       if(static_cast<DWORD>(GetTickCount()-cleanupStarted)>=MaxElapsedMs){limitReached=true;break;}
       long start=0,stop=0;
-      if(!PropertyNumber(story.p,L"Start",start)||
-         !PropertyNumber(story.p,L"End",stop)||stop<=start) {
+      if(!PropertyNumber(story.p,L"Start",start)||!PropertyNumber(story.p,L"End",stop)) {
+        errors=true;break;
+      }
+      if(stop<=start) {
         Obj next=PropertyObject(story.p,L"NextStoryRange");
         story=static_cast<Obj&&>(next);
         continue;
@@ -213,7 +218,8 @@ inline bool RemoveRedYellowHighlights(IDispatch* word) {
            FAILED(SetNumber(find.p,L"Wrap",0))) {
           errors=true;break;
         }
-        if(!ExecuteFind(find.p))break;
+        bool searchOk=false;
+        if(!ExecuteFind(find.p,searchOk)){if(!searchOk)errors=true;break;}
         long hitStart=-1,hitEnd=-1,color=-1;
         if(!PropertyNumber(search.p,L"Start",hitStart)||
            !PropertyNumber(search.p,L"End",hitEnd)||
@@ -222,7 +228,9 @@ inline bool RemoveRedYellowHighlights(IDispatch* word) {
         }
         if(PropertyNumber(search.p,L"HighlightColorIndex",color)) {
           if(color==6||color==7||color==12) {
-            if(SUCCEEDED(SetNumber(search.p,L"HighlightColorIndex",0)))++changed;
+            long remaining=-1;
+            if(SUCCEEDED(SetNumber(search.p,L"HighlightColorIndex",0))&&
+               PropertyNumber(search.p,L"HighlightColorIndex",remaining)&&remaining==0)++changed;
             else errors=true;
           } else if(color!=0&&color!=1&&color!=2&&color!=3&&
                     color!=4&&color!=5&&color!=8&&color!=9&&color!=10&&
@@ -240,7 +248,9 @@ inline bool RemoveRedYellowHighlights(IDispatch* word) {
                 long itemColor=-1;
                 if(!item||!PropertyNumber(item.p,L"HighlightColorIndex",itemColor)){errors=true;continue;}
                 if(itemColor==6||itemColor==7||itemColor==12) {
-                  if(SUCCEEDED(SetNumber(item.p,L"HighlightColorIndex",0)))++changed;
+                  long remaining=-1;
+                  if(SUCCEEDED(SetNumber(item.p,L"HighlightColorIndex",0))&&
+                     PropertyNumber(item.p,L"HighlightColorIndex",remaining)&&remaining==0)++changed;
                   else errors=true;
                 }
               }
@@ -257,7 +267,7 @@ inline bool RemoveRedYellowHighlights(IDispatch* word) {
   wchar_t buffer[256];
   if(limitReached) {
     wsprintfW(buffer,L"Stopped safely after %ld highlighted segments.\n"
-      L"%ld red/yellow/violet highlights cleared.\nSave the report and retry if needed.",
+      L"%ld red/yellow/violet highlights cleared.\nRetry Clear Both if needed.",
       scanned,changed);
     Alert(buffer,MB_OK|MB_ICONWARNING);
   } else {

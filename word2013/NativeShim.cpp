@@ -480,8 +480,9 @@ public:
       if(!doc)return S_OK;
       // Capture this document before cleanup. A successful review receipt
       // is still required; Clear Both before review cannot unlock.
+      bool reviewedBeforeCleanup=mandatoryGate_&&!ReviewBusy()&&mandatoryGate_->HasCompletedReview(doc.p);
       bool cleaned=LocalCleanup::ClearBoth(wordApplication_);
-      if(cleaned&&mandatoryGate_)mandatoryGate_->TryReleaseReviewedDocument(doc.p,true);
+      if(cleaned&&reviewedBeforeCleanup)mandatoryGate_->TryReleaseReviewedDocument(doc.p,true);
       if(!cleaned&&HaronexMandatory::Gate::EnforcementEnabled())
         MessageBoxW(nullptr,L"Some comments or Haronex highlights could not be cleared. Try Clear Both again or contact IT.",L"Haronex",MB_OK|MB_ICONWARNING);
       return S_OK;
