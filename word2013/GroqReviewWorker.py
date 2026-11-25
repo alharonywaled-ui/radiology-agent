@@ -1785,10 +1785,11 @@ def self_test():
         "النتائج:", "الموجودات:", "الملاحظات:", "المشاهدات:",
         "وصف الفحص:", "نتائج الأشعة:", "النتائج التفصيلية:"
     ):
-        sample_findings="History: follow-up.\\r"+heading+"\\rA 2 cm lesion."
+        sample_findings="History: follow-up.\r"+heading+"\rA 2 cm lesion."
         match=FINDINGS_HEADING.search(sample_findings)
         assert match and match.group(0).strip(), heading
-    assert _FINDINGS_START.search("Imaging Findings:\\rA 2 cm lesion.")
+    assert _FINDINGS_START.search("Imaging Findings:\rA 2 cm lesion.")
+    assert clinical_context_windows("Imaging Findings:\rLeft renal cyst.\rFinal Radiological Impression:\rNo renal cyst.")
     assert not _FINDINGS_START.search("History: Findings are unchanged.")
     # Do not select a clinical-history Diagnosis heading when a final
     # impression appears after Findings; do not mistake Findings for summary.
