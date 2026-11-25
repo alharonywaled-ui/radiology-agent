@@ -1175,6 +1175,10 @@ namespace RadiologyAgent {
     internal static bool SelfTest() {
       try {
         string report="FINDINGS: Right kidney normal.\rIMPRESSION: Left kidney normal.\r";
+        string footer=report+"Thank You for Your reference\rPET/CT Unit\r\x07Dr. Example, MD\rRevised by Dr /A.t\r\x07Radiology consultant\rProf. Dr. Example, MD\r";
+        if(ProtectedClinicalEnd(footer)!=report.Length)return false;
+        string clinicalAfter=report+"Thanks;\rConclusion: Left renal mass.";
+        if(ProtectedClinicalEnd(clinicalAfter)!=clinicalAfter.Length)return false;
         var parser=new JavaScriptSerializer{MaxJsonLength=2000000};
         var issue=new Dictionary<string,object> {
           {"quote","Left kidney"},{"category","logic"},
@@ -1245,9 +1249,33 @@ namespace RadiologyAgent {
     // V11: detect high-confidence repeated-motif nonsense anywhere in the
     // Word document, including table cells, not only in Conclusion.
     // Employment/biography statements are intentionally Conclusion-only.
+    // Mirror the worker's narrowly scoped terminal block guard. Word ranges
+    // remain anchored to the unmodified report. Never annotate a signature.
+    internal static int ProtectedClinicalEnd(string report) {
+      if(String.IsNullOrEmpty(report))return 0;
+      var lines=Regex.Matches(report,@"[^\r\n\x07]+");
+      int boundary=report.Length,names=0;bool closing=false,role=false,credential=false;
+      for(int i=lines.Count-1;i>=0;i--) {
+        string line=lines[i].Value.Trim().Trim('*','_').Trim();
+        if(line.Length==0){boundary=lines[i].Index;continue;}
+        var opts=RegexOptions.IgnoreCase|RegexOptions.CultureInvariant;
+        if(Regex.IsMatch(line,@"^(?:thanks(?:\s+(?:and\s+)?regards)?|thank\s+you(?:\s+for\s+(?:your\s+)?(?:kind\s+)?(?:reference|referral))?|(?:kind|best)\s+regards)\s*[;:,.!]*$",opts))closing=true;
+        else if(Regex.IsMatch(line,@"\b(?:findings|impression|conclusion|diagnosis|recommendation|clinical\s+history|technique|comparison)\s*:|\b(?:lesion|mass|fracture|effusion|metastases|tumou?r|nodule|stenosis|thrombosis|measuring|measures|shows?|demonstrates?|reveals?|identified|detected|present|absent|normal|abnormal|increased|decreased|no\s+evidence)\b|\d\s*(?:mm|cm|ml)\b",opts))break;
+        else if(Regex.IsMatch(line,@"^(?:(?:radiology|radiologist|diagnostic\s+radiology|consultant\s+radiologist|radiology\s+consultant|consultant\s+of\s+radiology|radiology\s+specialist|specialist\s+radiologist|consultant|specialist|(?:pet\s*/?\s*ct|mri|ct|us|ultrasound|nuclear\s+medicine|radiology)\s+(?:unit|department|team))|(?:revised|reviewed|reported|signed|approved|verified|typed|dictated)\s+by\s*[:.]?\s*[\w .,/&()-]{0,80})[;:,.]*$",opts))role=true;
+        else if(Regex.IsMatch(line,@"^(?:(?:prof|professor|dr|doctor|assoc|asst)\.?\s+)+[\w .,/&()'-]{1,100}$",opts)) {
+          names++;
+          if(Regex.IsMatch(line,@"\b(?:MD|MSc|FRCR|FEBR|ABR|PhD|MBBS)\b",opts))credential=true;
+        }
+        else if(Regex.IsMatch(line,@"^(?:\s*(?:MD|MSc|M\.Sc|MBBS|MBChB|FRCR|FEBR|EBR|ABR|PhD|Ph\.D|DNB|FRC[RSP]|MRCP|MBBCh)\.?\s*[,;/-]?\s*)+$",opts))credential=true;
+        else break;
+        boundary=lines[i].Index;
+      }
+      return closing||(names>0&&(role||credential||names>=2))?boundary:report.Length;
+    }
     internal static List<string> ObviousOffTopicInConclusion(string report) {
       var found=new List<string>();
       if(String.IsNullOrEmpty(report))return found;
+      report=report.Substring(0,ProtectedClinicalEnd(report));
       var header=Regex.Match(report,
         @"(?:^|[\r\n\x07])[ \t]*(?:Conclusion|Impression)[ \t]*:",
         RegexOptions.IgnoreCase);
@@ -1300,8 +1328,10 @@ namespace RadiologyAgent {
         if(ending.Success)conclusionEnd=headingStart+ending.Index;
       }
       int applied=0,failed=0;
+      int clinicalEnd=ProtectedClinicalEnd(snapshot);
       for(int at=snapshot.IndexOf(quote,StringComparison.Ordinal);
           at>=0;at=snapshot.IndexOf(quote,at+quote.Length,StringComparison.Ordinal)) {
+        if(at+quote.Length>clinicalEnd)continue;
         if(!gibberish&&(at<headingStart||at>=conclusionEnd))continue;
         // Word's content snapshot is the only allowed anchor for a local
         // candidate. Do not trust Word Find's duplicate/wrap behavior.
@@ -1387,6 +1417,8 @@ namespace RadiologyAgent {
         var parser=new JavaScriptSerializer{MaxJsonLength=2000000};
         var root=parser.DeserializeObject(source) as Dictionary<string,object>;
         var groups=root["groups"] as object[];
+        int clinicalBoundary=ProtectedClinicalEnd(currentText);
+        string clinicalText=currentText.Substring(0,clinicalBoundary);
         var unique=new Dictionary<string,Tuple<string,string,string,string,string>>(StringComparer.Ordinal);
         foreach(var group in groups) {
           var issues=group as object[];
@@ -1394,7 +1426,7 @@ namespace RadiologyAgent {
             var row=issue as Dictionary<string,object>;
             Func<string,string> get=k=>row.ContainsKey(k)&&row[k]!=null?Convert.ToString(row[k]):"";
             string quote=get("quote"),category=get("category");
-            if(quote.Length<2||!currentText.Contains(quote))continue;
+            if(quote.Length<2||!clinicalText.Contains(quote))continue;
             string section=get("section");
             // Preserve independent Logic and Language findings even when they
             // quote exactly the same phrase in the same section.
@@ -1453,7 +1485,7 @@ namespace RadiologyAgent {
             existing.Add(((int)anchor.Start).ToString()+":"+((int)anchor.End).ToString());
           }
         } catch {}
-        int start=(int)doc.Content.Start,end=(int)doc.Content.End;
+        int start=(int)doc.Content.Start,end=Math.Min((int)doc.Content.End,start+clinicalBoundary);
         // Batch Word layout repaints while inserting all comments/highlights.
         // Always restore even after an individual COM failure.
         uint purpleApplied=0,purpleSkipped=0;
@@ -1494,9 +1526,9 @@ namespace RadiologyAgent {
             find.Forward=true;find.Wrap=0;find.MatchCase=true;find.MatchWildcards=false;
             // Word Find may re-scan the same table cell and report a false
             // duplicate; unique exact positions in the Word snapshot win.
-            int snapshotAt=currentText.IndexOf(issue.Item1,StringComparison.Ordinal);
+            int snapshotAt=clinicalText.IndexOf(issue.Item1,StringComparison.Ordinal);
             bool snapshotUnique=snapshotAt>=0&&
-              currentText.IndexOf(issue.Item1,snapshotAt+issue.Item1.Length,
+              clinicalText.IndexOf(issue.Item1,snapshotAt+issue.Item1.Length,
                                   StringComparison.Ordinal)<0;
             if(!(bool)find.Execute()) {
               if(!snapshotUnique) {
@@ -1536,6 +1568,7 @@ namespace RadiologyAgent {
                 LogFailure("WORD_FIND_DUPLICATE_QUOTE");continue;
               }
             }
+            if((int)region.Start<start||(int)region.End>end||!String.Equals(Convert.ToString(region.Text),issue.Item1,StringComparison.Ordinal)){wordFailed++;continue;}
             string anchorId=((int)region.Start).ToString()+":"+((int)region.End).ToString();
             if(existing.Contains(anchorId)) {
               wordApplied++;

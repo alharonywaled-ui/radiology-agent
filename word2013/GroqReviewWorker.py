@@ -283,6 +283,58 @@ CONCLUSION_END = re.compile(
     re.IGNORECASE
 )
 
+# Only a verified trailing signature block is excluded. Clinical text after
+# a closing marker invalidates the exclusion. Never match "thanks" mid-sentence.
+_CLOSING_LINE = re.compile(r"^\s*(?:thanks(?:\s+(?:and\s+)?regards)?|thank\s+you(?:\s+for\s+(?:your\s+)?(?:kind\s+)?(?:reference|referral))?|(?:kind|best)\s+regards)\s*[;:,.!]*\s*$", re.I)
+_SIGNATURE_ROLE = re.compile(r"^(?:(?:radiology|radiologist|diagnostic\s+radiology|consultant\s+radiologist|radiology\s+consultant|consultant\s+of\s+radiology|radiology\s+specialist|specialist\s+radiologist|consultant|specialist|(?:pet\s*/?\s*ct|mri|ct|us|ultrasound|nuclear\s+medicine|radiology)\s+(?:unit|department|team))|(?:revised|reviewed|reported|signed|approved|verified|typed|dictated)\s+by\s*[:.]?\s*[\w .,/&()-]{0,80})[;:,.]*$", re.I)
+_SIGNATURE_NAME = re.compile(r"^(?:(?:prof|professor|dr|doctor|assoc|asst)\.?\s+)+[\w .,/&()'-]{1,100}$", re.I)
+_SIGNATURE_CREDENTIAL = re.compile(r"^(?:\s*(?:MD|MSc|M\.Sc|MBBS|MBChB|FRCR|FEBR|EBR|ABR|PhD|Ph\.D|DNB|FRC[RSP]|MRCP|MBBCh)\.?\s*[,;/-]?\s*)+$", re.I)
+_CLINICAL_LINE = re.compile(r"\b(?:findings|impression|conclusion|diagnosis|recommendation|clinical\s+history|technique|comparison)\s*:|\b(?:lesion|mass|fracture|effusion|metastases|tumou?r|nodule|stenosis|thrombosis|measuring|measures|shows?|demonstrates?|reveals?|identified|detected|present|absent|normal|abnormal|increased|decreased|no\s+evidence)\b|\d\s*(?:mm|cm|ml)\b", re.I)
+def protected_clinical_end(report):
+    lines = list(re.finditer(r"[^\r\n\x07]+", report))
+    if not lines:
+        return len(report)
+    def kind(line):
+        line = line.strip().strip("*_")
+        if not line.strip():
+            return "empty"
+        if _CLOSING_LINE.fullmatch(line):
+            return "closing"
+        if _CLINICAL_LINE.search(line):
+            return "clinical"
+        if _SIGNATURE_ROLE.fullmatch(line):
+            return "role"
+        if _SIGNATURE_NAME.fullmatch(line):
+            return "name"
+        if _SIGNATURE_CREDENTIAL.fullmatch(line):
+            return "credential"
+        return "clinical"
+    suffix = []
+    for line in reversed(lines):
+        k = kind(line.group())
+        if k == "clinical":
+            break
+        suffix.append((line.start(), k))
+    if not suffix:
+        return len(report)
+    kinds = {k for _, k in suffix}
+    if "closing" in kinds or ("name" in kinds and ("role" in kinds or "credential" in kinds or len([k for _, k in suffix if k == "name"]) >= 2)):
+        return min(at for at, _ in suffix)
+    # One trailing doctor line with a recognizable professional credential.
+    if "name" in kinds and re.search(r"\b(?:MD|MSc|FRCR|FEBR|ABR|PhD|MBBS)\b", report[min(at for at, _ in suffix):]):
+        return min(at for at, _ in suffix)
+    return len(report)
+
+def clinical_chunks(texts):
+    boundary = protected_clinical_end("".join(texts))
+    kept, offset = [], 0
+    for part in texts:
+        if offset >= boundary:
+            break
+        kept.append(part[:boundary-offset])
+        offset += len(part)
+    return kept
+
 def conclusion_section(report):
     match = CONCLUSION_HEADING.search(report)
     if not match:
@@ -1065,6 +1117,16 @@ def api_review_model(key, text, requester, sleeper, system_prompt, user_prefix, 
              "required": list(properties), "additionalProperties": False}
     schema = {"type": "object", "properties": {"issues": {"type": "array", "items": issue}},
               "required": ["issues"], "additionalProperties": False}
+    # Shared policy applies to every model, including Qwen fallback. Do not
+    # assume an uncommon medical term, abbreviation or accepted variant is a typo.
+    system_prompt += (" Do not report valid medical terminology, accepted spelling variants, "
+        "standard or local radiology abbreviations, or harmless capitalization/style choices "
+        "as errors. Report a term only when a definite spelling, grammatical, contextual, "
+        "or clinical error is supported by the surrounding clinical text. "
+        "Do not flag conventional closing phrases, clinician signatures, professional "
+        "credentials, role labels, department names, or reviewer initials. "
+        "Keep real clinical contradictions, incorrect anatomy, and unrelated words in clinical "
+        "sentences in scope. When uncertain about terminology, omit the language alert.")
     request_body = {
         "model": model,
         "messages": [{"role": "system", "content": system_prompt},
@@ -1220,8 +1282,12 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-v11-12-multimodel-r1":
+        if version != "haronex-v11-12-multimodel-r2":
             raise ValueError("Unsupported review version")
+        original_chunk_count = len(texts)
+        texts = clinical_chunks(texts)
+        if not texts or not "".join(texts).strip(" \r\n\x07\t"):
+            raise ReviewFailure("GROQ_CLINICAL_CONTEXT_UNAVAILABLE")
         # Preserve ALL four independent audit passes; parallelize each report
         # chunk inside each pass instead of processing chunks serially. Bounded
         # worker count prevents runaway network threads on 40-part reports.
@@ -1310,6 +1376,7 @@ def main(raw_request=None):
             sum(1 for issue in g if issue.get("category")=="logic")
             for g in groups))
         metric("clinical_audit_completed")
+        groups.extend([] for _ in range(original_chunk_count - len(groups)))
         print(json.dumps({"ok": True, "mode": "groq", "passes": 2,
                           "review_version": version, "groups": groups,
                           "discarded_issues": DISCARDED_ISSUES["count"],
@@ -1341,6 +1408,20 @@ def main(raw_request=None):
                             elapsed_ms=int((time.monotonic()-started)*1000))}))
 
 def self_test():
+    footer_cases = [
+        "Findings: Right renal cyst.\rConclusion: Left renal cyst.\rThanks;\r\x07Dr. Example, MSc, FEBR, ABR\r\x07Dr. Example, MD\r",
+        "Findings: Renal cyst.\rThank You for Your reference\rPET/CT Unit\r\x07Dr. Example H.Saad,\rRevised by Dr /A.t\r\x07Radiology consultant\rProf. Dr. Example, MD\r",
+        "Findings: Renal cyst.\rRadiology consultant\rProf. Dr. Example, MD\r",
+    ]
+    for sample_footer in footer_cases:
+        kept = "".join(clinical_chunks([sample_footer[:35], sample_footer[35:]]))
+        assert "Findings:" in kept and "Dr." not in kept and "Thanks" not in kept
+        assert "Thank You" not in kept and "Radiology consultant" not in kept
+    # Do not hide a true clinical contradiction after an accidental thanks.
+    body_after = "Findings: Right renal cyst.\rThanks;\rConclusion: Left renal cyst."
+    assert protected_clinical_end(body_after) == len(body_after)
+    assert clinical_chunks(["Findings: MRI MRCP IHBR PET CT, 2026/2027."]) == ["Findings: MRI MRCP IHBR PET CT, 2026/2027."]
+    assert protected_clinical_end("Findings: Dr. Example reported a mass.") == len("Findings: Dr. Example reported a mass.")
     sample = "Mild fatty hepatomegaly. Small fat containing umbilical hernia."
     issues = normalize(sample, [{"quote": "Small fat containing umbilical hernia",
                                 "category": "language", "explanation": "Missing punctuation",

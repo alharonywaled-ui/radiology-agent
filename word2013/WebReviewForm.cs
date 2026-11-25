@@ -16,7 +16,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    internal const string ReviewAlgorithmVersion="haronex-v11-12-multimodel-r1";
+    internal const string ReviewAlgorithmVersion="haronex-v11-12-multimodel-r2";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=1; Height=1;
@@ -183,6 +183,9 @@ namespace RadiologyAgent {
           }
         }
         if(!cached)SaveCached(cacheFile,workerResult);
+        int clinicalBoundary=LiveReviewMonitor.ProtectedClinicalEnd(report);
+        rangeEnd=Math.Min(rangeEnd,rangeStart+clinicalBoundary);
+        valid.RemoveAll(issue=>!report.Substring(0,clinicalBoundary).Contains(issue.Item1));
         // Apply only after all chunks have been checked. Word's COM objects are used on the UI STA thread.
         status.Text="Adding "+valid.Count+" Haronex Word annotations…";
         int applied=0,skipped=0,duplicates=0;
