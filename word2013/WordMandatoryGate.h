@@ -45,6 +45,7 @@ inline void BeginDiagnostics() {
   DiagnosticValue(L"PrintAllowedCount",0);
   DiagnosticValue(L"PrintBlockedCount",0);
   DiagnosticValue(L"ClearBothUnlockCount",0);
+  DiagnosticValue(L"SuccessfulReviewUnlockCount",0);
   DiagnosticValue(L"MalformedEventCount",0);
   DiagnosticValue(L"MissingDocumentCount",0);
   DiagnosticValue(L"PrintEventCount",0);
@@ -164,80 +165,35 @@ inline std::wstring Hash(const std::wstring& source) {
   for(BYTE x:digest){out+=digits[x>>4];out+=digits[x&15];}
   return out;
 }
-// Approval scope is the exact Word document/window + exact document text.
-// A Clear Both acceptance is explicitly distinguished from a Groq review.
-inline bool ApprovalIdentity(IDispatch* doc,std::wstring& registryPath,
-                            std::wstring& textDigest) {
-  // Document.ActiveWindow.Hwnd is unreliable and caused false Save/Print
-  // rejections. Bind the initial review to the Word process and FullName,
-  // validating the exact current text on the Review/Clear Both handshake.
-  std::wstring name,text;
+// Native creates a unique request token for the precise open COM document.
+// The managed host returns a receipt only after a successful, verified review.
+// Neither an old report hash nor Clear Both grants permission.
+inline bool DocumentRequestIdentity(IDispatch* doc,std::wstring& identity) {
+  std::wstring name;
   if(!ReadString(doc,L"FullName",name)||name.empty())return false;
-  IDispatch* range=nullptr;
-  if(!ReadDispatch(doc,L"Content",&range))return false;
-  bool read=ReadString(range,L"Text",text);
-  range->Release();
-  if(!read||text.empty())return false;
-  std::wstring identity=std::to_wstring(GetCurrentProcessId())+L"\x001f"+name;
-  std::wstring keyDigest=Hash(identity);
-  textDigest=Hash(text);
-  if(keyDigest.empty()||textDigest.empty())return false;
-  registryPath=L"Software\\Haronex\\MandatoryReviews\\"+keyDigest;
-  return true;
+  identity=Hash(std::to_wstring(GetCurrentProcessId())+L"\x001f"+name);
+  return !identity.empty();
 }
-inline bool MatchingApproval(HKEY key,const wchar_t* valueName,
-                             const std::wstring& textDigest) {
-  wchar_t result[80]={0};
-  DWORD type=0,size=sizeof(result);
-  LONG status=RegQueryValueExW(key,valueName,nullptr,&type,
-                               reinterpret_cast<BYTE*>(result),&size);
-  return status==ERROR_SUCCESS&&type==REG_SZ&&textDigest==result;
+inline bool WriteReviewString(HKEY key,const wchar_t* name,const std::wstring& value) {
+  return RegSetValueExW(key,name,0,REG_SZ,reinterpret_cast<const BYTE*>(value.c_str()),
+    static_cast<DWORD>((value.size()+1)*sizeof(wchar_t)))==ERROR_SUCCESS;
 }
-// A review alone is not the final release: the user also acknowledges the
-// displayed suggestions by pressing Clear Both. No suggested edit is required.
-inline bool ApprovalReady(HKEY key,const std::wstring& digest) {
-  return MatchingApproval(key,L"ApprovedHash",digest)&&
-         MatchingApproval(key,L"ClearBothV103Hash",digest);
-}
-inline bool HasReviewedHash(IDispatch* doc) {
-  std::wstring path,digest;
-  if(!ApprovalIdentity(doc,path,digest))return false;
+inline bool ReviewReceiptMatches(const std::wstring& token,const std::wstring& identity) {
   HKEY key=nullptr;
-  if(RegOpenKeyExW(HKEY_CURRENT_USER,path.c_str(),0,KEY_QUERY_VALUE,&key)!=ERROR_SUCCESS)
-    return false;
-  bool reviewed=MatchingApproval(key,L"ApprovedHash",digest);
+  if(token.empty()||identity.empty()||RegOpenKeyExW(HKEY_CURRENT_USER,
+      L"Software\\Haronex\\ReviewReceipts",0,KEY_QUERY_VALUE,&key)!=ERROR_SUCCESS)return false;
+  wchar_t value[80]={0};DWORD type=0,size=sizeof(value);
+  LONG status=RegQueryValueExW(key,token.c_str(),nullptr,&type,
+    reinterpret_cast<BYTE*>(value),&size);
   RegCloseKey(key);
-  return reviewed;
+  return status==ERROR_SUCCESS&&type==REG_SZ&&size<=sizeof(value)&&value[79]==0&&identity==value;
 }
-inline bool Approved(IDispatch* doc) {
-  std::wstring path,digest;
-  if(!ApprovalIdentity(doc,path,digest))return false;
+inline void DeleteReviewReceipt(const std::wstring& token) {
   HKEY key=nullptr;
-  if(RegOpenKeyExW(HKEY_CURRENT_USER,path.c_str(),0,KEY_QUERY_VALUE,&key)!=ERROR_SUCCESS)
-    return false;
-  // BOTH gates must match the current revision. An old V10.1 ClearBothHash
-  // alone can no longer bypass Review Text.
-  bool pass=ApprovalReady(key,digest);
-  RegCloseKey(key);
-  return pass;
-}
-inline bool AcceptClearBoth(IDispatch* doc) {
-  std::wstring path,digest;
-  if(!ApprovalIdentity(doc,path,digest))return false;
-  HKEY key=nullptr;
-  if(RegOpenKeyExW(HKEY_CURRENT_USER,path.c_str(),0,KEY_QUERY_VALUE|KEY_SET_VALUE,
-                   &key)!=ERROR_SUCCESS)return false;
-  // Never grant access unless a successful Review Text approval for this
-  // exact content has been saved. Cleanup is not itself an AI review.
-  if(!MatchingApproval(key,L"ApprovedHash",digest)) {
-    RegCloseKey(key);
-    return false;
+  if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex\\ReviewReceipts",0,
+      KEY_SET_VALUE,&key)==ERROR_SUCCESS) {
+    RegDeleteValueW(key,token.c_str());RegCloseKey(key);
   }
-  LONG status=RegSetValueExW(key,L"ClearBothV103Hash",0,REG_SZ,
-      reinterpret_cast<const BYTE*>(digest.c_str()),
-      static_cast<DWORD>((digest.size()+1)*sizeof(wchar_t)));
-  RegCloseKey(key);
-  return status==ERROR_SUCCESS;
 }
 inline void SetCancel(VARIANTARG& arg) {
   if(arg.vt==(VT_BYREF|VT_BOOL)&&arg.pboolVal)
@@ -249,68 +205,79 @@ inline void SetCancel(VARIANTARG& arg) {
     else {VariantClear(target);target->vt=VT_BOOL;target->boolVal=VARIANT_TRUE;}
   }
 }
-inline void ShowBlocked() {
-  MessageBoxW(nullptr,
-      L"Haronex: Complete Review Text, then click Clear Both before Save or Print.\n"
-      L"Corrections are optional. After Review Text and Clear Both, editing is allowed.\n"
-      L"Once unlocked, this open document can be saved and printed normally.",
-      L"Haronex Mandatory Review",MB_OK|MB_ICONWARNING|MB_TOPMOST);
-}
-
+// A successful review unlocks the current open document; cleanup is optional.
 // The COM event sink lives inside Word (same thread as Word's save/print event).
 class Gate : public IDispatch {
   LONG refs_=1;
   IConnectionPoint* point_=nullptr;
   DWORD cookie_=0;
   DISPID save_=-1,print_=-1;
-  // Canonical COM IUnknown identity is stable across document edits and
-  // Save As. These are in-memory, per-Word-instance approvals; never persisted
-  // or shared with another open document.
+  // A retained COM identity is unique to this open document. No filename
+  // fallback: a different/reopened document at the same path must be reviewed.
+  struct PendingReview { IUnknown* doc; std::wstring token; std::wstring identity; };
   std::vector<IUnknown*> released_;
-  std::vector<std::wstring> releasedNames_;
-public:
-  bool IsReleased(IDispatch* doc) const {
-    if(!doc)return false;
+  std::vector<PendingReview> pending_;
+  static IUnknown* Canonical(IDispatch* doc) {
     IUnknown* identity=nullptr;
-    if(FAILED(doc->QueryInterface(IID_IUnknown,
-              reinterpret_cast<void**>(&identity)))||!identity)return false;
+    if(!doc||FAILED(doc->QueryInterface(IID_IUnknown,reinterpret_cast<void**>(&identity))))return nullptr;
+    return identity;
+  }
+ public:
+  bool IsReleased(IDispatch* doc) const {
+    IUnknown* identity=Canonical(doc);if(!identity)return false;
     bool yes=false;
     for(auto* item:released_)if(item==identity){yes=true;break;}
-    identity->Release();
-    if(!yes) {
-      std::wstring name;
-      if(ReadString(doc,L"FullName",name)&&!name.empty()) {
-        for(const auto& item:releasedNames_)
-          if(_wcsicmp(item.c_str(),name.c_str())==0){yes=true;break;}
-      }
-    }
-    return yes;
+    identity->Release();return yes;
   }
   bool RememberReleasedDocument(IDispatch* doc) {
-    if(!doc)return false;
     if(IsReleased(doc))return true;
-    IUnknown* identity=nullptr;
-    if(FAILED(doc->QueryInterface(IID_IUnknown,
-              reinterpret_cast<void**>(&identity)))||!identity)return false;
-    released_.push_back(identity);
-    std::wstring name;
-    if(ReadString(doc,L"FullName",name)&&!name.empty())
-      releasedNames_.push_back(name);
-    return true;
+    IUnknown* identity=Canonical(doc);if(!identity)return false;
+    released_.push_back(identity);return true;
   }
-  bool ReleaseAfterClearBoth(IDispatch* doc) {
-    // Clear Both is the explicit unlock. Review Text is available, but never
-    // a prerequisite that could trap the user without Save/Print.
-    if(!doc)return false;
-    bool released=RememberReleasedDocument(doc);
-    if(released)IncrementDiagnostic(L"ClearBothUnlockCount");
-    return released;
+  bool TryReleaseReviewedDocument(IDispatch* doc) {
+    if(IsReleased(doc))return true;
+    IUnknown* identity=Canonical(doc);if(!identity)return false;
+    bool released=false;
+    for(auto it=pending_.begin();it!=pending_.end();++it) {
+      if(it->doc!=identity)continue;
+      if(ReviewReceiptMatches(it->token,it->identity)&&RememberReleasedDocument(doc)) {
+        DeleteReviewReceipt(it->token);
+        it->doc->Release();pending_.erase(it);
+        IncrementDiagnostic(L"SuccessfulReviewUnlockCount");released=true;
+      }
+      break;
+    }
+    identity->Release();return released;
+  }
+  bool BeginReview(IDispatch* doc,DWORD command,HKEY request) {
+    if(!request||!command)return false;
+    // Preserve a previously completed review if a second click occurs.
+    TryReleaseReviewedDocument(doc);
+    IUnknown* identity=Canonical(doc);if(!identity)return false;
+    std::wstring binding;
+    GUID guid={};wchar_t token[40]={0};
+    if(!DocumentRequestIdentity(doc,binding)||FAILED(CoCreateGuid(&guid))||
+       !StringFromGUID2(guid,token,40)) {identity->Release();return false;}
+    if(!WriteReviewString(request,L"ReviewRequestToken",token)||
+       !WriteReviewString(request,L"ReviewRequestIdentity",binding)||
+       RegSetValueExW(request,L"ReviewRequestCommand",0,REG_DWORD,
+         reinterpret_cast<const BYTE*>(&command),sizeof(command))!=ERROR_SUCCESS) {
+      identity->Release();return false;
+    }
+    for(auto it=pending_.begin();it!=pending_.end();) {
+      if(it->doc==identity) {
+        DeleteReviewReceipt(it->token);it->doc->Release();it=pending_.erase(it);
+      } else ++it;
+    }
+    pending_.push_back({identity,token,binding});
+    return true;
   }
   ~Gate(){Detach();}
   void Detach(){
     for(auto* item:released_)if(item)item->Release();
     released_.clear();
-    releasedNames_.clear();
+    for(auto& item:pending_){DeleteReviewReceipt(item.token);if(item.doc)item.doc->Release();}
+    pending_.clear();
     if(point_){if(cookie_)point_->Unadvise(cookie_);point_->Release();}
     point_=nullptr;cookie_=0;HookStatus(0);
   }
@@ -369,9 +336,8 @@ public:
     if(!point_){save_=saveEvent;print_=printEvent;}
   }
   // The safety policy can be tested without a Word installation.
-  // The Save dialog always offers a human-operated emergency escape.
-  // Strict gate: native Save, Save As and Print are all blocked until
-  // this document's Clear Both action is accepted. No Save Now bypass.
+  // Native Save, Save As and Print require a successful review for this
+  // open document when enabled. Clear Both never grants permission.
   static bool ShouldCancel(bool unlocked,bool,bool) {
     return EnforcementEnabled()&&!unlocked;
   }
@@ -443,7 +409,7 @@ public:
       IncrementDiagnostic(L"MalformedEventCount");
       return S_OK;
     }
-    bool unlocked=IsReleased(document);
+    bool unlocked=TryReleaseReviewedDocument(document);
     document->Release();
     if(unlocked) {
       IncrementDiagnostic(saving?L"SaveAllowedCount":L"PrintAllowedCount");
@@ -453,16 +419,16 @@ public:
       SetCancel(*cancel);
       IncrementDiagnostic(L"SaveBlockedCount");
       MessageBoxW(nullptr,
-        L"Saving this report has been locked. First click \"Review\" in the "
-        L"Radiology Agent tab, then click \"Clear Both\" to enable "
-        L"\"Save\" and \"Save As\".",
+        L"Saving this report has been locked. Run Review Text in the "
+        L"Radiology Agent tab and wait for successful completion. "
+        L"Clear Both is optional.",
         L"Haronex - Save locked",MB_OK|MB_ICONINFORMATION);
     } else {
       SetCancel(*cancel);
       IncrementDiagnostic(L"PrintBlockedCount");
       MessageBoxW(nullptr,
-        L"Printing remains locked until you click \"Review\" and then "
-        L"\"Clear Both\" on the \"Radiology Agent\" tab.",
+        L"Printing remains locked until Review Text completes successfully "
+        L"on the Radiology Agent tab. Clear Both is optional.",
         L"Haronex - Print Locked",MB_OK|MB_ICONINFORMATION);
     }
     return S_OK;

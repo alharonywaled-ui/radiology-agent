@@ -30,11 +30,14 @@ public:
     if(!count)return E_POINTER;*count=0;return S_OK;
   }
   HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT,LCID,ITypeInfo**) override {return E_NOTIMPL;}
-  HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID,LPOLESTR*,UINT,LCID,DISPID*) override {
-    return DISP_E_UNKNOWNNAME;
+  HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID,LPOLESTR* names,UINT count,LCID,DISPID* ids) override {
+    if(!names||!ids||count!=1||_wcsicmp(names[0],L"FullName")!=0)return DISP_E_UNKNOWNNAME;
+    ids[0]=1;return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE Invoke(DISPID,REFIID,LCID,WORD,DISPPARAMS*,VARIANT*,EXCEPINFO*,UINT*) override {
-    return DISP_E_MEMBERNOTFOUND;
+  HRESULT STDMETHODCALLTYPE Invoke(DISPID id,REFIID,LCID,WORD,DISPPARAMS*,VARIANT* result,EXCEPINFO*,UINT*) override {
+    if(id!=1||!result)return DISP_E_MEMBERNOTFOUND;
+    VariantInit(result);result->vt=VT_BSTR;result->bstrVal=SysAllocString(L"C:\\Synthetic\\SameName.docx");
+    return result->bstrVal?S_OK:E_OUTOFMEMORY;
   }
 };
 static const GUID clsid={0x7B918AD1,0x1C42,0x4B73,{0xA4,0xBB,0x9F,0xC8,0x37,0x43,0xDD,0x6E}};
@@ -105,53 +108,53 @@ int main(){
     wprintf(L"MANDATORY_SHA256_INCOMPATIBLE\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 35;
   }
-  // V10.3 requires initial review + Clear Both, but session release
-  // survives all later text edits. An older V10.2 marker is not accepted.
+  // No receipt or stale receipt must not unlock a document. A different
+  // COM document with the same FullName must not inherit the approval.
   HKEY tempKey=nullptr;
-  const wchar_t* testPath=L"Software\\Haronex\\MandatoryReviews\\NativeSmokeV10_3";
+  const wchar_t* testPath=L"Software\\Haronex\\NativeSmokeReviewRequest";
   if(RegCreateKeyExW(HKEY_CURRENT_USER,testPath,0,nullptr,0,
-                     KEY_SET_VALUE|KEY_QUERY_VALUE,nullptr,&tempKey,nullptr)!=ERROR_SUCCESS) {
+      KEY_SET_VALUE|KEY_QUERY_VALUE,nullptr,&tempKey,nullptr)!=ERROR_SUCCESS) {
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 36;
   }
-  std::wstring reviewedHash=HaronexMandatory::Hash(L"reviewed sample");
-  std::wstring editedHash=HaronexMandatory::Hash(L"edited sample");
-  auto setHash=[&](const wchar_t* name,const std::wstring& value) -> bool {
-    return RegSetValueExW(tempKey,name,0,REG_SZ,
-             reinterpret_cast<const BYTE*>(value.c_str()),
-             static_cast<DWORD>((value.size()+1)*sizeof(wchar_t)))==ERROR_SUCCESS;
+  auto readRequest=[&](const wchar_t* name)->std::wstring {
+    wchar_t value[100]={0};DWORD type=0,size=sizeof(value);
+    if(RegQueryValueExW(tempKey,name,nullptr,&type,reinterpret_cast<BYTE*>(value),&size)!=ERROR_SUCCESS||type!=REG_SZ)return L"";
+    return value;
   };
-  bool correct=!HaronexMandatory::ApprovalReady(tempKey,reviewedHash);
-  correct=correct&&setHash(L"ApprovedHash",reviewedHash);
-  correct=correct&&!HaronexMandatory::ApprovalReady(tempKey,reviewedHash);
-  correct=correct&&setHash(L"ClearBothV102Hash",reviewedHash);
-  correct=correct&&!HaronexMandatory::ApprovalReady(tempKey,reviewedHash);
-  correct=correct&&setHash(L"ClearBothV103Hash",reviewedHash);
-  correct=correct&&HaronexMandatory::ApprovalReady(tempKey,reviewedHash);
-  correct=correct&&!HaronexMandatory::ApprovalReady(tempKey,editedHash);
-  RegCloseKey(tempKey);
-  RegDeleteKeyW(HKEY_CURRENT_USER,testPath);
-  if(!correct) {
-    wprintf(L"MANDATORY_V103_HANDSHAKE_TEST_FAILED\n");
-    SysFreeString(xml);ribbon->Release();CoUninitialize();return 37;
-  }
+  auto receipt=[&](const std::wstring& token,const std::wstring& binding)->bool {
+    HKEY receipts=nullptr;
+    if(RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex\\ReviewReceipts",0,nullptr,0,
+        KEY_SET_VALUE,nullptr,&receipts,nullptr)!=ERROR_SUCCESS)return false;
+    bool ok=HaronexMandatory::WriteReviewString(receipts,token.c_str(),binding);
+    RegCloseKey(receipts);return ok;
+  };
   HaronexMandatory::Gate* session=new HaronexMandatory::Gate();
   FakeDoc* reviewed=new FakeDoc();
   FakeDoc* another=new FakeDoc();
-  // No review yet => no release, and release is scoped to one COM document.
-  bool allowed=!session->IsReleased(reviewed)&&!session->IsReleased(another);
-  allowed=allowed&&session->RememberReleasedDocument(reviewed);
-  allowed=allowed&&session->IsReleased(reviewed)&&!session->IsReleased(another);
-  // A second action on the same document does not produce a second entry.
-  allowed=allowed&&session->RememberReleasedDocument(reviewed);
+  bool allowed=!session->TryReleaseReviewedDocument(reviewed)&&
+    session->BeginReview(reviewed,1,tempKey)&&!session->TryReleaseReviewedDocument(reviewed);
+  std::wstring firstToken=readRequest(L"ReviewRequestToken");
+  std::wstring binding=readRequest(L"ReviewRequestIdentity");
+  allowed=allowed&&!firstToken.empty()&&!binding.empty()&&
+    receipt(firstToken,L"wrong binding")&&!session->TryReleaseReviewedDocument(reviewed);
+  allowed=allowed&&session->BeginReview(reviewed,2,tempKey);
+  std::wstring secondToken=readRequest(L"ReviewRequestToken");
+  allowed=allowed&&!secondToken.empty()&&secondToken!=firstToken&&
+    receipt(firstToken,binding)&&!session->TryReleaseReviewedDocument(reviewed)&&
+    receipt(secondToken,binding)&&!session->TryReleaseReviewedDocument(another)&&
+    session->TryReleaseReviewedDocument(reviewed)&&session->IsReleased(reviewed)&&
+    !session->IsReleased(another);
+  HaronexMandatory::DeleteReviewReceipt(firstToken);
   session->Detach();
   allowed=allowed&&!session->IsReleased(reviewed);
   reviewed->Release();another->Release();session->Release();
   if(!allowed) {
-    wprintf(L"MANDATORY_SESSION_RELEASE_TEST_FAILED\n");
+    RegCloseKey(tempKey);RegDeleteKeyW(HKEY_CURRENT_USER,testPath);
+    wprintf(L"SUCCESSFUL_REVIEW_RECEIPT_TEST_FAILED\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 38;
   }
-  // V10.9 strict policy: no Save Now bypass before Clear Both; after release
-  // Save, Save As and Print remain enabled.
+  // Save/Save As/Print all follow the existing optional policy, now unlocked
+  // only by a matching successful review receipt.
   bool policy=SetMandatoryOption(1) &&
     HaronexMandatory::Gate::EnforcementEnabled() &&
     HaronexMandatory::Gate::ShouldCancel(false,true,false) &&
@@ -160,15 +163,19 @@ int main(){
     !HaronexMandatory::Gate::ShouldCancel(true,true,false) &&
     !HaronexMandatory::Gate::ShouldCancel(true,false,false);
   if(!policy) {
-    wprintf(L"V109_STRICT_CLEAR_BOTH_POLICY_FAILED\n");
+    wprintf(L"STRICT_REVIEW_POLICY_FAILED\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 39;
   }
   HaronexMandatory::Gate gate;
   gate.ConfigureEventIdsForSmokeTest(101,102);
   FakeDoc* releasedForTest=new FakeDoc();
   FakeDoc* other=new FakeDoc();
-  bool separated=gate.ReleaseAfterClearBoth(releasedForTest) &&
-    gate.IsReleased(releasedForTest) && !gate.IsReleased(other);
+  bool separated=gate.BeginReview(releasedForTest,3,tempKey)&&
+    !gate.TryReleaseReviewedDocument(releasedForTest);
+  std::wstring eventToken=readRequest(L"ReviewRequestToken");
+  separated=separated&&receipt(eventToken,readRequest(L"ReviewRequestIdentity"))&&
+    !gate.TryReleaseReviewedDocument(other);
+  RegCloseKey(tempKey);RegDeleteKeyW(HKEY_CURRENT_USER,testPath);
   VARIANT_BOOL cancel=VARIANT_FALSE;
   VARIANTARG argv[3];for(int i=0;i<3;++i)VariantInit(&argv[i]);
   argv[0].vt=VT_BYREF|VT_BOOL;argv[0].pboolVal=&cancel;
@@ -178,6 +185,7 @@ int main(){
   DISPPARAMS saveArgs={argv,nullptr,3,0};
   bool saved=SUCCEEDED(gate.Invoke(101,IID_NULL,0,DISPATCH_METHOD,
                       &saveArgs,nullptr,nullptr,nullptr))&&cancel==VARIANT_FALSE;
+  separated=separated&&gate.IsReleased(releasedForTest)&&!gate.IsReleased(other);
   argv[1].vt=VT_DISPATCH;argv[1].pdispVal=releasedForTest;
   DISPPARAMS printArgs={argv,nullptr,2,0};
   bool printed=SUCCEEDED(gate.Invoke(102,IID_NULL,0,DISPATCH_METHOD,
@@ -283,6 +291,7 @@ int main(){
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 42;
   }
   wprintf(L"ENTERPRISE_POLICY_PRECEDENCE_OK\n");
+  wprintf(L"SUCCESSFUL_REVIEW_ONLY_UNLOCK_OK\n");
   wprintf(L"NATIVE_COM_AND_RIBBON_AND_MANDATORY_HASH_OK\n");
   SysFreeString(xml);ribbon->Release();CoUninitialize();return 0;
 }

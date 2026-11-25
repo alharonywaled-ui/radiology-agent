@@ -29,36 +29,39 @@ namespace RadiologyAgent {
     internal static string Identity(uint processId,string fullName) {
       return Digest(processId.ToString()+"\u001f"+fullName);
     }
-    internal static bool Approve(object document, string reviewedText, uint verifiedWindow) {
+    internal static bool Approve(object document, string reviewedText, uint verifiedWindow, uint command) {
       try {
         dynamic doc=document;
         string fullName=Convert.ToString(doc.FullName);
-        if(verifiedWindow==0)return false;
+        if(verifiedWindow==0||command==0)return false;
         uint processId;
         if(GetWindowThreadProcessId(new IntPtr(unchecked((int)verifiedWindow)),out processId)==0
             ||processId==0)return false;
         string current=Convert.ToString(doc.Content.Text);
         if(!String.Equals(current,reviewedText,StringComparison.Ordinal))return false;
-        string id=Identity(processId,fullName),hash=Digest(current);
-        if(String.IsNullOrEmpty(id)||String.IsNullOrEmpty(hash))return false;
-        using(var key=Registry.CurrentUser.CreateSubKey(
-                  @"Software\Haronex\MandatoryReviews\"+id)) {
-          if(key==null)return false;
-          // Each new successful review needs a subsequent Clear Both action.
-          key.DeleteValue("ClearBothHash",false);
-          key.DeleteValue("ClearBothV102Hash",false);
-          key.DeleteValue("ClearBothV103Hash",false);
-          key.SetValue("ApprovedHash",hash,RegistryValueKind.String);
+        string id=Identity(processId,fullName);
+        if(String.IsNullOrEmpty(id))return false;
+        using(var request=Registry.CurrentUser.OpenSubKey(@"Software\Haronex")) {
+          if(request==null||
+             Convert.ToUInt32(request.GetValue("ReviewRequestCommand",0))!=command||
+             Convert.ToUInt32(request.GetValue("LiveReviewCommand",0))!=command||
+             !String.Equals(Convert.ToString(request.GetValue("ReviewRequestIdentity","")),id,StringComparison.Ordinal))return false;
+          string token=Convert.ToString(request.GetValue("ReviewRequestToken",""));
+          Guid parsed;
+          if(!Guid.TryParseExact(token,"B",out parsed))return false;
+          using(var receipts=Registry.CurrentUser.CreateSubKey(@"Software\Haronex\ReviewReceipts")) {
+            if(receipts==null)return false;
+            // Only a completed, validated review for the matched click writes
+            // the nonce. No report text, paths or patient identifiers.
+            receipts.SetValue(token,id,RegistryValueKind.String);
+          }
         }
         return true;
       } catch {return false;}
     }
-    // A successful review is a one-time gate for the open document. We do
-    // not revoke access on subsequent edits. Native Word COM session tracks
-    // the released document after Clear Both, even across Save As.
-    internal static void Invalidate(string oldId) {
-      // Intentional no-op: text edits must never re-lock an approved document.
-    }
+    // Once a successful review is accepted, later corrections and Save As do
+    // not revoke permission for that same open COM document.
+    internal static void Invalidate(string oldId) {}
     internal static bool SelfTest() {
       return Digest("Text")==
         "71988c4d8e0803ba4519f0b2864c1331c14a1890bf8694e251379177bfedb5c3"
@@ -413,7 +416,7 @@ namespace RadiologyAgent {
       bool changedDoc=!String.Equals(documentId,id,StringComparison.Ordinal);
       bool changedText=!String.Equals(currentText,report,StringComparison.Ordinal);
       if(changedDoc||changedText) {
-        // A previously approved revision must not survive any observed edit.
+        // Cancel an obsolete in-flight review; a completed open-document approval is retained.
         if(!changedDoc&&changedText)MandatoryApproval.Invalidate(documentId);
         // Preserve the click while the document becomes available.
         if(runningCancellation!=null)runningCancellation.Cancel();
@@ -1746,7 +1749,7 @@ namespace RadiologyAgent {
           NotifyAnnotationResult(candidateCount,0,wordFailed+(int)purpleSkipped);
           pendingClick=false;return;
         }
-        if(!MandatoryApproval.Approve(doc,currentText,unchecked((uint)hwnd))) {
+        if(!MandatoryApproval.Approve((object)doc,currentText,unchecked((uint)hwnd),lastHandledCommand)) {
           LogFailure("MANDATORY_APPROVAL_NOT_STORED");
           pendingClick=false;CloseReviewOverlay();Notify(false);return;
         }

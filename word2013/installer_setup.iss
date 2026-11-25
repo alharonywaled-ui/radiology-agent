@@ -1,5 +1,5 @@
 #define AppName "Haronex Radiology Agent for Word 2013"
-#define AppVersion "11.12.13"
+#define AppVersion "11.12.14"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
 DefaultGroupName=Haronex
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_V11_12_13_MultiModel_Setup
+OutputBaseFilename=Haronex_Word2013_V11_12_14_MultiModel_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -162,7 +162,7 @@ begin
   MandatoryCheck.Width := MandatoryPage.SurfaceWidth;
   MandatoryCheck.Height := ScaleY(44);
   MandatoryCheck.Caption :=
-    'Enable Mandatory Review';
+    'Enable Mandatory Review (successful Review Text before Save, Save As and Print)';
   MandatoryCheck.Checked := InitialUserOption('MandatoryReviewEnabled', 'MANDATORYREVIEW');
   RecoveryCheck := TNewCheckBox.Create(MandatoryPage);
   RecoveryCheck.Parent := MandatoryPage.Surface;
@@ -204,7 +204,7 @@ begin
   if not Exec(ExpandConstant('{app}\RadiologyAgent.ReviewHost.exe'), '--worker-health', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
     RaiseException('Haronex local worker handshake failed. Check diagnostics.log.');
   // Default OFF, including silent installs. When enabled, the native Word
-  // event sink blocks Save, Save As and Print until Review Text + Clear Both.
+  // event sink blocks Save, Save As and Print until a successful Review Text.
   if not RegWriteDWordValue(HKCU, 'Software\Haronex',
        'MandatoryReviewEnabled', Ord(MandatoryCheck.Checked)) then
     RaiseException('Could not save Mandatory Review installation setting.');
