@@ -322,7 +322,7 @@ FINDINGS_LABELS = (
     "findings / observations", "findings/observations",
     "imaging findings", "radiological findings", "radiologic findings",
     "detailed findings", "clinical findings", "examination findings",
-    "study findings", "key findings", "main findings",
+    "study findings", "diagnostic findings", "key findings", "main findings",
     "imaging observations", "clinical observations", "observations",
     "observation", "imaging description", "examination description",
     "detailed description", "description", "report details",
