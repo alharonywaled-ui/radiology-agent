@@ -16,7 +16,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    internal const string ReviewAlgorithmVersion="haronex-v11-12-multimodel-r4";
+    internal const string ReviewAlgorithmVersion="haronex-v11-12-multimodel-r5";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=1; Height=1;
@@ -327,7 +327,7 @@ namespace RadiologyAgent {
           "suppressed_partial_logic","supported_conclusion_claims",
           "unsupported_conclusion_candidates","direct_conflicts",
           "logic_proposed","logic_returned","clinical_audit_completed",
-          "clinical_coverage_flags","patient_context_completed","patient_context_skipped","model_120b","model_20b","model_qwen","model_fallbacks",
+          "clinical_coverage_flags","patient_context_completed","patient_context_skipped","model_120b","model_20b","model_qwen","model_fallbacks","intelligent_validation_completed","intelligent_validation_findings","validation_ambiguous_skipped",
           "concurrency"};
         var safe=new StringBuilder(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
         safe.Append(" host_ms=").Append(Math.Max(0,hostElapsedMs));
