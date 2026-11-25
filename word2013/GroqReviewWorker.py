@@ -275,9 +275,43 @@ def language_audit_groups(key, chunks, reviewer=None):
 # boundaries. ^ with re.MULTILINE only handles LF, silently skipping a
 # Conclusion table in real Word reports. Recognize all three boundaries.
 WORD_BOUNDARY = r"(?:^|(?<=[\r\n\x07]))"
+# A conclusion is a semantic section, not one fixed English label.
+# Keep this list broad but line-anchored: a word inside a clinical sentence
+# must never start a new section. Supports common radiology wording, headings
+# in Word tables, numbered/bulleted headings, Markdown bold, and Arabic labels.
+CONCLUSION_LABELS = (
+    "summary of findings", "report summary", "diagnostic summary",
+    "overall impression", "clinical impression", "diagnostic impression",
+    "radiological impression", "radiologic impression", "final impression",
+    "impression/conclusion", "conclusion/impression",
+    "diagnostic opinion", "radiological opinion", "radiologic opinion",
+    "final opinion", "final diagnosis", "radiological diagnosis",
+    "radiologic diagnosis", "clinical diagnosis", "final assessment",
+    "overall assessment", "clinical assessment", "diagnostic assessment",
+    "final interpretation", "overall interpretation",
+    "conclusions", "conclusion", "impressions", "impression",
+    "interpretation", "opinion", "summary", "diagnoses", "diagnosis",
+    "assessment", "results", "result", "recommendations", "recommendation",
+    "plan", "advice", "comments", "comment", "remarks", "remark",
+    "الخلاصة", "الملخص التشخيصي", "ملخص النتائج", "ملخص",
+    "الانطباع التشخيصي", "الانطباع", "الرأي التشخيصي", "الرأي",
+    "التشخيص النهائي", "التشخيص", "النتيجة", "النتائج",
+    "التوصيات", "التوصية", "التقييم", "التفسير"
+)
+_CONCLUSION_LABEL_PATTERN = "|".join(
+    re.escape(label) for label in sorted(CONCLUSION_LABELS, key=len, reverse=True))
 CONCLUSION_HEADING = re.compile(
     WORD_BOUNDARY +
-    r"[ \t]*\*{0,3}[ \t]*(?:final[ \\t]+)?(?:diagnostic[ \\t]+impression|conclusions?|impressions?|opinion|summary|interpretation)[ \t]*\*{0,3}[ \t]*[:：]?[ \t]*",
+    r"[ \t]*(?:#{1,6}[ \t]*)?"
+    r"(?:(?:\d+(?:\.\d+)*[.)]?|[•▪◦*-])[ \t]*)?"
+    r"(?:\*\*|__)?[ \t]*(?:" + _CONCLUSION_LABEL_PATTERN + r")"
+    r"(?:\*\*|__)?[ \t]*(?:[:：\-–—][ \t]*(?:\*\*|__)?[ \t]*|(?=[\r\n\x07]|$))",
+    re.IGNORECASE
+)
+FINDINGS_HEADING = re.compile(
+    WORD_BOUNDARY + r"[ \t]*(?:#{1,6}[ \t]*)?"
+    r"(?:(?:\d+(?:\.\d+)*[.)]?|[•▪◦*-])[ \t]*)?"
+    r"(?:\*\*|__)?[ \t]*findings?(?:\*\*|__)?[ \t]*(?:[:：\-–—]|(?=[\r\n\x07]|$))",
     re.IGNORECASE
 )
 CONCLUSION_END = re.compile(
@@ -338,9 +372,21 @@ def clinical_chunks(texts):
     return kept
 
 def conclusion_section(report):
-    match = CONCLUSION_HEADING.search(report)
-    if not match:
+    candidates = list(CONCLUSION_HEADING.finditer(report))
+    if not candidates:
         return None
+    # Prefer a conclusion-like heading AFTER the last Findings heading.
+    # This avoids mistaking "Diagnosis:" in the clinical history/header for
+    # the report's final interpretation. If no Findings label exists, use
+    # the last explicit conclusion-like heading in the report.
+    findings = list(FINDINGS_HEADING.finditer(report))
+    if findings:
+        after_findings = [m for m in candidates if m.start() >= findings[-1].end()]
+        if not after_findings:
+            return None
+        match = after_findings[0]
+    else:
+        match = candidates[-1]
     tail = report[match.start():]
     further = CONCLUSION_HEADING.search(tail, len(match.group(0)))
     signed = CONCLUSION_END.search(tail, len(match.group(0)))
@@ -1485,7 +1531,7 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-v11-12-multimodel-r6":
+        if version != "haronex-v11-12-multimodel-r7":
             raise ValueError("Unsupported review version")
         original_chunk_count = len(texts)
         texts = clinical_chunks(texts)
@@ -1686,9 +1732,29 @@ def self_test():
         reviewer=lambda context: called_missing.append(context) or [fake]) == [[]]
     assert called_missing == []
     assert clinical_context_windows("Findings:\rNo acute abnormality.") == []
-    for heading in ("Impression:", "Conclusion:", "Opinion:", "Final Impression:",
-                    "Diagnostic Impression:", "Summary:", "Interpretation:"):
-        assert conclusion_section("Findings:\rNo acute abnormality.\r"+heading+"\rNo acute finding.")
+    for heading in (
+        "Impression:", "Conclusion:", "Opinion:", "Final Impression:",
+        "Diagnostic Impression:", "Summary:", "Interpretation:",
+        "Final Diagnosis:", "Diagnosis:", "Assessment:", "Results:", "Result:",
+        "Recommendations:", "Recommendation:", "Plan:", "Advice:", "Comments:",
+        "Remarks:", "Overall Impression:", "Clinical Impression:",
+        "Diagnostic Opinion:", "Final Assessment:", "Report Summary:",
+        "Summary of Findings:", "1. CONCLUSION:", "• Impression:",
+        "**Impression:**", "Conclusion / Impression:",
+        "الانطباع:", "الانطباع التشخيصي:", "الخلاصة:", "الرأي:",
+        "التشخيص:", "التشخيص النهائي:", "النتيجة:", "التوصيات:"
+    ):
+        sample_heading="Findings:\rNo acute abnormality.\r"+heading+"\rNo acute finding."
+        assert conclusion_section(sample_heading), heading
+    # Do not select a clinical-history Diagnosis heading when a final
+    # impression appears after Findings; do not mistake Findings for summary.
+    mixed=("Diagnosis: query malignancy.\rClinical History:\r"
+           "Follow-up imaging.\rFindings:\rStable lesion.\r"
+           "Final Radiological Impression:\rNo interval progression.")
+    assert conclusion_section(mixed).startswith("Final Radiological Impression")
+    assert conclusion_section("Diagnosis: suspected disease.\rFindings:\rStable.") is None
+    # A heading-like word embedded in ordinary prose is not a section marker.
+    assert conclusion_section("Findings:\rThe overall impression is stable. No acute abnormality.") is None
     assert snapshot_metrics()["conclusion_review_skipped_missing_section"] >= 1
     # Logic anchored to Findings MUST survive the dedicated audit.
     findings_quote = {"quote": "bilateral renal cortical cysts",
