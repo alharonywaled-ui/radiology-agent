@@ -42,7 +42,8 @@ def reset_metrics():
                         unsupported_conclusion_candidates=0,
                         direct_conflicts=0, logic_proposed=0,
                         logic_returned=0, clinical_audit_completed=0,
-                        clinical_coverage_flags=0)
+                        clinical_coverage_flags=0,
+                        conclusion_review_skipped_missing_section=0)
 def metric(name, increment=1):
     with _METRICS_LOCK:
         _METRICS[name] = _METRICS.get(name, 0) + increment
@@ -276,7 +277,7 @@ def language_audit_groups(key, chunks, reviewer=None):
 WORD_BOUNDARY = r"(?:^|(?<=[\r\n\x07]))"
 CONCLUSION_HEADING = re.compile(
     WORD_BOUNDARY +
-    r"[ \t]*\*{0,3}[ \t]*(?:conclusion|impression)[ \t]*\*{0,3}[ \t]*[:：]?[ \t]*",
+    r"[ \t]*\*{0,3}[ \t]*(?:final[ \\t]+)?(?:diagnostic[ \\t]+impression|conclusions?|impressions?|opinion|summary|interpretation)[ \t]*\*{0,3}[ \t]*[:：]?[ \t]*",
     re.IGNORECASE
 )
 CONCLUSION_END = re.compile(
@@ -462,7 +463,8 @@ def clinical_context_windows(full_report, max_chars=5900):
     """
     conclusion = conclusion_section(full_report)
     if not conclusion:
-        raise ReviewFailure("GROQ_CLINICAL_CONCLUSION_NOT_FOUND")
+        metric("conclusion_review_skipped_missing_section")
+        return []
     if len(full_report) <= max_chars:
         return [full_report]
     available = max_chars - len(conclusion) - 75
@@ -576,6 +578,10 @@ def adjudicate_partial_absence(key, report, conclusion_claim,
 def conclusion_issue_groups(key, chunks, reviewer=None, evidence_reviewer=None):
     full_report = "".join(chunks)
     contexts = clinical_context_windows(full_report)
+    if not contexts:
+        # Some reports legitimately contain Findings/Report body only. Skip
+        # only the Conclusion-vs-Findings pass; every other audit still runs.
+        return [[] for _ in chunks]
     if reviewer is None:
         reviewer = lambda content: api_review(
             key, content, system_prompt=CONCLUSION_SYSTEM,
@@ -1479,7 +1485,7 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-v11-12-multimodel-r5":
+        if version != "haronex-v11-12-multimodel-r6":
             raise ValueError("Unsupported review version")
         original_chunk_count = len(texts)
         texts = clinical_chunks(texts)
@@ -1673,12 +1679,17 @@ def self_test():
             "suggestion": "Reconcile with Findings after physician verification."}
     assert conclusion_issue_groups("offline", [clinical],
         reviewer=lambda context: [fake]) == [[dict(fake, section="conclusion")]]
-    try:
-        conclusion_issue_groups("offline", ["Normal report."],
-                                reviewer=lambda context: [fake])
-        raise AssertionError("Missing Conclusion silently bypassed logic audit")
-    except ReviewFailure as exc:
-        assert exc.code == "GROQ_CLINICAL_CONCLUSION_NOT_FOUND"
+    # Missing a Conclusion must skip ONLY this cross-section pass; it must
+    # never abort the full language/body/context/validation review.
+    called_missing=[]
+    assert conclusion_issue_groups("offline", ["Normal report."],
+        reviewer=lambda context: called_missing.append(context) or [fake]) == [[]]
+    assert called_missing == []
+    assert clinical_context_windows("Findings:\rNo acute abnormality.") == []
+    for heading in ("Impression:", "Conclusion:", "Opinion:", "Final Impression:",
+                    "Diagnostic Impression:", "Summary:", "Interpretation:"):
+        assert conclusion_section("Findings:\rNo acute abnormality.\r"+heading+"\rNo acute finding.")
+    assert snapshot_metrics()["conclusion_review_skipped_missing_section"] >= 1
     # Logic anchored to Findings MUST survive the dedicated audit.
     findings_quote = {"quote": "bilateral renal cortical cysts",
                       "category": "logic",
