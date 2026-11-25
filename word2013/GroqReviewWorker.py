@@ -281,7 +281,13 @@ WORD_BOUNDARY = r"(?:^|(?<=[\r\n\x07]))"
 # in Word tables, numbered/bulleted headings, Markdown bold, and Arabic labels.
 CONCLUSION_LABELS = (
     "summary of findings", "report summary", "diagnostic summary",
+    "conclusion / impression", "impression / conclusion",
+    "conclusion and impression", "impression and conclusion",
+    "summary / impression", "impression / summary",
+    "conclusion & recommendation", "conclusion and recommendation",
     "overall impression", "clinical impression", "diagnostic impression",
+    "clinical summary", "diagnostic findings", "key findings",
+    "final report", "radiology report", "report conclusion",
     "radiological impression", "radiologic impression", "final impression",
     "impression/conclusion", "conclusion/impression",
     "diagnostic opinion", "radiological opinion", "radiologic opinion",
