@@ -2340,6 +2340,11 @@ def serve():
             continue
         if not line.strip():
             continue
+        # Local host/worker handshake; no key, report or network operation.
+        if line.strip() == '{"operation":"health"}':
+            print(json.dumps({"ok":True,"operation":"health",
+                "review_version":"haronex-v11-12-multimodel-r8"}),flush=True)
+            continue
         main(line)
         sys.stdout.flush()
 

@@ -102,18 +102,38 @@ jobs:
           choco install innosetup --yes --no-progress
           $compiler=Join-Path $env:SystemDrive 'Program Files (x86)\Inno Setup 6\ISCC.exe'
           if (!(Test-Path $compiler)) { throw "Missing Inno Setup" }
+      - name: Generate installer integrity manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $bin=(Resolve-Path word2013/bin).Path
+          $worker=Join-Path $bin 'HaronexGroqWorker'
+          $rows=@()
+          foreach($name in @('RadiologyAgent.NativeShim.dll','RadiologyAgent.ReviewHost.exe','RadiologyAgent.KeySetup.exe')) {
+            $hash=(Get-FileHash (Join-Path $bin $name) -Algorithm SHA256).Hash
+            $rows+="$hash|$name"
+          }
+          $hash=(Get-FileHash (Join-Path $worker 'HaronexGroqWorker.exe') -Algorithm SHA256).Hash
+          $rows+="$hash|HaronexGroqWorker.exe"
+          Get-ChildItem (Join-Path $worker '_HaronexRuntime') -File -Recurse | ForEach-Object {
+            $relative=$_.FullName.Substring($worker.Length+1)
+            $hash=(Get-FileHash $_.FullName -Algorithm SHA256).Hash
+            $rows+="$hash|$relative"
+          }
+          $rows | Set-Content (Join-Path $bin 'HaronexFiles.sha256') -Encoding utf8
+          if($rows.Count -le 4) {throw 'Missing packaged runtime'}
       - name: Build one-file installer EXE
         shell: pwsh
         run: |
           $compiler=Join-Path $env:SystemDrive 'Program Files (x86)\Inno Setup 6\ISCC.exe'
           & $compiler word2013/installer_setup.iss
           if ($LASTEXITCODE -ne 0) { throw "Installer compile failed" }
-          if (!(Test-Path word2013/output/Haronex_Word2013_V11_12_11_MultiModel_Setup.exe)) { throw "Setup missing" }
+          if (!(Test-Path word2013/output/Haronex_Word2013_V11_12_12_MultiModel_Setup.exe)) { throw "Setup missing" }
       - name: Smoke test Web Mode installer and native COM Ribbon
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $installer=(Resolve-Path word2013/output/Haronex_Word2013_V11_12_11_MultiModel_Setup.exe).Path
+          $installer=(Resolve-Path word2013/output/Haronex_Word2013_V11_12_12_MultiModel_Setup.exe).Path
           $p=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
           if($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
           $reg=Get-ItemProperty 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word2013.Safe'
@@ -137,6 +157,20 @@ jobs:
           if (!$enabled -or $enabled.MandatoryReviewEnabled -ne 0) { throw 'Mandatory Review must default OFF in silent installs' }
           & word2013/bin/NativeSmoke.exe
           if ($LASTEXITCODE -ne 0) { throw "Native x86 COM or Ribbon test failed: $LASTEXITCODE" }
+          $keySetup=Join-Path $env:LOCALAPPDATA 'RadiologyAgent\Word2013Safe\RadiologyAgent.KeySetup.exe'
+          & $keySetup --verify-install
+          if($LASTEXITCODE -ne 0) {throw 'Installed manifest integrity check failed'}
+          $health=Start-Process -FilePath $hostExe -ArgumentList '--worker-health' -Wait -PassThru
+          if($health.ExitCode -ne 0) {throw 'Host/worker local handshake failed'}
+          # Reproduce a missing Worker, then restore the exact verified file.
+          Move-Item $worker ($worker+'.missing-test')
+          try {
+            $health=Start-Process -FilePath $hostExe -ArgumentList '--worker-health' -Wait -PassThru
+            if($health.ExitCode -eq 0) {throw 'Missing Worker falsely passed health check'}
+          } finally {Move-Item ($worker+'.missing-test') $worker}
+          $health=Start-Process -FilePath $hostExe -ArgumentList '--worker-health' -Wait -PassThru
+          if($health.ExitCode -ne 0) {throw 'Restored Worker failed health check'}
+          Write-Host 'INSTALLED_HOST_WORKER_HANDSHAKE_AND_MISSING_WORKER_RECOVERY_OK'
           Write-Host 'GROQ_QWEN_INSTALL_SMOKE_TEST_PASSED'
       - name: Build enterprise machine-wide installer and test domain denial
         shell: pwsh
@@ -144,7 +178,7 @@ jobs:
           $compiler=Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
           & $compiler word2013/installer_enterprise.iss
           if ($LASTEXITCODE -ne 0) { throw 'Enterprise installer compile failed' }
-          $enterprise='word2013/output/Haronex_Word2013_V11_12_11_Enterprise_Setup.exe'
+          $enterprise='word2013/output/Haronex_Word2013_V11_12_12_Enterprise_Setup.exe'
           if (!(Test-Path $enterprise)) { throw 'Enterprise setup missing' }
           & word2013/bin/RadiologyAgent.KeySetup.exe --authorize-uninstall
           if ($LASTEXITCODE -eq 0) { throw 'Non-domain CI administrator unexpectedly authorized' }
@@ -153,14 +187,14 @@ jobs:
       - name: Upload enterprise Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: Haronex_Word2013_V11_12_11_Enterprise
-          path: word2013/output/Haronex_Word2013_V11_12_11_Enterprise_Setup.exe
+          name: Haronex_Word2013_V11_12_12_Enterprise
+          path: word2013/output/Haronex_Word2013_V11_12_12_Enterprise_Setup.exe
           if-no-files-found: error
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: Haronex_Word2013_V11_12_11_MultiModel
-          path: word2013/output/Haronex_Word2013_V11_12_11_MultiModel_Setup.exe
+          name: Haronex_Word2013_V11_12_12_MultiModel
+          path: word2013/output/Haronex_Word2013_V11_12_12_MultiModel_Setup.exe
           if-no-files-found: error
 
       - name: Publish direct-download EXE as GitHub Release
@@ -170,13 +204,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference='Stop'
-          $exe='word2013/output/Haronex_Word2013_V11_12_11_MultiModel_Setup.exe'
+          $exe='word2013/output/Haronex_Word2013_V11_12_12_MultiModel_Setup.exe'
           if (!(Test-Path $exe)) { throw 'Tested EXE missing' }
-          $tag='haronex-v11-12-11-multimodel'
+          $tag='haronex-v11-12-12-multimodel'
           gh release view $tag --repo ${{ github.repository }} *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag $exe --repo ${{ github.repository }} --clobber
           } else {
-            gh release create $tag $exe --repo ${{ github.repository }} --title 'Haronex V11.12.11 MultiModel' --notes 'Word 2013 x86 installer: context-aware review, inline suggestion popup, single-click Apply. Offline CI smoke tested; clinical and real Word end-to-end validation still required.'
+            gh release create $tag $exe --repo ${{ github.repository }} --title 'Haronex V11.12.12 MultiModel' --notes 'Word 2013 x86 installer: context-aware review, inline suggestion popup, single-click Apply. Offline CI smoke tested; clinical and real Word end-to-end validation still required.'
           }
           if ($LASTEXITCODE -ne 0) { throw 'Direct EXE release publishing failed' }

@@ -141,7 +141,7 @@ namespace RadiologyAgent {
          ReadDword("LiveReviewCompleted")!=lastHandledCommand)
         WriteDword("LiveReviewCompleted",lastHandledCommand);
     }
-    private static void LogFailure(string code) {
+    internal static void LogFailure(string code) {
       try {
         // Only short reason codes; no report text, file paths, keys, prompts, or responses.
         if(String.IsNullOrWhiteSpace(code))code="UNKNOWN";
@@ -159,6 +159,14 @@ namespace RadiologyAgent {
       } catch {}
     }
 
+    private static void NotifyHostFailure(string code) {
+      WebReviewForm.SetReviewStatus(2);
+      string hint=code.StartsWith("HOST_API_KEY",StringComparison.Ordinal)||code=="KEY_OR_CONSENT_MISSING"
+        ?"Configure Haronex for this Windows account. Contact IT if the encrypted key cannot be read."
+        :"Close Word and ask IT to repair Haronex using the approved installer. No review was marked successful.";
+      MessageBox(IntPtr.Zero,"Haronex review failed.\r\n"+code+"\r\n"+hint,
+        "Haronex",0x00040000|0x00010000|0x10u);
+    }
     private static void Notify(bool success) {
       WebReviewForm.SetReviewStatus(success?1:2);
       MessageBox(IntPtr.Zero,success?"تمت المراجعة":"رجاءً أعد المحاولة",
@@ -1130,7 +1138,11 @@ namespace RadiologyAgent {
       // Rebind to the exact Word window that raised the Ribbon click.
       bool bound=ConnectWord();
       if(bound)PollWord();
-      if(!WebReviewForm.Approved()) {LogFailure("KEY_OR_CONSENT_MISSING");Notify(false);return;}
+      string installProblem=WebReviewForm.InstallationProblem();
+      if(installProblem!=null) {
+        LogFailure(installProblem);NotifyHostFailure(installProblem);return;
+      }
+      if(!WebReviewForm.Approved()) {LogFailure("KEY_OR_CONSENT_MISSING");NotifyHostFailure("KEY_OR_CONSENT_MISSING");return;}
       // Fail closed if the captured Word window cannot be verified. In
       // particular, don't analyze a snapshot from a previously clicked window.
       if(!bound||boundWordHwnd==0||boundWordHwnd!=ReadDword("WordWindowHwnd"))
@@ -1266,10 +1278,11 @@ namespace RadiologyAgent {
         // Any result for an obsolete revision is discarded.
       } catch(Exception ex) {
         if(!token.IsCancellationRequested&&id==documentId&&report==currentText) {
-          if(ex.Message!="Invalid review response")LogFailure("HOST_"+ex.GetType().Name);
+          string code=ex.Message=="Invalid review response"?"INVALID_WORKER_RESPONSE":WebReviewForm.HostFailureCode(ex);
+          if(ex.Message!="Invalid review response")LogFailure(code);
           failed=true;
           WebReviewForm.SetReviewStatus(2);
-          if(pendingClick){pendingClick=false;CloseReviewOverlay();Notify(false);}
+          if(pendingClick){pendingClick=false;CloseReviewOverlay();NotifyHostFailure(code);}
         }
       } finally {
         if(ReferenceEquals(runningCancellation,token))runningCancellation=null;

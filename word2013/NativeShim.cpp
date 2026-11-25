@@ -280,11 +280,16 @@ static std::wstring ModuleDirectory() {
   if(slash)*(slash+1)=L'\0';
   return std::wstring(path);
 }
-static void StartLiveMonitor() {
+static bool StartLiveMonitor() {
   std::wstring exe=ModuleDirectory()+L"RadiologyAgent.ReviewHost.exe";
-  if(GetFileAttributesW(exe.c_str())==INVALID_FILE_ATTRIBUTES)return;
-  // The C# monitor enforces a per-Windows-user singleton and talks to Word on its STA.
-  ShellExecuteW(nullptr,L"open",exe.c_str(),L"--monitor",nullptr,SW_HIDE);
+  if(GetFileAttributesW(exe.c_str())==INVALID_FILE_ATTRIBUTES) {
+    HaronexMandatory::DiagnosticValue(L"HostLaunchCode",2);
+    return false;
+  }
+  // The C# monitor enforces a per-Windows-user singleton.
+  INT_PTR code=reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr,L"open",exe.c_str(),L"--monitor",ModuleDirectory().c_str(),SW_HIDE));
+  HaronexMandatory::DiagnosticValue(L"HostLaunchCode",code>32?0:static_cast<DWORD>(code));
+  return code>32;
 }
 // Prefer the Word.Application instance that owns this ribbon callback, rather
 // than the process-wide foreground window (which may be another Word instance).
@@ -361,7 +366,12 @@ static void RequestReview(IDispatch* wordApplication) {
   if(rc!=ERROR_SUCCESS)return;
   g_lastReviewBusy=true;
   RefreshRibbonButton();
-  StartLiveMonitor();
+  if(!StartLiveMonitor()) {
+    HaronexMandatory::DiagnosticValue(L"LiveReviewCompleted",seq);
+    HaronexMandatory::DiagnosticValue(L"ReviewResult",2);
+    g_lastReviewBusy=false;RefreshRibbonButton();
+    MessageBoxW(root,L"Haronex ReviewHost is missing or cannot start. Close Word and contact IT to repair the installation.",L"Haronex",MB_OK|MB_ICONERROR);
+  }
 }
 
 // This independent Ribbon command toggles the panel without rerunning AI.

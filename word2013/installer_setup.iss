@@ -1,5 +1,5 @@
 #define AppName "Haronex Radiology Agent for Word 2013"
-#define AppVersion "11.12.11"
+#define AppVersion "11.12.12"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
 DefaultGroupName=Haronex
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_V11_12_11_MultiModel_Setup
+OutputBaseFilename=Haronex_Word2013_V11_12_12_MultiModel_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -17,11 +17,13 @@ DisableProgramGroupPage=yes
 UninstallDisplayName=Haronex (Word 2013 x86)
 
 [Files]
+Source: "bin\HaronexFiles.sha256"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\NDP48-x86-x64-AllOS-ENU.exe"; Flags: dontcopy
 Source: "bin\RadiologyAgent.NativeShim.dll"; DestDir: "{app}"; Flags: ignoreversion regserver
 Source: "bin\RadiologyAgent.ReviewHost.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\HaronexGroqWorker\HaronexGroqWorker.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\HaronexGroqWorker\_HaronexRuntime\*"; DestDir: "{app}\_HaronexRuntime"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "bin\RadiologyAgent.KeySetup.exe"; Flags: dontcopy
 Source: "bin\RadiologyAgent.KeySetup.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
@@ -62,7 +64,12 @@ var
 begin
   Result := '';
   NeedsRestart := False;
-  if HasDotNet48 then Exit;
+  if HasDotNet48 then begin
+    ExtractTemporaryFile('RadiologyAgent.KeySetup.exe');
+    if not Exec(ExpandConstant('{tmp}\RadiologyAgent.KeySetup.exe'), '--prepare-user-install', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
+      Result := 'Close Word before installing or repairing Haronex.';
+    Exit;
+  end;
   Log('Haronex: .NET Framework 4.8 missing; extracting bundled Microsoft offline installer.');
   try
     ExtractTemporaryFile('NDP48-x86-x64-AllOS-ENU.exe');
@@ -91,8 +98,13 @@ begin
     Result := '.NET Framework 4.8 installation failed (exit code ' + IntToStr(ExitCode) + ').';
     Exit;
   end;
-  if not HasDotNet48 then
+  if not HasDotNet48 then begin
     Result := '.NET Framework 4.8 is not detected after prerequisite installation. Restart Windows and rerun setup.';
+    Exit;
+  end;
+  ExtractTemporaryFile('RadiologyAgent.KeySetup.exe');
+  if not Exec(ExpandConstant('{tmp}\RadiologyAgent.KeySetup.exe'), '--prepare-user-install', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
+    Result := 'Close Word before installing or repairing Haronex.';
 end;
 
 function HasExistingHaronexAuthorization: Boolean;
@@ -181,16 +193,11 @@ var
   StagingPath: String;
   ResultCode: Integer;
 begin
-  if CurStep = ssInstall then begin
-    // Shut down the per-user persistent review monitor from an older release.
-    // Word must be closed by the user before upgrading; a new monitor is
-    // started automatically by the updated Word native COM add-in.
-    Exec(ExpandConstant('{sys}\taskkill.exe'),
-         '/F /IM RadiologyAgent.ReviewHost.exe', '', SW_HIDE,
-         ewWaitUntilTerminated, ResultCode);
-    Exit;
-  end;
   if CurStep <> ssPostInstall then Exit;
+  if not Exec(ExpandConstant('{app}\RadiologyAgent.KeySetup.exe'), '--verify-install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    RaiseException('Haronex installation integrity check failed. Re-run Setup and contact IT if files are blocked.');
+  if not Exec(ExpandConstant('{app}\RadiologyAgent.ReviewHost.exe'), '--worker-health', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    RaiseException('Haronex local worker handshake failed. Check diagnostics.log.');
   // Default OFF, including silent installs. When enabled, the native Word
   // event sink blocks Save, Save As and Print until Review Text + Clear Both.
   if not RegWriteDWordValue(HKCU, 'Software\Haronex',

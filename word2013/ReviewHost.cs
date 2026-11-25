@@ -10,6 +10,9 @@ namespace RadiologyAgent {
         Environment.Exit(LiveReviewMonitor.SelfTest()?0:7);
         return;
       }
+      if(args!=null&&args.Length>0&&args[0]=="--worker-health") {
+        Environment.Exit(WebReviewForm.ProbeInstalledWorker());return;
+      }
       Application.EnableVisualStyles();
       Application.SetCompatibleTextRenderingDefault(false);
       // Exactly one persistent monitor per interactive Windows user.
@@ -20,7 +23,8 @@ namespace RadiologyAgent {
           catch(AbandonedMutexException){owner=true;}
           if(!owner)return; // Duplicate startup is expected from Word's COM connection callbacks.
           Application.Run(new LiveReviewMonitor());
-        } catch {
+        } catch(Exception ex) {
+          LiveReviewMonitor.LogFailure(WebReviewForm.HostFailureCode(ex));
           // Automatic background startup must not interrupt Word.
           // The Ribbon stays available and a new monitor can start on its next click.
         } finally {

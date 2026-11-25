@@ -1,5 +1,5 @@
 #define AppName "Haronex Enterprise for Word 2013"
-#define AppVersion "11.12.11"
+#define AppVersion "11.12.12"
 [Setup]
 AppId={{56B8B1AF-99B7-4580-821E-276FF00C79B6}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={pf32}\Haronex
 DefaultGroupName=Haronex Enterprise
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_V11_12_11_Enterprise_Setup
+OutputBaseFilename=Haronex_Word2013_V11_12_12_Enterprise_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=admin
@@ -20,6 +20,7 @@ UninstallDisplayName=Haronex Enterprise (Word 2013 x86)
 UninstallDisplayIcon={app}\RadiologyAgent.ReviewHost.exe
 
 [Files]
+Source: "bin\HaronexFiles.sha256"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\NDP48-x86-x64-AllOS-ENU.exe"; Flags: dontcopy
 Source: "bin\RadiologyAgent.KeySetup.exe"; Flags: dontcopy
 Source: "bin\RadiologyAgent.KeySetup.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -43,6 +44,7 @@ Root: HKLM32; Subkey: "Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word
 Root: HKLM32; Subkey: "Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word2013.Safe"; ValueType: dword; ValueName: "LoadBehavior"; ValueData: "3"
 
 [Icons]
+Name: "{commonstartup}\Haronex Enterprise profile migration"; Filename: "{app}\RadiologyAgent.KeySetup.exe"; Parameters: "--migrate-legacy"; Flags: runminimized
 Name: "{commonprograms}\Haronex Enterprise\Configure my account"; Filename: "{app}\RadiologyAgent.KeySetup.exe"; Parameters: "--configure"
 Name: "{commonprograms}\Haronex Enterprise\Uninstall"; Filename: "{uninstallexe}"
 
@@ -134,6 +136,22 @@ begin
     Result := 'Haronex Enterprise requires a computer joined to dscan.corp and domain connectivity.';
     Exit;
   end;
+  if not Exec(ExpandConstant('{tmp}\RadiologyAgent.KeySetup.exe'), '--prepare-machine-install', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then begin
+    Result := 'Close Word in all sessions before installing or repairing Haronex. Check with IT if a review process cannot be stopped.';
+    Exit;
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var ExitCode: Integer;
+begin
+  if CurStep <> ssPostInstall then Exit;
+  if not Exec(ExpandConstant('{app}\RadiologyAgent.KeySetup.exe'), '--verify-install', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
+    RaiseException('Haronex installation integrity check failed. Re-run the approved installer; check security software logs with IT.');
+  if not Exec(ExpandConstant('{app}\RadiologyAgent.ReviewHost.exe'), '--worker-health', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
+    RaiseException('Haronex local worker handshake failed. Check diagnostics.log; installation was not verified.');
+  if not Exec(ExpandConstant('{app}\RadiologyAgent.KeySetup.exe'), '--migrate-loaded-users', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
+    RaiseException('Haronex user profile migration failed. Close Word in all sessions and rerun Setup.');
 end;
 
 function InitializeUninstall: Boolean;

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -65,15 +66,32 @@ namespace RadiologyAgent {
     }
     internal static string ReadGroqKey() {
       string path=GroqKeyPath();
-      if(!File.Exists(path))throw new Exception("Groq API key is missing. Reinstall Haronex.");
-      byte[] encrypted=Convert.FromBase64String(File.ReadAllText(path).Trim());
-      byte[] clear=ProtectedData.Unprotect(encrypted,null,DataProtectionScope.CurrentUser);
+      if(!File.Exists(path))throw new HaronexHostException("HOST_API_KEY_MISSING");
+      byte[] clear=null;
       try {
+        byte[] encrypted=Convert.FromBase64String(File.ReadAllText(path).Trim());
+        clear=ProtectedData.Unprotect(encrypted,null,DataProtectionScope.CurrentUser);
         string key=Encoding.UTF8.GetString(clear);
-        if(!key.StartsWith("gsk_",StringComparison.Ordinal)||key.Length<20)
-          throw new Exception("Groq API key format is invalid.");
+        if(!key.StartsWith("gsk_",StringComparison.Ordinal)||key.Length<20||key.Length>256)
+          throw new HaronexHostException("HOST_API_KEY_INVALID");
         return key;
-      } finally {Array.Clear(clear,0,clear.Length);}
+      } catch(FormatException ex){throw new HaronexHostException("HOST_API_KEY_CORRUPT",ex);}
+        catch(CryptographicException ex){throw new HaronexHostException("HOST_API_KEY_DPAPI_FAILED",ex);}
+        catch(UnauthorizedAccessException ex){throw new HaronexHostException("HOST_API_KEY_ACCESS_DENIED",ex);}
+        catch(IOException ex){throw new HaronexHostException("HOST_API_KEY_READ_FAILED",ex);}
+      finally {if(clear!=null)Array.Clear(clear,0,clear.Length);}
+    }
+    internal static string HostFailureCode(Exception ex) {
+      var known=ex as HaronexHostException;
+      if(known!=null)return known.Code;
+      var win=ex as Win32Exception;
+      if(win!=null)return "HOST_WIN32_"+win.NativeErrorCode;
+      if(ex is UnauthorizedAccessException)return "HOST_ACCESS_DENIED";
+      if(ex is IOException)return "HOST_IO_ERROR";
+      return "HOST_"+ex.GetType().Name;
+    }
+    internal static string InstallationProblem() {
+      return InstallHealth.CheckEssential(AppDomain.CurrentDomain.BaseDirectory);
     }
     internal static string CachePath(string report,bool selection,string patientContext="") {
       string identity=ReviewAlgorithmVersion+"|"+(selection?"selection":"document")+"|"+patientContext+"|"+report;
@@ -291,29 +309,74 @@ namespace RadiologyAgent {
       try {if(!old.HasExited)KillWorkerTree(old);}catch{}
       try {old.Dispose();}catch{}
     }
-    private static Process EnsureResidentWorker() {
+    private static string ReadWorkerLine(Process process,string payload,int maxMs,CancellationToken cancellation) {
+      if(payload.IndexOf('\r')>=0||payload.IndexOf('\n')>=0)
+        throw new HaronexHostException("HOST_INVALID_WORKER_FRAMING");
+      byte[] rawInput=new UTF8Encoding(false).GetBytes(payload+"\n");
       try {
-        if(residentWorker!=null&&!residentWorker.HasExited)
-          return residentWorker;
-      } catch {}
+        process.StandardInput.BaseStream.Write(rawInput,0,rawInput.Length);
+        process.StandardInput.BaseStream.Flush();
+      } catch(IOException ex){throw new HaronexHostException("HOST_WORKER_PIPE_WRITE_FAILED",ex);}
+      Task<string> output=process.StandardOutput.ReadLineAsync();
+      var watch=Stopwatch.StartNew();
+      while(!output.IsCompleted) {
+        cancellation.ThrowIfCancellationRequested();
+        if(process.HasExited)throw new HaronexHostException("HOST_WORKER_EXITED");
+        if(watch.ElapsedMilliseconds>maxMs)throw new HaronexHostException("HOST_WORKER_TIMEOUT");
+        Thread.Sleep(100);
+      }
+      cancellation.ThrowIfCancellationRequested();
+      if(output.IsFaulted)throw new HaronexHostException("HOST_WORKER_PIPE_READ_FAILED");
+      if(output.IsCanceled)throw new HaronexHostException("HOST_WORKER_PIPE_CANCELED");
+      string response=output.Result;
+      if(String.IsNullOrWhiteSpace(response))throw new HaronexHostException("HOST_WORKER_NO_RESPONSE");
+      return response.Trim();
+    }
+    private static Process EnsureResidentWorker(CancellationToken cancellation) {
+      string problem=InstallationProblem();
+      if(problem!=null)throw new HaronexHostException(problem);
+      try {if(residentWorker!=null&&!residentWorker.HasExited)return residentWorker;}catch{}
       StopResidentWorker();
-      string executable=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
-                                     "HaronexGroqWorker.exe");
-      if(!File.Exists(executable))
-        throw new Exception("Groq worker missing. Reinstall Haronex.");
-      var info=new ProcessStartInfo(executable,"--server"){
-        UseShellExecute=false,CreateNoWindow=true,
-        WindowStyle=ProcessWindowStyle.Hidden,
-        RedirectStandardInput=true,RedirectStandardOutput=true,
-        StandardOutputEncoding=new UTF8Encoding(false)
-      };
-      // .NET Framework 4.8 doesn't expose ProcessStartInfo.StandardInputEncoding.
-      // Force Python UTF-8 and send raw UTF-8 bytes with newline framing.
-      info.EnvironmentVariables["PYTHONUTF8"]="1";
-      info.EnvironmentVariables["PYTHONIOENCODING"]="utf-8:strict";
-      residentWorker=Process.Start(info);
-      if(residentWorker==null)throw new Exception("Groq worker failed to start.");
-      return residentWorker;
+      string executable=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"HaronexGroqWorker.exe");
+      // Retry the LOCAL health handshake once, before any report or key is sent.
+      for(int attempt=0;attempt<2;attempt++) {
+        cancellation.ThrowIfCancellationRequested();
+        try {
+          var info=new ProcessStartInfo(executable,"--server"){
+            UseShellExecute=false,CreateNoWindow=true,
+            WindowStyle=ProcessWindowStyle.Hidden,
+            WorkingDirectory=AppDomain.CurrentDomain.BaseDirectory,
+            RedirectStandardInput=true,RedirectStandardOutput=true,
+            StandardOutputEncoding=new UTF8Encoding(false)
+          };
+          info.EnvironmentVariables["PYTHONUTF8"]="1";
+          info.EnvironmentVariables["PYTHONIOENCODING"]="utf-8:strict";
+          residentWorker=Process.Start(info);
+          if(residentWorker==null)throw new HaronexHostException("HOST_WORKER_START_FAILED");
+          string hello=ReadWorkerLine(residentWorker,"{\"operation\":\"health\"}",30000,cancellation);
+          var json=new JavaScriptSerializer().DeserializeObject(hello) as Dictionary<string,object>;
+          if(json==null||!json.ContainsKey("ok")||!Convert.ToBoolean(json["ok"])||
+             !json.ContainsKey("operation")||Convert.ToString(json["operation"])!="health"||
+             !json.ContainsKey("review_version")||Convert.ToString(json["review_version"])!=ReviewAlgorithmVersion)
+            throw new HaronexHostException("HOST_WORKER_PROTOCOL_MISMATCH");
+          return residentWorker;
+        }catch(OperationCanceledException){StopResidentWorker();throw;}
+         catch(Exception ex){
+          StopResidentWorker();
+          if(attempt==1)throw new HaronexHostException(HostFailureCode(ex),ex);
+        }
+      }
+      throw new HaronexHostException("HOST_WORKER_START_FAILED");
+    }
+    internal static int ProbeInstalledWorker() {
+      workerGate.Wait();
+      try {
+        EnsureResidentWorker(CancellationToken.None);
+        return 0;
+      } catch(Exception ex) {
+        LiveReviewMonitor.LogFailure(HostFailureCode(ex));
+        return 45;
+      } finally {StopResidentWorker();workerGate.Release();}
     }
     private static void WritePerformance(string response,long hostElapsedMs,long memoryMb) {
       try {
@@ -358,36 +421,9 @@ namespace RadiologyAgent {
       var watch=Stopwatch.StartNew();
       try {
         cancellation.ThrowIfCancellationRequested();
-        Process process=EnsureResidentWorker();
-        // Exactly one JSON line in/out. The subprocess is private to this
-        // user's ReviewHost; concurrent forms serialize on workerGate.
-        if(payload.IndexOf('\r')>=0||payload.IndexOf('\n')>=0)
-          throw new Exception("Invalid worker transport framing.");
-        byte[] rawInput=new UTF8Encoding(false).GetBytes(payload+"\n");
-        process.StandardInput.BaseStream.Write(rawInput,0,rawInput.Length);
-        process.StandardInput.BaseStream.Flush();
-        Task<string> output=process.StandardOutput.ReadLineAsync();
-        int maxMs=(int)Math.Min(2400000L,
-                   Math.Max(340000L,(long)count*340000L));
-        while(!output.Wait(150)) {
-          if(cancellation.IsCancellationRequested) {
-            StopResidentWorker();cancellation.ThrowIfCancellationRequested();
-          }
-          if(process.HasExited) {
-            StopResidentWorker();
-            throw new Exception("Groq worker unexpectedly exited.");
-          }
-          if(watch.ElapsedMilliseconds>maxMs) {
-            StopResidentWorker();
-            throw new Exception("Groq review timed out.");
-          }
-        }
-        cancellation.ThrowIfCancellationRequested();
-        string response=output.Result;
-        if(String.IsNullOrWhiteSpace(response)) {
-          StopResidentWorker();
-          throw new Exception("Groq worker sent no response.");
-        }
+        Process process=EnsureResidentWorker(cancellation);
+        int maxMs=(int)Math.Min(2400000L,Math.Max(340000L,(long)count*340000L));
+        string response=ReadWorkerLine(process,payload,maxMs,cancellation);
         workerLastUsedUtc=DateTime.UtcNow;
         long memory=0;
         try {process.Refresh();memory=process.PrivateMemorySize64/(1024*1024);}catch{}
