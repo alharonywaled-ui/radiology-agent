@@ -16,7 +16,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    internal const string ReviewAlgorithmVersion="haronex-v11-12-multimodel-r2";
+    internal const string ReviewAlgorithmVersion="haronex-v11-12-multimodel-r3";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=1; Height=1;
@@ -75,8 +75,8 @@ namespace RadiologyAgent {
         return key;
       } finally {Array.Clear(clear,0,clear.Length);}
     }
-    internal static string CachePath(string report,bool selection) {
-      string identity=ReviewAlgorithmVersion+"|"+(selection?"selection":"document")+"|"+report;
+    internal static string CachePath(string report,bool selection,string patientContext="") {
+      string identity=ReviewAlgorithmVersion+"|"+(selection?"selection":"document")+"|"+patientContext+"|"+report;
       byte[] hash;
       using(var sha=SHA256.Create())hash=sha.ComputeHash(Encoding.UTF8.GetBytes(identity));
       string token=BitConverter.ToString(hash).Replace("-","").ToLowerInvariant();
@@ -142,8 +142,9 @@ namespace RadiologyAgent {
         var prompts=new List<string>();
         for(int i=0;i<chunks.Count;i++)prompts.Add(BuildPrompt(chunks[i],i,chunks.Count));
         var serializer=new JavaScriptSerializer{MaxJsonLength=2000000};
-        var payload=serializer.Serialize(new Dictionary<string,object>{{"prompts",prompts},{"texts",chunks},{"review_version",ReviewAlgorithmVersion},{"api_key",ReadGroqKey()}});
-        string cacheFile=CachePath(report,hasSelection);
+        string context=LiveReviewMonitor.ReadPatientContext((object)doc,Convert.ToString(doc.Content.Text));
+        var payload=serializer.Serialize(new Dictionary<string,object>{{"prompts",prompts},{"texts",chunks},{"patient_context",context},{"review_version",ReviewAlgorithmVersion},{"api_key",ReadGroqKey()}});
+        string cacheFile=CachePath(report,hasSelection,context);
         string workerResult=ReadCached(cacheFile);
         bool cached=workerResult!=null;
         if(!cached) {
@@ -326,7 +327,7 @@ namespace RadiologyAgent {
           "suppressed_partial_logic","supported_conclusion_claims",
           "unsupported_conclusion_candidates","direct_conflicts",
           "logic_proposed","logic_returned","clinical_audit_completed",
-          "clinical_coverage_flags","model_120b","model_20b","model_qwen","model_fallbacks",
+          "clinical_coverage_flags","patient_context_completed","patient_context_skipped","model_120b","model_20b","model_qwen","model_fallbacks",
           "concurrency"};
         var safe=new StringBuilder(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
         safe.Append(" host_ms=").Append(Math.Max(0,hostElapsedMs));

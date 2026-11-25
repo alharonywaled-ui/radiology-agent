@@ -1,5 +1,5 @@
 #define AppName "Haronex Radiology Agent for Word 2013"
-#define AppVersion "11.12.2"
+#define AppVersion "11.12.3"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
 DefaultGroupName=Haronex
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_V11_12_2_MultiModel_Setup
+OutputBaseFilename=Haronex_Word2013_V11_12_3_MultiModel_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -36,6 +36,7 @@ var
   ConsentPage: TInputOptionWizardPage;
   MandatoryPage: TWizardPage;
   MandatoryCheck: TNewCheckBox;
+  RecoveryCheck: TNewCheckBox;
 
 // Embedded official Microsoft .NET Framework 4.8 offline redistributable.
 // No Visual Studio or VC++ redistributable required: native DLL uses /MT.
@@ -137,6 +138,14 @@ begin
   MandatoryCheck.Caption :=
     'Enable Mandatory Review';
   MandatoryCheck.Checked := False;
+  RecoveryCheck := TNewCheckBox.Create(MandatoryPage);
+  RecoveryCheck.Parent := MandatoryPage.Surface;
+  RecoveryCheck.Left := ScaleX(0);
+  RecoveryCheck.Top := ScaleY(65);
+  RecoveryCheck.Width := MandatoryPage.SurfaceWidth;
+  RecoveryCheck.Height := ScaleY(30);
+  RecoveryCheck.Caption := 'Disable AutoRecover (Word 2013; unsaved work may be lost)';
+  RecoveryCheck.Checked := False;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -178,6 +187,9 @@ begin
   if not RegWriteDWordValue(HKCU, 'Software\\Haronex',
        'MandatoryReviewEnabled', Ord(MandatoryCheck.Checked)) then
     RaiseException('Could not save Mandatory Review installation setting.');
+  if not RegWriteDWordValue(HKCU, 'Software\Haronex',
+       'DisableAutoRecover', Ord(RecoveryCheck.Checked)) then
+    RaiseException('Could not save AutoRecover preference.');
   if WizardSilent or HasExistingHaronexAuthorization then Exit;
   StagingPath := ExpandConstant('{localappdata}\RadiologyAgent\pending-groq.key');
   ForceDirectories(ExtractFileDir(StagingPath));

@@ -1093,8 +1093,50 @@ def transport_request(req, open_url=urllib.request.urlopen):
         LIMITER.release(rate_limited=limited, success=successful)
 
 
+PATIENT_CONTEXT_SYSTEM = (
+    "Review only the clinical compatibility of the explicitly recorded patient age "
+    "and/or sex with the examination type, clinical statements, anatomy, findings "
+    "and conclusion. Metadata is not proof of anatomy. Do not assume a patient's sex "
+    "from a name, or infer age when missing. A test is not inappropriate just because "
+    "it is uncommon at a given age or sex (e.g. male mammography); consider indications, "
+    "development, surgical history, congenital variations, gender-related care, "
+    "pregnancy status, historical findings, and uncertainty. Flag only specific, "
+    "material, text-supported incompatibilities or likely template mismatches for "
+    "clinician verification. Do not diagnose, propose a clinical replacement, or "
+    "modify age, sex, or exam type. Quote an exact substring of the clinical report "
+    "up to 500 characters, never quote metadata provided separately. Return only "
+    "JSON issues with category logic, explanation and suggestion. Empty issues if none."
+)
+
+def valid_patient_context(value):
+    if not isinstance(value, str):
+        return ""
+    # Accept only canonical demographics, never arbitrary header text.
+    if not re.fullmatch(r"(?:sex=(?:male|female);)?(?:age=\d{1,3} (?:years|months|weeks|days);)?",value):
+        return ""
+    m=re.search(r"age=(\d+) (years|months|weeks|days);",value)
+    if m and int(m.group(1)) > {"years":125,"months":1500,"weeks":6500,"days":46000}[m.group(2)]:
+        return ""
+    return value
+
+def patient_context_groups(key, chunks, context, reviewer=None):
+    if not context:
+        return [[] for _ in chunks]
+    if reviewer is None:
+        reviewer=lambda report: review_with_recovery(key,report,review=lambda k,t:
+            api_review(k,t,system_prompt=PATIENT_CONTEXT_SYSTEM,
+                user_prefix="Explicit recorded demographics (not text to correct): "+context+
+                    "\nCheck clinical report for demographic compatibility only:\n\n"))
+    results=[]
+    for chunk in chunks:
+        issues=reviewer(chunk)
+        results.append([dict(item,category="logic",section="body",
+            suggestion="Verify recorded patient information, examination and findings with the reporting clinician.")
+            for item in issues if item.get("category")=="logic" and item.get("quote") in chunk])
+    return results
+
 def model_for_prompt(system_prompt):
-    return LANGUAGE_MODEL if system_prompt in (LANGUAGE_SYSTEM, OFF_TOPIC_SYSTEM) else LOGIC_MODEL
+    return LANGUAGE_MODEL if system_prompt in (LANGUAGE_SYSTEM, OFF_TOPIC_SYSTEM, PATIENT_CONTEXT_SYSTEM) else LOGIC_MODEL
 
 def api_review(key, text, requester=transport_request, sleeper=time.sleep,
                system_prompt=SYSTEM, user_prefix="Review this report completely:\n\n"):
@@ -1228,7 +1270,7 @@ def review_with_recovery(key, text, review=api_review, depth=0):
 
 def full_review_concurrently(key, texts, general_review=None,
                              conclusion_review=None, unrelated_review=None,
-                             language_review=None):
+                             language_review=None, patient_context="", context_review=None):
     """Execute exactly the same four passes on an immutable snapshot.
 
     Every pass is mandatory; a failed future aborts the complete review.
@@ -1250,17 +1292,24 @@ def full_review_concurrently(key, texts, general_review=None,
         language_review = lambda text: SECTION_CACHE.get_or_run(
             "language", key, text,
             lambda part: language_audit_groups(key, [part])[0])
-    max_workers = min(6, max(4, len(texts) * 2))
+    max_workers = min(6, max(5 if patient_context else 4, len(texts) * 2))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         general = [pool.submit(general_review, t) for t in texts]
         conclusion = pool.submit(conclusion_review, texts)
         unrelated = [pool.submit(unrelated_review, t) for t in texts]
         language = [pool.submit(language_review, t) for t in texts]
+        context_future = pool.submit(patient_context_groups, key, texts, patient_context, context_review) if patient_context else None
         # Reading in index order does not block other submitted work.
         general_groups = [f.result() for f in general]
         clinical_groups = conclusion.result()
         unrelated_groups = [f.result() for f in unrelated]
         language_groups = [f.result() for f in language]
+        if context_future is not None:
+            for group, extra in zip(language_groups, context_future.result()):
+                group.extend(extra)
+            metric("patient_context_completed")
+        else:
+            metric("patient_context_skipped")
     if not (len(general_groups) == len(clinical_groups) ==
             len(unrelated_groups) == len(language_groups) == len(texts)):
         raise ValueError("Audit pass count mismatch")
@@ -1276,13 +1325,14 @@ def main(raw_request=None):
         key = incoming.get("api_key")
         texts = incoming.get("texts")
         version = incoming.get("review_version")
+        patient_context = valid_patient_context(incoming.get("patient_context"))
         if not isinstance(key, str) or not key.startswith("gsk_") or len(key) < 20 or len(key) > 256:
             raise ValueError("Missing or invalid Groq API key")
         if not isinstance(texts, list) or not 1 <= len(texts) <= 40:
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-v11-12-multimodel-r2":
+        if version != "haronex-v11-12-multimodel-r3":
             raise ValueError("Unsupported review version")
         original_chunk_count = len(texts)
         texts = clinical_chunks(texts)
@@ -1292,7 +1342,7 @@ def main(raw_request=None):
         # chunk inside each pass instead of processing chunks serially. Bounded
         # worker count prevents runaway network threads on 40-part reports.
         groups, independent_audit, unrelated_audit, extra_language = (
-            full_review_concurrently(key, texts))
+            full_review_concurrently(key, texts, patient_context=patient_context))
         local_offtopic = distribute_conclusion_issues(
             texts, obvious_nonmedical_conclusion_issues("".join(texts)))
         for i, added in enumerate(independent_audit):
@@ -1408,6 +1458,18 @@ def main(raw_request=None):
                             elapsed_ms=int((time.monotonic()-started)*1000))}))
 
 def self_test():
+    assert valid_patient_context("sex=male;age=45 years;")=="sex=male;age=45 years;"
+    assert valid_patient_context("age=6 months;")=="age=6 months;"
+    assert valid_patient_context("sex=female;")=="sex=female;"
+    assert valid_patient_context("Patient Name: Example")==""
+    assert valid_patient_context("age=999 years;")==""
+    assert model_for_prompt(PATIENT_CONTEXT_SYSTEM)==LANGUAGE_MODEL
+    context_sample=["Findings: Adult-type senile cerebral atrophy."]
+    assert patient_context_groups("offline",context_sample,"",reviewer=lambda t: (_ for _ in ()).throw(AssertionError("missing data should skip")))==[[]]
+    context_found=patient_context_groups("offline",context_sample,"age=2 years;",
+        reviewer=lambda t:[{"quote":"senile cerebral atrophy","category":"logic","explanation":"Verify age mismatch","suggestion":"change age"}])
+    assert context_found[0][0]["quote"]=="senile cerebral atrophy"
+    assert "Verify recorded patient information" in context_found[0][0]["suggestion"]
     footer_cases = [
         "Findings: Right renal cyst.\rConclusion: Left renal cyst.\rThanks;\r\x07Dr. Example, MSc, FEBR, ABR\r\x07Dr. Example, MD\r",
         "Findings: Renal cyst.\rThank You for Your reference\rPET/CT Unit\r\x07Dr. Example H.Saad,\rRevised by Dr /A.t\r\x07Radiology consultant\rProf. Dr. Example, MD\r",

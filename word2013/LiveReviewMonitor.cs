@@ -83,6 +83,7 @@ namespace RadiologyAgent {
     private bool polling;
     private int missingWordTicks;
     private string documentId, currentText, snapshotToken;
+    private string patientContext="";
     private DateTime lastChangeUtc;
     private string readyResponse;
     private bool failed, working, pendingClick;
@@ -251,6 +252,111 @@ namespace RadiologyAgent {
       }
     }
 
+    // Extract only explicit demographic values; never send names, patient IDs,
+    // accession numbers, DOB or raw header text. Conflicting fields are unknown.
+    internal static string ParsePatientContext(IEnumerable<string> sources) {
+      var sexes=new HashSet<string>(StringComparer.Ordinal);
+      var ages=new HashSet<string>(StringComparer.Ordinal);
+      var opts=RegexOptions.IgnoreCase|RegexOptions.CultureInvariant;
+      const string sep=@"[\s\x07:=：\-]*";
+      foreach(string source in sources) {
+        if(String.IsNullOrWhiteSpace(source))continue;
+        string text=source.Normalize(NormalizationForm.FormKC);
+        // Each source is a bounded header or the initial administrative block.
+        text=text.Replace('٠','0').Replace('١','1').Replace('٢','2').Replace('٣','3').Replace('٤','4').Replace('٥','5').Replace('٦','6').Replace('٧','7').Replace('٨','8').Replace('٩','9');
+        foreach(Match m in Regex.Matches(text,@"(?:\b(?:patient\s+)?(?:sex|gender)\b|(?:الجنس|النوع))"+sep+@"(female|male|[fm]|ذكر|أنثى|انثى)(?![\w])",opts)) {
+          string v=m.Groups[1].Value.ToLowerInvariant();
+          sexes.Add(v=="m"||v=="male"||v=="ذكر"?"male":"female");
+        }
+        // Explicit age label, or an age expression directly associated with
+        // the patient; no inference from identifiers or examination names.
+        string unit=@"(years?|yrs?|y|months?|mos?|mo|days?|d|weeks?|wks?|wk|سنة|سنوات|عام|أعوام|شهر|شهور|أشهر|يوم|أيام|أسبوع|أسابيع)";
+        var patterns=new[]{
+          @"(?:\b(?:patient\s+)?age\b|(?:العمر|السن))"+sep+@"(\d{1,3})(?:[ \t-]*"+unit+@")?(?![\d./])",
+          @"\b(\d{1,3})[ \t-]*"+unit+@"[ \t-]*(?:old\b|(?=(?:male|female)\b))",
+          @"\b(\d{1,3})[ \t-]*"+unit+@"[ \t]*/[ \t]*(?=[MF]\b)"
+        };
+        foreach(string pattern in patterns)
+          foreach(Match m in Regex.Matches(text,pattern,opts)) {
+            int n;if(!Int32.TryParse(m.Groups[1].Value,out n))continue;
+            string u=m.Groups[2].Value.ToLowerInvariant();
+            string canonical=u.StartsWith("mo")||u=="شهر"||u=="شهور"||u=="أشهر"?"months":
+              u.StartsWith("d")||u=="يوم"||u=="أيام"?"days":
+              u.StartsWith("w")||u=="أسبوع"||u=="أسابيع"?"weeks":"years";
+            int max=canonical=="years"?125:canonical=="months"?1500:canonical=="weeks"?6500:46000;
+            if(n>=0&&n<=max)ages.Add(n.ToString(System.Globalization.CultureInfo.InvariantCulture)+" "+canonical);
+          }
+        foreach(Match m in Regex.Matches(text,@"\b\d{1,3}[ \t-]*"+unit+@"[ \t-]*(?:old[ \t,/-]*)?(male|female|[fm])\b",opts)) {
+          string v=m.Groups[2].Value.ToLowerInvariant();
+          sexes.Add(v=="m"||v=="male"?"male":"female");
+        }
+        foreach(Match m in Regex.Matches(text,@"\b\d{1,3}[ \t-]*"+unit+@"[ \t]*/[ \t]*([mf])\b",opts))
+          sexes.Add(m.Groups[2].Value.ToLowerInvariant()=="m"?"male":"female");
+      }
+      string age="",sex="";
+      if(ages.Count==1)foreach(string a in ages)age=a;
+      if(sexes.Count==1)foreach(string a in sexes)sex=a;
+      return (sex.Length>0?"sex="+sex+";":"")+(age.Length>0?"age="+age+";":"");
+    }
+    private static void AddContextSource(List<string> result,string value) {
+      if(!String.IsNullOrWhiteSpace(value)&&value.Length<=12000&&result.Count<50)result.Add(value);
+    }
+    private static void AddShapeContext(List<string> result,object shape,int depth) {
+      if(depth>3||result.Count>=50)return;
+      try {dynamic s=shape;if(Convert.ToInt32(s.Type)==6) {
+        dynamic g=s.GroupItems;int count=Math.Min(40,(int)g.Count);
+        for(int i=1;i<=count;i++)try {AddShapeContext(result,(object)g.Item(i),depth+1);}catch{}
+      }}catch{}
+      try {dynamic s=shape;if(Convert.ToInt32(s.TextFrame.HasText)!=0)
+        AddContextSource(result,Convert.ToString(s.TextFrame.TextRange.Text));}catch{}
+    }
+    internal static string ReadPatientContext(object document,string report) {
+      var sources=new List<string>();
+      // Main-story top tables are often used instead of a real Word header.
+      string top=(report??"").Substring(0,Math.Min(1800,(report??"").Length));
+      var clinical=Regex.Match(top,@"(?:^|[\r\n\x07])[ \t]*(?:findings|impression|conclusion|clinical history|clinical data|history|technique|comparison)\s*[:：\-]",RegexOptions.IgnoreCase);
+      if(clinical.Success)top=top.Substring(0,clinical.Index);
+      AddContextSource(sources,top);
+      int topEnd=top.Length;
+      try {
+        dynamic d=document;
+        // Only first-section headers, including first/even/primary variants.
+        // Disagreement between variants suppresses that demographic field.
+        dynamic headers=d.Sections.Item(1).Headers;
+        for(int i=1;i<=3;i++)try {
+          dynamic h=headers.Item(i);
+          if(!(bool)h.Exists)continue;
+          AddContextSource(sources,Convert.ToString(h.Range.Text));
+          dynamic shapes=h.Shapes;int count=Math.Min(40,(int)shapes.Count);
+          for(int j=1;j<=count;j++)try {AddShapeContext(sources,(object)shapes.Item(j),0);}catch{}
+        }catch{}
+      }catch{}
+      try {
+        dynamic d=document,shapes=d.Shapes;
+        int count=Math.Min(60,(int)shapes.Count);
+        int start=(int)d.Content.Start;
+        for(int j=1;j<=count;j++)try {
+          dynamic s=shapes.Item(j);
+          int at=(int)s.Anchor.Start-start;
+          if(at>=0&&at<=topEnd)AddShapeContext(sources,(object)s,0);
+        }catch{}
+      }catch{}
+      try{return ParsePatientContext(sources);}catch{return "";}
+    }
+    private void RefreshPatientContext() {
+      if(currentText==null||word==null)return;
+      try {
+        dynamic app=word;
+        dynamic doc=boundWordWindow!=null?((dynamic)boundWordWindow).Document:app.ActiveDocument;
+        string next=ReadPatientContext((object)doc,currentText);
+        if(!String.Equals(next,patientContext,StringComparison.Ordinal)) {
+          patientContext=next;
+          snapshotToken=WebReviewForm.CachePath(currentText,false,patientContext);
+          readyResponse=ValidateResponse(WebReviewForm.ReadCached(snapshotToken),currentText);
+          failed=false;
+        }
+      }catch{}
+    }
     private void PollWord() {
       dynamic app=word;
       dynamic doc;
@@ -305,7 +411,8 @@ namespace RadiologyAgent {
         if(runningCancellation!=null)runningCancellation.Cancel();
         documentId=id;
         currentText=report;
-        snapshotToken=WebReviewForm.CachePath(report,false);
+        patientContext=ReadPatientContext((object)doc,report);
+        snapshotToken=WebReviewForm.CachePath(report,false,patientContext);
         lastChangeUtc=DateTime.UtcNow;
         failed=false;
         readyResponse=ValidateResponse(WebReviewForm.ReadCached(snapshotToken),report);
@@ -320,7 +427,7 @@ namespace RadiologyAgent {
       if(suggestionPopup!=null&&!suggestionPopup.IsDisposed)suggestionPopup.Close();
       suggestionPopup=null;lastSuggestionAnchor=null;
       if(runningCancellation!=null)runningCancellation.Cancel();
-      documentId=null;currentText=null;snapshotToken=null;
+      documentId=null;currentText=null;snapshotToken=null;patientContext="";
       readyResponse=null;failed=false;
       WebReviewForm.SetReviewStatus(0);
     }
@@ -1036,6 +1143,7 @@ namespace RadiologyAgent {
         return;
       }
       if(working){StartReviewOverlay();return;}
+      RefreshPatientContext();
       if(readyResponse!=null){ApplyReady();return;}
       if(failed) {
         // A new click after an exhausted attempt starts a fresh analysis
@@ -1058,6 +1166,7 @@ namespace RadiologyAgent {
       if(!awaitingDocument)return;
       if(currentText!=null) {
         awaitingDocument=false;
+        RefreshPatientContext();
         if(readyResponse!=null)ApplyReady();
         else {pendingClick=true;StartReviewOverlay();if(!working)StartAnalysis();}
         return;
@@ -1121,7 +1230,7 @@ namespace RadiologyAgent {
         CompleteReviewIfIdle();return;
       }
       working=true;
-      string report=currentText,id=documentId,cacheFile=snapshotToken;
+      string report=currentText,id=documentId,cacheFile=snapshotToken,context=patientContext;
       var token=new CancellationTokenSource();
       runningCancellation=token;
       try {
@@ -1131,7 +1240,7 @@ namespace RadiologyAgent {
           prompts.Add(WebReviewForm.BuildPrompt(chunks[i],i,chunks.Count));
         var serializer=new JavaScriptSerializer{MaxJsonLength=2000000};
         string payload=serializer.Serialize(new Dictionary<string,object> {
-          {"prompts",prompts},{"texts",chunks},
+          {"prompts",prompts},{"texts",chunks},{"patient_context",context},
           {"review_version",WebReviewForm.ReviewAlgorithmVersion},
           {"api_key",WebReviewForm.ReadGroqKey()}
         });
@@ -1177,6 +1286,11 @@ namespace RadiologyAgent {
         string report="FINDINGS: Right kidney normal.\rIMPRESSION: Left kidney normal.\r";
         string footer=report+"Thank You for Your reference\rPET/CT Unit\r\u0007Dr. Example, MD\rRevised by Dr /A.t\r\x07Radiology consultant\rProf. Dr. Example, MD\r";
         if(ProtectedClinicalEnd(footer)!=report.Length)return false;
+        if(ParsePatientContext(new[]{"Patient Name: Example\rAge:\r\u000745 Years\rGender:\r\u0007Male"})!="sex=male;age=45 years;")return false;
+        if(ParsePatientContext(new[]{"Age: 6 months\rSex: F"})!="sex=female;age=6 months;")return false;
+        if(ParsePatientContext(new[]{"Patient ID: 123456\rPatient name: Example"})!="")return false;
+        if(ParsePatientContext(new[]{"Age: 45 years\rGender: Male","Age: 46 years\rGender: Female"})!="")return false;
+        if(ParsePatientContext(new[]{"Patient age: 2 years"})!="age=2 years;")return false;
         string clinicalAfter=report+"Thanks;\rConclusion: Left renal mass.";
         if(ProtectedClinicalEnd(clinicalAfter)!=clinicalAfter.Length)return false;
         var parser=new JavaScriptSerializer{MaxJsonLength=2000000};
@@ -1410,7 +1524,8 @@ namespace RadiologyAgent {
         int hwnd;
         try {hwnd=boundWordWindow!=null?(int)((dynamic)boundWordWindow).Hwnd:(int)app.ActiveWindow.Hwnd;}
         catch{hwnd=(int)app.Hwnd;}
-        if(latest!=currentText||hwnd.ToString()+"|"+name!=documentId) {
+        if(latest!=currentText||hwnd.ToString()+"|"+name!=documentId||
+           ReadPatientContext((object)doc,latest)!=patientContext) {
           throw new InvalidOperationException("Document changed during review; click Review Text again.");
         }
         string source=readyResponse;

@@ -234,6 +234,31 @@ static HRESULT RegistryDword(HKEY root, const std::wstring& key, const wchar_t* 
   RegCloseKey(h);
   return HRESULT_FROM_WIN32(rc);
 }
+// Word 2013 has AutoRecover, not modern cloud AutoSave. The user chooses
+// whether to disable recovery during setup; manual Save remains unchanged.
+static void ConfigureWordSaveOptions(IDispatch* app) {
+  if(!app)return;
+  DWORD disabled=0,size=sizeof(disabled);
+  HKEY h=nullptr;
+  if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,KEY_QUERY_VALUE,&h)==ERROR_SUCCESS) {
+    RegQueryValueExW(h,L"DisableAutoRecover",nullptr,nullptr,reinterpret_cast<BYTE*>(&disabled),&size);
+    RegCloseKey(h);
+  }
+  if(disabled==1) {
+    LocalCleanup::Obj options=LocalCleanup::PropertyObject(app,L"Options");
+    if(options)LocalCleanup::SetNumber(options.p,L"SaveInterval",0);
+  }
+}
+static void DisableDocumentAutoSave(IDispatch* app) {
+  // AutoSaveOn is absent in Word 2013; fail harmlessly there.
+  LocalCleanup::Obj doc=LocalCleanup::ActiveDocument(app);
+  if(!doc)return;
+  DISPID id=0;
+  if(FAILED(LocalCleanup::Member(doc.p,L"AutoSaveOn",id)))return;
+  VARIANTARG arg;VariantInit(&arg);arg.vt=VT_BOOL;arg.boolVal=VARIANT_FALSE;
+  DISPID named=DISPID_PROPERTYPUT;DISPPARAMS params={&arg,&named,1,1};
+  doc.p->Invoke(id,IID_NULL,LOCALE_USER_DEFAULT,DISPATCH_PROPERTYPUT,&params,nullptr,nullptr,nullptr);
+}
 static std::wstring ModuleDirectory() {
   wchar_t path[MAX_PATH]={0};
   GetModuleFileNameW(g_instance,path,MAX_PATH);
@@ -287,6 +312,8 @@ static void RequestReview(IDispatch* wordApplication) {
   if(wait!=WAIT_OBJECT_0&&wait!=WAIT_ABANDONED){CloseHandle(gate);return;}
   struct GateRelease {HANDLE h;~GateRelease(){ReleaseMutex(h);CloseHandle(h);}} release={gate};
   if(ReviewBusy())return;
+  ConfigureWordSaveOptions(wordApplication);
+  DisableDocumentAutoSave(wordApplication);
   const wchar_t* key=L"Software\\Haronex";
   HKEY h=nullptr;
   if(RegCreateKeyExW(HKEY_CURRENT_USER,key,0,nullptr,REG_OPTION_NON_VOLATILE,
@@ -446,6 +473,8 @@ public:
     if(wordApplication_)wordApplication_->Release();
     wordApplication_=app;
     if(wordApplication_)wordApplication_->AddRef();
+    ConfigureWordSaveOptions(wordApplication_);
+    DisableDocumentAutoSave(wordApplication_);
     mandatoryGate_=new(std::nothrow) HaronexMandatory::Gate();
     if(mandatoryGate_)mandatoryGate_->Attach(wordApplication_);
     StartLiveMonitor();return S_OK;
