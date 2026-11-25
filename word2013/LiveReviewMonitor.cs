@@ -1175,7 +1175,7 @@ namespace RadiologyAgent {
     internal static bool SelfTest() {
       try {
         string report="FINDINGS: Right kidney normal.\rIMPRESSION: Left kidney normal.\r";
-        string footer=report+"Thank You for Your reference\rPET/CT Unit\r\x07Dr. Example, MD\rRevised by Dr /A.t\r\x07Radiology consultant\rProf. Dr. Example, MD\r";
+        string footer=report+"Thank You for Your reference\rPET/CT Unit\r\u0007Dr. Example, MD\rRevised by Dr /A.t\r\x07Radiology consultant\rProf. Dr. Example, MD\r";
         if(ProtectedClinicalEnd(footer)!=report.Length)return false;
         string clinicalAfter=report+"Thanks;\rConclusion: Left renal mass.";
         if(ProtectedClinicalEnd(clinicalAfter)!=clinicalAfter.Length)return false;
