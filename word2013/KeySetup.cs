@@ -143,7 +143,7 @@ namespace RadiologyAgent {
         var key=new TextBox {Left=18,Top=108,Width=510,UseSystemPasswordChar=true};
         var consent=new CheckBox {Left=18,Top=145,Width=510,Height=38,
           Text="I am authorized by my organization to send medical report text to Groq."};
-        var mandatory=new CheckBox {Left=18,Top=187,Width=510,Text="Enable Mandatory Review (successful Review Text)"};
+        var mandatory=new CheckBox {Left=18,Top=187,Width=510,Text="Enable Mandatory Review (review + cleanup if findings)"};
         var recovery=new CheckBox {Left=18,Top=216,Width=510,Text="Disable AutoRecover (unsaved work may be lost)"};
         using(var settings=Registry.CurrentUser.CreateSubKey(@"Software\Haronex")) {
           consent.Checked=Convert.ToInt32(settings.GetValue("WebTransferAllowed",0))==1;

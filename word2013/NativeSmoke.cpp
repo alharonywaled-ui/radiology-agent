@@ -140,11 +140,18 @@ int main(){
   allowed=allowed&&session->BeginReview(reviewed,2,tempKey);
   std::wstring secondToken=readRequest(L"ReviewRequestToken");
   allowed=allowed&&!secondToken.empty()&&secondToken!=firstToken&&
-    receipt(firstToken,binding)&&!session->TryReleaseReviewedDocument(reviewed)&&
-    receipt(secondToken,binding)&&!session->TryReleaseReviewedDocument(another)&&
-    session->TryReleaseReviewedDocument(reviewed)&&session->IsReleased(reviewed)&&
+    receipt(firstToken,binding+L"|clean")&&!session->TryReleaseReviewedDocument(reviewed)&&
+    !session->TryReleaseReviewedDocument(reviewed,true)&&
+    receipt(secondToken,binding+L"|clear")&&!session->TryReleaseReviewedDocument(another,true)&&
+    !session->TryReleaseReviewedDocument(reviewed)&&
+    session->TryReleaseReviewedDocument(reviewed,true)&&session->IsReleased(reviewed)&&
     !session->IsReleased(another);
   HaronexMandatory::DeleteReviewReceipt(firstToken);
+  // A new review on the same document must re-lock until it succeeds.
+  allowed=allowed&&session->BeginReview(reviewed,4,tempKey)&&
+    !session->TryReleaseReviewedDocument(reviewed)&&!session->TryReleaseReviewedDocument(reviewed,true)&&
+    receipt(readRequest(L"ReviewRequestToken"),readRequest(L"ReviewRequestIdentity")+L"|clean")&&
+    session->TryReleaseReviewedDocument(reviewed);
   session->Detach();
   allowed=allowed&&!session->IsReleased(reviewed);
   reviewed->Release();another->Release();session->Release();
@@ -173,7 +180,7 @@ int main(){
   bool separated=gate.BeginReview(releasedForTest,3,tempKey)&&
     !gate.TryReleaseReviewedDocument(releasedForTest);
   std::wstring eventToken=readRequest(L"ReviewRequestToken");
-  separated=separated&&receipt(eventToken,readRequest(L"ReviewRequestIdentity"))&&
+  separated=separated&&receipt(eventToken,readRequest(L"ReviewRequestIdentity")+L"|clean")&&
     !gate.TryReleaseReviewedDocument(other);
   RegCloseKey(tempKey);RegDeleteKeyW(HKEY_CURRENT_USER,testPath);
   VARIANT_BOOL cancel=VARIANT_FALSE;
@@ -291,7 +298,7 @@ int main(){
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 42;
   }
   wprintf(L"ENTERPRISE_POLICY_PRECEDENCE_OK\n");
-  wprintf(L"SUCCESSFUL_REVIEW_ONLY_UNLOCK_OK\n");
+  wprintf(L"REVIEW_AND_CONDITIONAL_CLEAR_BOTH_UNLOCK_OK\n");
   wprintf(L"NATIVE_COM_AND_RIBBON_AND_MANDATORY_HASH_OK\n");
   SysFreeString(xml);ribbon->Release();CoUninitialize();return 0;
 }

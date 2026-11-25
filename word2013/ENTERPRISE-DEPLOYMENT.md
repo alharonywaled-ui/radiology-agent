@@ -1,4 +1,4 @@
-# Haronex Enterprise 11.12.14 (DSCAN)
+# Haronex Enterprise 11.12.15 (DSCAN)
 
 This is a separate machine-wide Word 2013 x86 package. Keep the existing personal installer for recovery/testing only. Install the enterprise EXE from an elevated administrator session on a computer joined to dscan.corp. Close Word and Haronex before upgrading. Files inherit Program Files ACLs. Do not grant standard users Modify or Full Control there.
 
@@ -23,5 +23,5 @@ Setup verifies the manifest hashes of the complete application and packaged runt
 
 Both interactive installers show Word Review Settings before credential pages on every setup run. Existing key files are preserved byte-for-byte, irrespective of whether consent is present; existing consent is not changed. Use Configure my account explicitly to repair an invalid key or change consent. Silent installs have no UI; use /MANDATORYREVIEW=1 or 0 and /DISABLEAUTORECOVER=1 or 0, or omit to preserve existing choices. Enterprise machine policy remains editable by authorized installation administrators, not ordinary employees.
 
-## Mandatory review (successful review only)
-When enabled, Save, Save As and Print require a completed successful Review Text for that same open document. Clear Both only cleans comments/highlights and cannot unlock the document. Failed, canceled or still-running reviews do not grant approval. A validated cached review of unchanged text may be reused when Review Text is explicitly clicked. After the initial successful review, subsequent corrections and Save As remain allowed for that open document. Opening a different/reopened document requires its own review. Unchanged settings and Groq credentials are preserved. The gate depends on Word loading the add-in and its supported events; real Word 2013 testing is required before rollout.
+## Mandatory review (successful review + cleanup when needed)
+When enabled, Save, Save As and Print require successful Review Text for the same open document. Clean reviews unlock directly. A review with findings, existing comments or possible Haronex highlights requires a subsequent successful Clear Both; applying corrections is optional. Clear Both before a successful review cannot unlock. A new explicit review re-locks the document. Edits after successful release remain allowed for that open document. Clear Both removes comments and red/yellow/violet highlights; other colors are retained. Cleanup failures do not acknowledge a marked review. Existing Groq keys, setup checkboxes and uninstall policy are retained. Test with real Word 2013 before rollout.

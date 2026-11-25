@@ -476,8 +476,14 @@ public:
     if(id==105)return CreateCleanupIcon(true,result);
     if(id==106)return CreateCleanupIcon(false,result);
     if(id==107){
-      // Local cleanup only; never grant a save/print approval.
-      LocalCleanup::ClearBoth(wordApplication_);
+      LocalCleanup::Obj doc=LocalCleanup::ActiveDocument(wordApplication_);
+      if(!doc)return S_OK;
+      // Capture this document before cleanup. A successful review receipt
+      // is still required; Clear Both before review cannot unlock.
+      bool cleaned=LocalCleanup::ClearBoth(wordApplication_);
+      if(cleaned&&mandatoryGate_)mandatoryGate_->TryReleaseReviewedDocument(doc.p,true);
+      if(!cleaned&&HaronexMandatory::Gate::EnforcementEnabled())
+        MessageBoxW(nullptr,L"Some comments or Haronex highlights could not be cleared. Try Clear Both again or contact IT.",L"Haronex",MB_OK|MB_ICONWARNING);
       return S_OK;
     }
     if(id==108)return CreateCleanupIcon(false,result);
@@ -518,8 +524,8 @@ public:
       LR"(<button id="RadiologyAgentReview" label="Review Text" size="large" getImage="ReviewIcon" getEnabled="ReviewEnabled" onAction="ReviewTextClick"/>)"
       LR"(<button id="HaronexSidebarToggle" label="Show / Hide Sidebar" size="large" getImage="SidebarIcon" onAction="ToggleSidebarClick" screentip="Show or hide Haronex Review Panel" supertip="Toggle the existing sidebar without starting a new AI review." />)"
       LR"(<button id="RadiologyAgentDeleteComments" label="Clear Comments" size="large" getImage="DeleteCommentsIcon" onAction="DeleteAllCommentsClick" screentip="Remove all comments" supertip="Delete every Word comment in the active document locally. No API call." />)"
-      LR"(<button id="RadiologyAgentClearHighlights" label="Clear Highlights" size="large" getImage="ClearHighlightsIcon" onAction="ClearRedYellowClick" screentip="Remove red and yellow highlights" supertip="Remove red and yellow text highlighting from the active Word document, preserving other colors. Runs locally." />)"
-      LR"(<button id="RadiologyAgentClearBoth" label="Clear Both" size="large" getImage="ClearBothIcon" onAction="ClearBothClick" screentip="Clear comments and red/yellow highlights" supertip="Clear comments and highlights locally. Does not grant save or print approval." />)"
+      LR"(<button id="RadiologyAgentClearHighlights" label="Clear Highlights" size="large" getImage="ClearHighlightsIcon" onAction="ClearRedYellowClick" screentip="Remove red, yellow and violet highlights" supertip="Remove red, yellow and violet text highlighting from the active Word document, preserving other colors. Runs locally." />)"
+      LR"(<button id="RadiologyAgentClearBoth" label="Clear Both" size="large" getImage="ClearBothIcon" onAction="ClearBothClick" screentip="Clear comments and red/yellow/violet highlights" supertip="Clear comments and Haronex highlights after a successful review. Corrections are optional." />)"
       LR"(</group></tab></tabs></ribbon></customUI>)";
     *xml=SysAllocString(ui);
     return *xml?S_OK:E_OUTOFMEMORY;

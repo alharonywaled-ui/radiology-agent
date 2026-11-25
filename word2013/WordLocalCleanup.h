@@ -132,21 +132,21 @@ inline Obj ActiveDocument(IDispatch* word) {
   return PropertyObject(word,L"ActiveDocument");
 }
 // Removing *all* comments is explicitly requested. Work backwards so indices do not shift.
-inline void DeleteAllComments(IDispatch* word) {
+inline bool DeleteAllComments(IDispatch* word) {
   Obj doc=ActiveDocument(word);
-  if(!doc){Alert(L"Open a Word report before removing comments.",MB_OK|MB_ICONWARNING);return;}
+  if(!doc){Alert(L"Open a Word report before removing comments.",MB_OK|MB_ICONWARNING);return false;}
   Obj comments=PropertyObject(doc.p,L"Comments");
   long count=0;
   if(!comments||!PropertyNumber(comments.p,L"Count",count)){
-    Alert(L"Unable to access comments in this document.",MB_OK|MB_ICONWARNING);return;
+    Alert(L"Unable to access comments in this document.",MB_OK|MB_ICONWARNING);return false;
   }
-  if(count==0){Alert(L"No comments were found in this report.");return;}
+  if(count==0){Alert(L"No comments were found in this report.");return true;}
   // Word 2013 supports document-level batch deletion. This is much faster than
   // deleting each COM comment; keep a bounded fallback for unusual documents.
   HRESULT hr=Method(doc.p,L"DeleteAllComments");
   if(SUCCEEDED(hr)){
-    Alert(L"All comments were removed from the current Word document.");
-    return;
+    long remaining=-1;
+    return PropertyNumber(comments.p,L"Count",remaining)&&remaining==0;
   }
   const DWORD started=GetTickCount();
   const DWORD budgetMs=4000;
@@ -161,15 +161,17 @@ inline void DeleteAllComments(IDispatch* word) {
   wsprintfW(buffer,L"Removed %ld of %ld comments.\\n%s",removed,count,
     removed==count?L"Done.":L"Stopped after the safe time limit or an inaccessible comment. Click again to continue.");
   Alert(buffer,removed==count&&failed==0?MB_OK|MB_ICONINFORMATION:MB_OK|MB_ICONWARNING);
+  long remaining=-1;
+  return PropertyNumber(comments.p,L"Count",remaining)&&remaining==0;
 }
 // Use Word's formatting-aware Find instead of iterating over every character.
-// Finds only highlighted segments, then modifies red/yellow portions; other
+// Finds only highlighted segments, then modifies red/yellow/violet portions; other
 // highlight colors are unchanged. All processing is local to Word.
-inline void RemoveRedYellowHighlights(IDispatch* word) {
+inline bool RemoveRedYellowHighlights(IDispatch* word) {
   Obj doc=ActiveDocument(word);
-  if(!doc){Alert(L"Open a Word report before removing highlights.",MB_OK|MB_ICONWARNING);return;}
+  if(!doc){Alert(L"Open a Word report before removing highlights.",MB_OK|MB_ICONWARNING);return false;}
   Obj stories=PropertyObject(doc.p,L"StoryRanges");
-  if(!stories){Alert(L"Unable to access document content.",MB_OK|MB_ICONWARNING);return;}
+  if(!stories){Alert(L"Unable to access document content.",MB_OK|MB_ICONWARNING);return false;}
   long changed=0;
   bool errors=false,limitReached=false;
   long scanned=0;
@@ -219,12 +221,12 @@ inline void RemoveRedYellowHighlights(IDispatch* word) {
           errors=true;break;
         }
         if(PropertyNumber(search.p,L"HighlightColorIndex",color)) {
-          if(color==6||color==7) {
+          if(color==6||color==7||color==12) {
             if(SUCCEEDED(SetNumber(search.p,L"HighlightColorIndex",0)))++changed;
             else errors=true;
           } else if(color!=0&&color!=1&&color!=2&&color!=3&&
                     color!=4&&color!=5&&color!=8&&color!=9&&color!=10&&
-                    color!=11&&color!=12&&color!=13&&color!=14&&color!=15&&
+                    color!=11&&color!=13&&color!=14&&color!=15&&
                     color!=16) {
             // Mixed colors (wdUndefined). Inspect only this highlighted hit.
             // Bound expensive work to prevent Word UI lockups.
@@ -236,8 +238,8 @@ inline void RemoveRedYellowHighlights(IDispatch* word) {
                 if(static_cast<DWORD>(GetTickCount()-cleanupStarted)>=MaxElapsedMs){limitReached=true;break;}
                 Obj item=IndexedObject(chars.p,c);
                 long itemColor=-1;
-                if(item&&PropertyNumber(item.p,L"HighlightColorIndex",itemColor)&&
-                   (itemColor==6||itemColor==7)) {
+                if(!item||!PropertyNumber(item.p,L"HighlightColorIndex",itemColor)){errors=true;continue;}
+                if(itemColor==6||itemColor==7||itemColor==12) {
                   if(SUCCEEDED(SetNumber(item.p,L"HighlightColorIndex",0)))++changed;
                   else errors=true;
                 }
@@ -255,20 +257,22 @@ inline void RemoveRedYellowHighlights(IDispatch* word) {
   wchar_t buffer[256];
   if(limitReached) {
     wsprintfW(buffer,L"Stopped safely after %ld highlighted segments.\n"
-      L"%ld red/yellow highlights cleared.\nSave the report and retry if needed.",
+      L"%ld red/yellow/violet highlights cleared.\nSave the report and retry if needed.",
       scanned,changed);
     Alert(buffer,MB_OK|MB_ICONWARNING);
   } else {
-    wsprintfW(buffer,L"Cleared %ld red/yellow highlighted segments.%s",
+    wsprintfW(buffer,L"Cleared %ld red/yellow/violet highlighted segments.%s",
       changed,errors?L"\nSome protected ranges could not be processed.":L"");
     Alert(buffer,errors?MB_OK|MB_ICONWARNING:MB_OK|MB_ICONINFORMATION);
   }
+  return !errors&&!limitReached;
 }
 // The two document-local operations run back to back on Word's Ribbon STA.
 // Neither action invokes a worker, network service, or modal confirmation.
-inline void ClearBoth(IDispatch* word) {
-  if(!ActiveDocument(word))return;
-  DeleteAllComments(word);
-  RemoveRedYellowHighlights(word);
+inline bool ClearBoth(IDispatch* word) {
+  if(!ActiveDocument(word))return false;
+  bool comments=DeleteAllComments(word);
+  bool highlights=RemoveRedYellowHighlights(word);
+  return comments&&highlights;
 }
 } // namespace LocalCleanup

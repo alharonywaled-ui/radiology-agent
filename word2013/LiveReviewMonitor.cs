@@ -29,7 +29,7 @@ namespace RadiologyAgent {
     internal static string Identity(uint processId,string fullName) {
       return Digest(processId.ToString()+"\u001f"+fullName);
     }
-    internal static bool Approve(object document, string reviewedText, uint verifiedWindow, uint command) {
+    internal static bool Approve(object document, string reviewedText, uint verifiedWindow, uint command, bool requiresCleanup) {
       try {
         dynamic doc=document;
         string fullName=Convert.ToString(doc.FullName);
@@ -53,13 +53,13 @@ namespace RadiologyAgent {
             if(receipts==null)return false;
             // Only a completed, validated review for the matched click writes
             // the nonce. No report text, paths or patient identifiers.
-            receipts.SetValue(token,id,RegistryValueKind.String);
+            receipts.SetValue(token,id+(requiresCleanup?"|clear":"|clean"),RegistryValueKind.String);
           }
         }
         return true;
       } catch {return false;}
     }
-    // Once a successful review is accepted, later corrections and Save As do
+    // Once a successful review and any required cleanup are accepted, later corrections and Save As do
     // not revoke permission for that same open COM document.
     internal static void Invalidate(string oldId) {}
     internal static bool SelfTest() {
@@ -1749,7 +1749,17 @@ namespace RadiologyAgent {
           NotifyAnnotationResult(candidateCount,0,wordFailed+(int)purpleSkipped);
           pendingClick=false;return;
         }
-        if(!MandatoryApproval.Approve((object)doc,currentText,unchecked((uint)hwnd),lastHandledCommand)) {
+        // Even if all suggestions are ignored/applied individually, a marked
+        // review requires explicit Clear Both acknowledgement. Include any
+        // pre-existing comments/highlights; unreadable formatting is treated
+        // conservatively as needing cleanup.
+        bool requiresCleanup=candidateCount>0||wordApplied>0||purpleApplied>0;
+        try {
+          int color=Convert.ToInt32(doc.Content.HighlightColorIndex);
+          requiresCleanup=requiresCleanup||Convert.ToInt32(doc.Comments.Count)>0||
+            color==6||color==7||color==12||color==9999999;
+        }catch {requiresCleanup=true;}
+        if(!MandatoryApproval.Approve((object)doc,currentText,unchecked((uint)hwnd),lastHandledCommand,requiresCleanup)) {
           LogFailure("MANDATORY_APPROVAL_NOT_STORED");
           pendingClick=false;CloseReviewOverlay();Notify(false);return;
         }
