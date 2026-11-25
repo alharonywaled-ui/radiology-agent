@@ -1770,7 +1770,7 @@ def self_test():
         "Summary of Findings:", "1. CONCLUSION:", "• Impression:",
         "**Impression:**", "Conclusion / Impression:",
         "الانطباع:", "الانطباع التشخيصي:", "الخلاصة:", "الرأي:",
-        "التشخيص:", "التشخيص النهائي:", "النتيجة:", "التوصيات:"
+        "التشخيص:", "التشخيص النهائي:", "النتيجة النهائية:", "التوصيات:"
     ):
         sample_heading="Findings:\rNo acute abnormality.\r"+heading+"\rNo acute finding."
         assert conclusion_section(sample_heading), heading
