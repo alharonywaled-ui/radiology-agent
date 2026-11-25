@@ -1678,7 +1678,25 @@ def main(raw_request=None):
                       "GROQ_CLINICAL_CONCLUSION_NOT_FOUND",
                       "GROQ_CLINICAL_CONTEXT_TOO_LONG",
                       "GROQ_CLINICAL_CONTEXT_UNAVAILABLE"}
-        code = message if (message in safe_codes or message.startswith("GROQ_REQUEST_400_")) else "WORKER_" + type(exc).__name__.upper()
+        value_error_codes = {
+            "Unsupported review version": "WORKER_UNSUPPORTED_REVIEW_VERSION",
+            "Missing or invalid Groq API key": "WORKER_INVALID_API_KEY",
+            "Invalid report parts": "WORKER_INVALID_REPORT_PARTS",
+            "Invalid report text": "WORKER_INVALID_REPORT_TEXT",
+            "Audit pass count mismatch": "WORKER_AUDIT_PASS_COUNT_MISMATCH",
+            "Intelligent validation pass count mismatch": "WORKER_VALIDATION_PASS_COUNT_MISMATCH",
+            "Groq did not return issues array": "WORKER_GROQ_ISSUES_NOT_ARRAY",
+            "Invalid issue item": "WORKER_INVALID_ISSUE_ITEM",
+            "Invalid quote": "WORKER_INVALID_QUOTE",
+            "Invalid quote location or category": "WORKER_INVALID_QUOTE_OR_CATEGORY",
+            "Invalid issue wording": "WORKER_INVALID_ISSUE_WORDING",
+        }
+        if isinstance(exc, json.JSONDecodeError):
+            code = "WORKER_INVALID_REQUEST_JSON"
+        elif message in value_error_codes:
+            code = value_error_codes[message]
+        else:
+            code = message if (message in safe_codes or message.startswith("GROQ_REQUEST_400_")) else "WORKER_" + type(exc).__name__.upper()
         print(json.dumps({"ok": False, "error": code,
                           "performance": dict(snapshot_metrics(),
                             elapsed_ms=int((time.monotonic()-started)*1000))}))
