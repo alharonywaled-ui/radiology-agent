@@ -1762,7 +1762,7 @@ def self_test():
         "Impression:", "Conclusion:", "Opinion:", "Final Impression:",
         "Diagnostic Impression:", "Final Radiological Impression:",
         "Final Radiologic Impression:", "Summary:", "Interpretation:",
-        "Final Diagnosis:", "Diagnosis:", "Assessment:", "Results:", "Result:",
+        "Final Diagnosis:", "Diagnosis:", "Assessment:",
         "Recommendations:", "Recommendation:", "Plan:", "Advice:", "Comments:",
         "Remarks:", "Overall Impression:", "Clinical Impression:",
         "Diagnostic Opinion:", "Final Assessment:", "Report Summary:",
@@ -1776,6 +1776,7 @@ def self_test():
     # Findings headings are independent from Impression/Conclusion headings.
     for heading in (
         "Finding:", "Findings:", "Imaging Findings:", "Radiological Findings:",
+        "Diagnostic Findings:", "Key Findings:",
         "Radiologic Findings:", "Detailed Findings:", "Clinical Findings:",
         "Examination Findings:", "Observations:", "Observation:",
         "Imaging Observations:", "Description:", "Imaging Description:",
