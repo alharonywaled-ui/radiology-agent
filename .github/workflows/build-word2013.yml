@@ -102,12 +102,12 @@ jobs:
           $compiler=Join-Path $env:SystemDrive 'Program Files (x86)\Inno Setup 6\ISCC.exe'
           & $compiler word2013/installer_setup.iss
           if ($LASTEXITCODE -ne 0) { throw "Installer compile failed" }
-          if (!(Test-Path word2013/output/Haronex_Word2013_V11_12_7_MultiModel_Setup.exe)) { throw "Setup missing" }
+          if (!(Test-Path word2013/output/Haronex_Word2013_V11_12_8_MultiModel_Setup.exe)) { throw "Setup missing" }
       - name: Smoke test Web Mode installer and native COM Ribbon
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $installer=(Resolve-Path word2013/output/Haronex_Word2013_V11_12_7_MultiModel_Setup.exe).Path
+          $installer=(Resolve-Path word2013/output/Haronex_Word2013_V11_12_8_MultiModel_Setup.exe).Path
           $p=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
           if($p.ExitCode -ne 0) { throw "Installer failed: $($p.ExitCode)" }
           $reg=Get-ItemProperty 'HKCU:\Software\Microsoft\Office\Word\Addins\RadiologyAgent.Word2013.Safe'
@@ -135,8 +135,8 @@ jobs:
       - name: Upload tested Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: Haronex_Word2013_V11_12_7_MultiModel
-          path: word2013/output/Haronex_Word2013_V11_12_7_MultiModel_Setup.exe
+          name: Haronex_Word2013_V11_12_8_MultiModel
+          path: word2013/output/Haronex_Word2013_V11_12_8_MultiModel_Setup.exe
           if-no-files-found: error
 
       - name: Publish direct-download EXE as GitHub Release
@@ -146,13 +146,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference='Stop'
-          $exe='word2013/output/Haronex_Word2013_V11_12_7_MultiModel_Setup.exe'
+          $exe='word2013/output/Haronex_Word2013_V11_12_8_MultiModel_Setup.exe'
           if (!(Test-Path $exe)) { throw 'Tested EXE missing' }
-          $tag='haronex-v11-12-7-multimodel'
+          $tag='haronex-v11-12-8-multimodel'
           gh release view $tag --repo ${{ github.repository }} *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag $exe --repo ${{ github.repository }} --clobber
           } else {
-            gh release create $tag $exe --repo ${{ github.repository }} --title 'Haronex V11.12.7 MultiModel' --notes 'Word 2013 x86 installer: context-aware review, inline suggestion popup, single-click Apply. Offline CI smoke tested; clinical and real Word end-to-end validation still required.'
+            gh release create $tag $exe --repo ${{ github.repository }} --title 'Haronex V11.12.8 MultiModel' --notes 'Word 2013 x86 installer: context-aware review, inline suggestion popup, single-click Apply. Offline CI smoke tested; clinical and real Word end-to-end validation still required.'
           }
           if ($LASTEXITCODE -ne 0) { throw 'Direct EXE release publishing failed' }

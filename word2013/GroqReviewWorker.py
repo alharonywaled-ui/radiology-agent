@@ -286,7 +286,10 @@ CONCLUSION_LABELS = (
     "summary / impression", "impression / summary",
     "conclusion & recommendation", "conclusion and recommendation",
     "overall impression", "clinical impression", "diagnostic impression",
-    "clinical summary", "diagnostic findings", "key findings",
+    "final radiological impression", "final radiologic impression",
+    "final clinical impression", "final diagnostic impression",
+    "final overall impression", "final radiology impression",
+    "clinical summary",
     "final report", "radiology report", "report conclusion",
     "radiological impression", "radiologic impression", "final impression",
     "impression/conclusion", "conclusion/impression",
@@ -297,7 +300,7 @@ CONCLUSION_LABELS = (
     "final interpretation", "overall interpretation",
     "conclusions", "conclusion", "impressions", "impression",
     "interpretation", "opinion", "summary", "diagnoses", "diagnosis",
-    "assessment", "results", "result", "recommendations", "recommendation",
+    "assessment", "recommendations", "recommendation",
     "plan", "advice", "comments", "comment", "remarks", "remark",
     "الخلاصة", "الملخص التشخيصي", "ملخص النتائج", "ملخص",
     "الانطباع التشخيصي", "الانطباع", "الرأي التشخيصي", "الرأي",
@@ -314,10 +317,27 @@ CONCLUSION_HEADING = re.compile(
     r"(?:\*\*|__)?[ \t]*(?:[:：\-–—][ \t]*(?:\*\*|__)?[ \t]*|(?=[\r\n\x07]|$))",
     re.IGNORECASE
 )
+FINDINGS_LABELS = (
+    "findings and observations", "findings & observations",
+    "findings / observations", "findings/observations",
+    "imaging findings", "radiological findings", "radiologic findings",
+    "detailed findings", "clinical findings", "examination findings",
+    "study findings", "key findings", "main findings",
+    "imaging observations", "clinical observations", "observations",
+    "observation", "imaging description", "examination description",
+    "detailed description", "description", "report details",
+    "imaging results", "results", "result", "findings", "finding",
+    "النتائج التفصيلية", "نتائج الفحص", "نتائج الأشعة",
+    "النتائج الإشعاعية", "الموجودات", "الملاحظات", "المشاهدات",
+    "تفاصيل الفحص", "وصف الفحص", "الوصف", "النتائج", "النتيجة"
+)
+_FINDINGS_LABEL_PATTERN = "|".join(
+    re.escape(label) for label in sorted(FINDINGS_LABELS, key=len, reverse=True))
 FINDINGS_HEADING = re.compile(
     WORD_BOUNDARY + r"[ \t]*(?:#{1,6}[ \t]*)?"
     r"(?:(?:\d+(?:\.\d+)*[.)]?|[•▪◦*-])[ \t]*)?"
-    r"(?:\*\*|__)?[ \t]*findings?(?:\*\*|__)?[ \t]*(?:[:：\-–—]|(?=[\r\n\x07]|$))",
+    r"(?:\*\*|__)?[ \t]*(?:" + _FINDINGS_LABEL_PATTERN + r")"
+    r"(?:\*\*|__)?[ \t]*(?:[:：\-–—][ \t]*(?:\*\*|__)?[ \t]*|(?=[\r\n\x07]|$))",
     re.IGNORECASE
 )
 CONCLUSION_END = re.compile(
@@ -678,7 +698,7 @@ _RECORDED_SEX=re.compile(
     r"(?i)\b(?:patient\s*(?:sex|gender)|sex|gender)\s*[:=\-]\s*"
     r"(male|female|m|f)\b|\b(male|female)\s+patient\b"
 )
-_FINDINGS_START=re.compile(r"(?i)\bfindings\s*[:：\-]")
+_FINDINGS_START=FINDINGS_HEADING
 _MALE_SPECIFIC=re.compile(r"(?i)\b(?:prostate|prostatic|testis|testes|"
                           r"testicle|testicular|seminal\s+vesicles?)\b")
 _FEMALE_SPECIFIC=re.compile(r"(?i)\b(?:uterus|uterine|ovary|ovaries|"
@@ -1537,7 +1557,7 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-v11-12-multimodel-r7":
+        if version != "haronex-v11-12-multimodel-r8":
             raise ValueError("Unsupported review version")
         original_chunk_count = len(texts)
         texts = clinical_chunks(texts)
@@ -1740,7 +1760,8 @@ def self_test():
     assert clinical_context_windows("Findings:\rNo acute abnormality.") == []
     for heading in (
         "Impression:", "Conclusion:", "Opinion:", "Final Impression:",
-        "Diagnostic Impression:", "Summary:", "Interpretation:",
+        "Diagnostic Impression:", "Final Radiological Impression:",
+        "Final Radiologic Impression:", "Summary:", "Interpretation:",
         "Final Diagnosis:", "Diagnosis:", "Assessment:", "Results:", "Result:",
         "Recommendations:", "Recommendation:", "Plan:", "Advice:", "Comments:",
         "Remarks:", "Overall Impression:", "Clinical Impression:",
@@ -1752,12 +1773,29 @@ def self_test():
     ):
         sample_heading="Findings:\rNo acute abnormality.\r"+heading+"\rNo acute finding."
         assert conclusion_section(sample_heading), heading
+    # Findings headings are independent from Impression/Conclusion headings.
+    for heading in (
+        "Finding:", "Findings:", "Imaging Findings:", "Radiological Findings:",
+        "Radiologic Findings:", "Detailed Findings:", "Clinical Findings:",
+        "Examination Findings:", "Observations:", "Observation:",
+        "Imaging Observations:", "Description:", "Imaging Description:",
+        "Results:", "Result:", "Findings & Observations:",
+        "Findings and Observations:", "Findings / Observations:",
+        "1. Findings:", "• Imaging Findings:", "**Findings:**",
+        "النتائج:", "الموجودات:", "الملاحظات:", "المشاهدات:",
+        "وصف الفحص:", "نتائج الأشعة:", "النتائج التفصيلية:"
+    ):
+        sample_findings="History: follow-up.\\r"+heading+"\\rA 2 cm lesion."
+        match=FINDINGS_HEADING.search(sample_findings)
+        assert match and match.group(0).strip(), heading
+    assert _FINDINGS_START.search("Imaging Findings:\\rA 2 cm lesion.")
+    assert not _FINDINGS_START.search("History: Findings are unchanged.")
     # Do not select a clinical-history Diagnosis heading when a final
     # impression appears after Findings; do not mistake Findings for summary.
     mixed=("Diagnosis: query malignancy.\rClinical History:\r"
            "Follow-up imaging.\rFindings:\rStable lesion.\r"
            "Final Radiological Impression:\rNo interval progression.")
-    assert conclusion_section(mixed).startswith("Final Radiological Impression")
+    assert conclusion_section(mixed) and conclusion_section(mixed).startswith("Final Radiological Impression")
     assert conclusion_section("Diagnosis: suspected disease.\rFindings:\rStable.") is None
     # A heading-like word embedded in ordinary prose is not a section marker.
     assert conclusion_section("Findings:\rThe overall impression is stable. No acute abnormality.") is None
