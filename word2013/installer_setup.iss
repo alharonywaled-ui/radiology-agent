@@ -1,5 +1,5 @@
 #define AppName "Haronex Radiology Agent for Word 2013"
-#define AppVersion "11.12.9"
+#define AppVersion "11.12.11"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
 DefaultGroupName=Haronex
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_V11_12_9_MultiModel_Setup
+OutputBaseFilename=Haronex_Word2013_V11_12_11_MultiModel_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -112,6 +112,15 @@ begin
     ((PageID = KeyPage.ID) or (PageID = ConsentPage.ID));
 end;
 
+function InitialUserOption(Name, ParamName: String): Boolean;
+var Value: Cardinal; ParamValue: String;
+begin
+  Result := RegQueryDWordValue(HKCU, 'Software\Haronex', Name, Value) and (Value = 1);
+  ParamValue := ExpandConstant('{param:' + ParamName + '|}');
+  if ParamValue = '1' then Result := True;
+  if ParamValue = '0' then Result := False;
+end;
+
 procedure InitializeWizard;
 begin
   KeyPage := CreateInputQueryPage(wpSelectDir,
@@ -137,7 +146,7 @@ begin
   MandatoryCheck.Height := ScaleY(44);
   MandatoryCheck.Caption :=
     'Enable Mandatory Review';
-  MandatoryCheck.Checked := False;
+  MandatoryCheck.Checked := InitialUserOption('MandatoryReviewEnabled', 'MANDATORYREVIEW');
   RecoveryCheck := TNewCheckBox.Create(MandatoryPage);
   RecoveryCheck.Parent := MandatoryPage.Surface;
   RecoveryCheck.Left := ScaleX(0);
@@ -145,7 +154,7 @@ begin
   RecoveryCheck.Width := MandatoryPage.SurfaceWidth;
   RecoveryCheck.Height := ScaleY(30);
   RecoveryCheck.Caption := 'Disable AutoRecover (Word 2013; unsaved work may be lost)';
-  RecoveryCheck.Checked := False;
+  RecoveryCheck.Checked := InitialUserOption('DisableAutoRecover', 'DISABLEAUTORECOVER');
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -184,7 +193,7 @@ begin
   if CurStep <> ssPostInstall then Exit;
   // Default OFF, including silent installs. When enabled, the native Word
   // event sink blocks Save, Save As and Print until Review Text + Clear Both.
-  if not RegWriteDWordValue(HKCU, 'Software\\Haronex',
+  if not RegWriteDWordValue(HKCU, 'Software\Haronex',
        'MandatoryReviewEnabled', Ord(MandatoryCheck.Checked)) then
     RaiseException('Could not save Mandatory Review installation setting.');
   if not RegWriteDWordValue(HKCU, 'Software\Haronex',

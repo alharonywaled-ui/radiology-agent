@@ -1,5 +1,5 @@
 #define AppName "Haronex Enterprise for Word 2013"
-#define AppVersion "11.12.10"
+#define AppVersion "11.12.11"
 [Setup]
 AppId={{56B8B1AF-99B7-4580-821E-276FF00C79B6}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={pf32}\Haronex
 DefaultGroupName=Haronex Enterprise
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_V11_12_10_Enterprise_Setup
+OutputBaseFilename=Haronex_Word2013_V11_12_11_Enterprise_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=admin
@@ -30,6 +30,8 @@ Source: "bin\HaronexGroqWorker\_HaronexRuntime\*"; DestDir: "{app}\_HaronexRunti
 
 [Registry]
 Root: HKLM32; Subkey: "Software\Haronex\Enterprise"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletekey
+Root: HKLM32; Subkey: "Software\Haronex\Enterprise"; ValueType: dword; ValueName: "MandatoryReviewEnabled"; ValueData: "{code:PolicyMandatory}"
+Root: HKLM32; Subkey: "Software\Haronex\Enterprise"; ValueType: dword; ValueName: "DisableAutoRecover"; ValueData: "{code:PolicyRecovery}"
 Root: HKLM32; Subkey: "Software\Classes\RadiologyAgent.Word2013.Safe"; ValueType: string; ValueData: "Radiology Agent for Word 2013"; Flags: uninsdeletekey
 Root: HKLM32; Subkey: "Software\Classes\RadiologyAgent.Word2013.Safe\CLSID"; ValueType: string; ValueData: "{{7B918AD1-1C42-4B73-A4BB-9FC83743DD6E}"
 Root: HKLM32; Subkey: "Software\Classes\CLSID\{{7B918AD1-1C42-4B73-A4BB-9FC83743DD6E}"; ValueType: string; ValueData: "RadiologyAgent.Word2013.Safe"; Flags: uninsdeletekey
@@ -45,6 +47,52 @@ Name: "{commonprograms}\Haronex Enterprise\Configure my account"; Filename: "{ap
 Name: "{commonprograms}\Haronex Enterprise\Uninstall"; Filename: "{uninstallexe}"
 
 [Code]
+var
+  PolicyPage: TWizardPage;
+  MandatoryCheck: TNewCheckBox;
+  RecoveryCheck: TNewCheckBox;
+
+function InitialPolicy(Name, ParamName: String): Boolean;
+var Value: Cardinal; ParamValue: String;
+begin
+  Result := RegQueryDWordValue(HKLM32, 'Software\Haronex\Enterprise', Name, Value) and (Value = 1);
+  ParamValue := ExpandConstant('{param:' + ParamName + '|}');
+  if ParamValue = '1' then Result := True;
+  if ParamValue = '0' then Result := False;
+end;
+
+procedure InitializeWizard;
+begin
+  PolicyPage := CreateCustomPage(wpSelectDir, 'Word Review Settings',
+    'These settings apply to all users of this computer.');
+  MandatoryCheck := TNewCheckBox.Create(PolicyPage);
+  MandatoryCheck.Parent := PolicyPage.Surface;
+  MandatoryCheck.Left := 0;
+  MandatoryCheck.Top := ScaleY(12);
+  MandatoryCheck.Width := PolicyPage.SurfaceWidth;
+  MandatoryCheck.Height := ScaleY(48);
+  MandatoryCheck.Caption := 'Enable Mandatory Review (Review Text + Clear Both before Save, Save As and Print)';
+  MandatoryCheck.Checked := InitialPolicy('MandatoryReviewEnabled', 'MANDATORYREVIEW');
+  RecoveryCheck := TNewCheckBox.Create(PolicyPage);
+  RecoveryCheck.Parent := PolicyPage.Surface;
+  RecoveryCheck.Left := 0;
+  RecoveryCheck.Top := ScaleY(75);
+  RecoveryCheck.Width := PolicyPage.SurfaceWidth;
+  RecoveryCheck.Height := ScaleY(40);
+  RecoveryCheck.Caption := 'Disable AutoRecover (unsaved work may be lost)';
+  RecoveryCheck.Checked := InitialPolicy('DisableAutoRecover', 'DISABLEAUTORECOVER');
+end;
+
+function PolicyMandatory(Param: String): String;
+begin
+  Result := IntToStr(Ord(MandatoryCheck.Checked));
+end;
+
+function PolicyRecovery(Param: String): String;
+begin
+  Result := IntToStr(Ord(RecoveryCheck.Checked));
+end;
+
 function HasDotNet48: Boolean;
 var ReleaseNumber: Cardinal;
 begin

@@ -12,6 +12,21 @@ namespace HaronexMandatory {
 static const IID WordEvents4 =
   {0x00020A01,0x0000,0x0000,{0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46}};
 
+// Enterprise settings are written by elevated Setup in the 32-bit machine
+// registry. When a policy value exists (including 0), it takes precedence
+// over the older per-user preference. Ordinary installs retain HKCU behavior.
+inline bool ReadPolicyDword(HKEY root,const wchar_t* path,const wchar_t* name,DWORD& value) {
+  HKEY key=nullptr; DWORD size=sizeof(value),type=0;
+  if(RegOpenKeyExW(root,path,0,KEY_QUERY_VALUE|KEY_WOW64_32KEY,&key)!=ERROR_SUCCESS)return false;
+  LONG status=RegQueryValueExW(key,name,nullptr,&type,reinterpret_cast<BYTE*>(&value),&size);
+  RegCloseKey(key);
+  return status==ERROR_SUCCESS&&type==REG_DWORD&&size==sizeof(value);
+}
+inline bool SettingEnabled(const wchar_t* name) {
+  DWORD value=0;
+  if(ReadPolicyDword(HKEY_LOCAL_MACHINE,L"Software\\Haronex\\Enterprise",name,value))return value==1;
+  return ReadPolicyDword(HKEY_CURRENT_USER,L"Software\\Haronex",name,value)&&value==1;
+}
 inline void DiagnosticValue(const wchar_t* name,DWORD value) {
   HKEY key=nullptr;
   if(RegCreateKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,nullptr,0,
@@ -360,16 +375,7 @@ public:
   static bool ShouldCancel(bool unlocked,bool,bool) {
     return EnforcementEnabled()&&!unlocked;
   }
-  static bool EnforcementEnabled(){
-    HKEY key=nullptr;
-    DWORD enabled=0,size=sizeof(enabled),type=REG_DWORD;
-    if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,
-                     KEY_QUERY_VALUE,&key)!=ERROR_SUCCESS)return false;
-    LONG status=RegQueryValueExW(key,L"MandatoryReviewEnabled",nullptr,
-      &type,reinterpret_cast<BYTE*>(&enabled),&size);
-    RegCloseKey(key);
-    return status==ERROR_SUCCESS&&type==REG_DWORD&&enabled==1;
-  }
+  static bool EnforcementEnabled(){return SettingEnabled(L"MandatoryReviewEnabled");}
   static bool ValidCancel(VARIANTARG& arg) {
     if(arg.vt==(VT_BYREF|VT_BOOL)&&arg.pboolVal)return true;
     if(arg.vt==(VT_BYREF|VT_VARIANT)&&arg.pvarVal) {

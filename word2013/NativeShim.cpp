@@ -238,21 +238,35 @@ static HRESULT RegistryDword(HKEY root, const std::wstring& key, const wchar_t* 
 // whether to disable recovery during setup; manual Save remains unchanged.
 static void ConfigureWordSaveOptions(IDispatch* app) {
   if(!app)return;
-  DWORD disabled=0,size=sizeof(disabled);
-  HKEY h=nullptr;
-  if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,KEY_QUERY_VALUE,&h)==ERROR_SUCCESS) {
-    RegQueryValueExW(h,L"DisableAutoRecover",nullptr,nullptr,reinterpret_cast<BYTE*>(&disabled),&size);
-    RegCloseKey(h);
-  }
-  if(disabled==1) {
-    LocalCleanup::Obj options=LocalCleanup::PropertyObject(app,L"Options");
-    if(options)LocalCleanup::SetNumber(options.p,L"SaveInterval",0);
+  LocalCleanup::Obj options=LocalCleanup::PropertyObject(app,L"Options");
+  if(!options)return;
+  long current=0;
+  if(!LocalCleanup::PropertyNumber(options.p,L"SaveInterval",current))return;
+  const bool disabled=HaronexMandatory::SettingEnabled(L"DisableAutoRecover");
+  DWORD previous=0;
+  bool saved=HaronexMandatory::ReadPolicyDword(HKEY_CURRENT_USER,L"Software\\Haronex",
+    L"PreviousAutoRecoverInterval",previous);
+  if(disabled) {
+    // Preserve the user's real nonzero interval before changing it.
+    if(current>0 && SUCCEEDED(RegistryDword(HKEY_CURRENT_USER,L"Software\\Haronex",
+      L"PreviousAutoRecoverInterval",static_cast<DWORD>(current))))
+      LocalCleanup::SetNumber(options.p,L"SaveInterval",0);
+  } else if(saved) {
+    // Restore only a recorded interval, and do not override a new user setting.
+    if(current!=0 || (previous>0 && previous<=120 &&
+        SUCCEEDED(LocalCleanup::SetNumber(options.p,L"SaveInterval",static_cast<long>(previous))))) {
+      HKEY key=nullptr;
+      if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,KEY_SET_VALUE,&key)==ERROR_SUCCESS) {
+        RegDeleteValueW(key,L"PreviousAutoRecoverInterval");RegCloseKey(key);
+      }
+    }
   }
 }
 static void DisableDocumentAutoSave(IDispatch* app) {
   // AutoSaveOn is absent in Word 2013; fail harmlessly there.
   LocalCleanup::Obj doc=LocalCleanup::ActiveDocument(app);
   if(!doc)return;
+  if(!HaronexMandatory::SettingEnabled(L"DisableAutoRecover"))return;
   DISPID id=0;
   if(FAILED(LocalCleanup::Member(doc.p,L"AutoSaveOn",id)))return;
   VARIANTARG arg;VariantInit(&arg);arg.vt=VT_BOOL;arg.boolVal=VARIANT_FALSE;

@@ -255,6 +255,34 @@ int main(){
     wprintf(L"V1010_WORD_EVENT_RELEASE_FAILED\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 40;
   }
+  // Test machine policy ON and OFF against opposite per-user values.
+  HKEY policyKey=nullptr; DWORD disposition=0;
+  if(RegCreateKeyExW(HKEY_LOCAL_MACHINE,L"Software\\Haronex\\Enterprise",0,nullptr,0,
+      KEY_SET_VALUE|KEY_WOW64_32KEY,nullptr,&policyKey,&disposition)!=ERROR_SUCCESS ||
+      disposition!=REG_CREATED_NEW_KEY) {
+    if(policyKey)RegCloseKey(policyKey);
+    wprintf(L"ENTERPRISE_POLICY_TEST_REQUIRES_CLEAN_ADMIN_RUNNER\n");
+    SysFreeString(xml);ribbon->Release();CoUninitialize();return 41;
+  }
+  DWORD on=1,off=0;
+  bool policyTest=SetMandatoryOption(0) &&
+    RegSetValueExW(policyKey,L"MandatoryReviewEnabled",0,REG_DWORD,reinterpret_cast<BYTE*>(&on),sizeof(on))==ERROR_SUCCESS &&
+    RegSetValueExW(policyKey,L"DisableAutoRecover",0,REG_DWORD,reinterpret_cast<BYTE*>(&on),sizeof(on))==ERROR_SUCCESS &&
+    HaronexMandatory::Gate::EnforcementEnabled() &&
+    HaronexMandatory::SettingEnabled(L"DisableAutoRecover");
+  policyTest=policyTest && SetMandatoryOption(1) &&
+    RegSetValueExW(policyKey,L"MandatoryReviewEnabled",0,REG_DWORD,reinterpret_cast<BYTE*>(&off),sizeof(off))==ERROR_SUCCESS &&
+    RegSetValueExW(policyKey,L"DisableAutoRecover",0,REG_DWORD,reinterpret_cast<BYTE*>(&off),sizeof(off))==ERROR_SUCCESS &&
+    !HaronexMandatory::Gate::EnforcementEnabled() &&
+    !HaronexMandatory::SettingEnabled(L"DisableAutoRecover");
+  RegCloseKey(policyKey);
+  RegDeleteKeyExW(HKEY_LOCAL_MACHINE,L"Software\\Haronex\\Enterprise",KEY_WOW64_32KEY,0);
+  SetMandatoryOption(0);
+  if(!policyTest) {
+    wprintf(L"ENTERPRISE_POLICY_PRECEDENCE_FAILED\n");
+    SysFreeString(xml);ribbon->Release();CoUninitialize();return 42;
+  }
+  wprintf(L"ENTERPRISE_POLICY_PRECEDENCE_OK\n");
   wprintf(L"NATIVE_COM_AND_RIBBON_AND_MANDATORY_HASH_OK\n");
   SysFreeString(xml);ribbon->Release();CoUninitialize();return 0;
 }

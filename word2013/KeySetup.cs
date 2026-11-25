@@ -71,6 +71,15 @@ namespace RadiologyAgent {
       }
       return 0;
     }
+    private static bool MachineOption(string name,out bool enabled) {
+      enabled=false;
+      using(var lm=RegistryKey.OpenBaseKey(RegistryHive.LocalMachine,RegistryView.Registry32))
+      using(var policy=lm.OpenSubKey(@"Software\Haronex\Enterprise")) {
+        if(policy==null||policy.GetValue(name)==null||policy.GetValueKind(name)!=RegistryValueKind.DWord)return false;
+        enabled=Convert.ToInt32(policy.GetValue(name))==1;
+        return true;
+      }
+    }
     private static int Configure() {
       Application.EnableVisualStyles();
       using(var form=new Form {Text="Haronex — User Configuration",Width=560,Height=340,
@@ -88,6 +97,15 @@ namespace RadiologyAgent {
           consent.Checked=Convert.ToInt32(settings.GetValue("WebTransferAllowed",0))==1;
           mandatory.Checked=Convert.ToInt32(settings.GetValue("MandatoryReviewEnabled",0))==1;
           recovery.Checked=Convert.ToInt32(settings.GetValue("DisableAutoRecover",0))==1;
+          bool machineMandatory,machineRecovery;
+          if(MachineOption("MandatoryReviewEnabled",out machineMandatory)) {
+            mandatory.Checked=machineMandatory;mandatory.Enabled=false;
+            mandatory.Text="Enable Mandatory Review (managed by IT)";
+          }
+          if(MachineOption("DisableAutoRecover",out machineRecovery)) {
+            recovery.Checked=machineRecovery;recovery.Enabled=false;
+            recovery.Text="Disable AutoRecover (managed by IT; unsaved work may be lost)";
+          }
           var save=new Button {Left=345,Top=255,Width=85,Text="Save"};
           var cancel=new Button {Left=440,Top=255,Width=85,Text="Cancel",DialogResult=DialogResult.Cancel};
           save.Click+=(sender,e)=>{
@@ -103,8 +121,8 @@ namespace RadiologyAgent {
               int migrated=MigrateLegacy();
               if(migrated!=0)throw new InvalidOperationException("Machine installation not detected. Contact IT.");
               settings.SetValue("WebTransferAllowed",consent.Checked?1:0,RegistryValueKind.DWord);
-              settings.SetValue("MandatoryReviewEnabled",mandatory.Checked?1:0,RegistryValueKind.DWord);
-              settings.SetValue("DisableAutoRecover",recovery.Checked?1:0,RegistryValueKind.DWord);
+              if(mandatory.Enabled)settings.SetValue("MandatoryReviewEnabled",mandatory.Checked?1:0,RegistryValueKind.DWord);
+              if(recovery.Enabled)settings.SetValue("DisableAutoRecover",recovery.Checked?1:0,RegistryValueKind.DWord);
               settings.SetValue("LiveAutoReviewAllowed",0,RegistryValueKind.DWord);
               form.DialogResult=DialogResult.OK;form.Close();
             }catch(Exception ex){MessageBox.Show(form,ex is InvalidOperationException?ex.Message:"Unable to save Haronex configuration.","Haronex",MessageBoxButtons.OK,MessageBoxIcon.Warning);}
