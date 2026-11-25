@@ -16,7 +16,7 @@ namespace RadiologyAgent {
     private readonly object word;
     private readonly Label status;
     private bool running;
-    internal const string ReviewAlgorithmVersion="haronex-groq-qwen38-v12-1";
+    internal const string ReviewAlgorithmVersion="haronex-v11-12-multimodel-r1";
     public WebReviewForm(object application) {
       word=application;
       Text="Haronex — Word 2013"; Width=1; Height=1;
@@ -323,7 +323,7 @@ namespace RadiologyAgent {
           "suppressed_partial_logic","supported_conclusion_claims",
           "unsupported_conclusion_candidates","direct_conflicts",
           "logic_proposed","logic_returned","clinical_audit_completed",
-          "clinical_coverage_flags",
+          "clinical_coverage_flags","model_120b","model_20b","model_qwen","model_fallbacks",
           "concurrency"};
         var safe=new StringBuilder(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
         safe.Append(" host_ms=").Append(Math.Max(0,hostElapsedMs));

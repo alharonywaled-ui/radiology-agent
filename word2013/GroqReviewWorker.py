@@ -17,6 +17,8 @@ import os
 import urllib3
 
 MODEL = "qwen/qwen3.8-27b"
+LOGIC_MODEL = "openai/gpt-oss-120b"
+LANGUAGE_MODEL = "openai/gpt-oss-20b"
 RETRY_DELAYS = (2, 6, 15)  # Bounded exponential backoff, four total HTTP attempts.
 MAX_COMPLETION_TOKENS = 8192
 MIN_SPLIT_CHARS = 600
@@ -1039,18 +1041,45 @@ def transport_request(req, open_url=urllib.request.urlopen):
         LIMITER.release(rate_limited=limited, success=successful)
 
 
+def model_for_prompt(system_prompt):
+    return LANGUAGE_MODEL if system_prompt in (LANGUAGE_SYSTEM, OFF_TOPIC_SYSTEM) else LOGIC_MODEL
+
 def api_review(key, text, requester=transport_request, sleeper=time.sleep,
                system_prompt=SYSTEM, user_prefix="Review this report completely:\n\n"):
+    model = model_for_prompt(system_prompt)
+    try:
+        return api_review_model(key, text, requester, sleeper, system_prompt, user_prefix, model)
+    except ReviewFailure as exc:
+        fallback = exc.retryable or exc.code in (
+            "GROQ_MODEL_404", "GROQ_INVALID_JSON", "GROQ_INVALID_QUOTE",
+            "GROQ_INVALID_CATEGORY", "GROQ_INVALID_STRUCTURE", "GROQ_ALL_ISSUES_INVALID")
+        if requester is not transport_request or not fallback:
+            raise
+        metric("model_fallbacks")
+        return api_review_model(key, text, requester, sleeper, system_prompt, user_prefix, MODEL)
+
+def api_review_model(key, text, requester, sleeper, system_prompt, user_prefix, model):
+    properties = {name: {"type": "string"} for name in ("quote", "explanation", "suggestion")}
+    properties["category"] = {"type": "string", "enum": ["logic", "language", "unrelated"]}
+    issue = {"type": "object", "properties": properties,
+             "required": list(properties), "additionalProperties": False}
+    schema = {"type": "object", "properties": {"issues": {"type": "array", "items": issue}},
+              "required": ["issues"], "additionalProperties": False}
     request_body = {
-        "model": MODEL,
+        "model": model,
         "messages": [{"role": "system", "content": system_prompt},
                      {"role": "user", "content": user_prefix + text}],
-        "response_format": {"type": "json_object"},
-        "reasoning_effort": "low",
-        "reasoning_format": "hidden",
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "haronex_review", "strict": True, "schema": schema}},
+        "reasoning_effort": "medium" if model == LOGIC_MODEL else "low",
         "temperature": 0.2,
         "max_completion_tokens": MAX_COMPLETION_TOKENS
     }
+    if model == MODEL:
+        request_body["reasoning_format"] = "hidden"
+    else:
+        request_body["include_reasoning"] = False
+    metric("model_120b" if model == LOGIC_MODEL else "model_20b" if model == LANGUAGE_MODEL else "model_qwen")
     data = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(ENDPOINT, data=data, method="POST",
         headers={"Authorization": "Bearer " + key,
@@ -1191,7 +1220,7 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-groq-qwen38-v12-1":
+        if version != "haronex-v11-12-multimodel-r1":
             raise ValueError("Unsupported review version")
         # Preserve ALL four independent audit passes; parallelize each report
         # chunk inside each pass instead of processing chunks serially. Bounded
@@ -1628,7 +1657,10 @@ def self_test():
         def read(self, limit):
             return b'{"error":{"type":"invalid_request_error","message":"unknown parameter name"}}'
     assert classify_http_400(BadParams()) == "GROQ_REQUEST_400_PARAMETER"
-    assert "Haronex-Radiology-Agent/11" in str(api_review.__code__.co_consts)
+    assert "Haronex-Radiology-Agent/11" in str(api_review_model.__code__.co_consts)
+    assert model_for_prompt(CONCLUSION_SYSTEM) == LOGIC_MODEL
+    assert model_for_prompt(LANGUAGE_SYSTEM) == LANGUAGE_MODEL
+    assert model_for_prompt(OFF_TOPIC_SYSTEM) == LANGUAGE_MODEL
     assert MAX_COMPLETION_TOKENS == 8192
     try:
         normalize(sample, [{"quote": "not present", "category": "logic"}])
@@ -1641,6 +1673,14 @@ def self_test():
     from email.message import Message
     fake_response = json.dumps({"choices": [{"finish_reason": "stop", "message": {
         "content": json.dumps({"issues": []})}}]}).encode("utf-8")
+    def inspect_request(request):
+        body=json.loads(request.data.decode("utf-8"))
+        assert body["model"] == LANGUAGE_MODEL
+        assert body["response_format"]["json_schema"]["strict"] is True
+        assert "reasoning_format" not in body and body["include_reasoning"] is False
+        return fake_response
+    assert api_review("gsk_dummy", sample, inspect_request, lambda _: None,
+                      system_prompt=LANGUAGE_SYSTEM) == []
     called, delays = [], []
     def flaky(request):
         called.append(1)

@@ -66,6 +66,7 @@ int main(){
      !wcsstr(xml,L"Clear Comments")||!wcsstr(xml,L"Clear Highlights")||
      !wcsstr(xml,L"ClearBothClick")||!wcsstr(xml,L"Clear Both")||
      !wcsstr(xml,L"getImage=\"SidebarIcon\"")||
+     !wcsstr(xml,L"getEnabled=\"ReviewEnabled\"")||
      !wcsstr(xml,L"ToggleSidebarClick")) {
     wprintf(L"RIBBON_CHECK_FAILED 0x%08x\n",static_cast<unsigned>(hr));
     if(xml)SysFreeString(xml);
@@ -90,6 +91,16 @@ int main(){
     ribbon->Release();CoUninitialize();return 32;
   }
   VariantClear(&picture);
+  LPOLESTR enabledCallback=const_cast<LPOLESTR>(L"ReviewEnabled");
+  DISPID enabledId=0;
+  VARIANT enabled;VariantInit(&enabled);
+  if(FAILED(ribbon->GetIDsOfNames(IID_NULL,&enabledCallback,1,LOCALE_USER_DEFAULT,&enabledId))||
+     FAILED(ribbon->Invoke(enabledId,IID_NULL,LOCALE_USER_DEFAULT,DISPATCH_METHOD,&args,&enabled,nullptr,nullptr))||
+     enabled.vt!=VT_BOOL||enabled.boolVal!=VARIANT_TRUE) {
+    wprintf(L"REVIEW_ENABLED_CALLBACK_FAILED\n");
+    VariantClear(&enabled);SysFreeString(xml);ribbon->Release();CoUninitialize();return 33;
+  }
+  VariantClear(&enabled);
   if(HaronexMandatory::Hash(L"Text")!=L"71988c4d8e0803ba4519f0b2864c1331c14a1890bf8694e251379177bfedb5c3") {
     wprintf(L"MANDATORY_SHA256_INCOMPATIBLE\n");
     SysFreeString(xml);ribbon->Release();CoUninitialize();return 35;

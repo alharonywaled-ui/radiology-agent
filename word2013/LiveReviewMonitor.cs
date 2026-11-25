@@ -134,6 +134,12 @@ namespace RadiologyAgent {
           key.SetValue(name,unchecked((int)value),RegistryValueKind.DWord);
       } catch{}
     }
+    private void CompleteReviewIfIdle() {
+      if(working||pendingClick||awaitingDocument||lastHandledCommand==0)return;
+      if(ReadDword("LiveReviewCommand")==lastHandledCommand &&
+         ReadDword("LiveReviewCompleted")!=lastHandledCommand)
+        WriteDword("LiveReviewCompleted",lastHandledCommand);
+    }
     private static void LogFailure(string code) {
       try {
         // Only short reason codes; no report text, file paths, keys, prompts, or responses.
@@ -235,6 +241,7 @@ namespace RadiologyAgent {
         lastWordProblem="WORD_POLL_FAILED";
       } finally {
         polling=false;
+        CompleteReviewIfIdle();
         if(!IsDisposed) {
           int next=(working||pendingClick||awaitingDocument)?ActivePollMilliseconds:
             (sidebar!=null&&!sidebar.IsDisposed&&sidebar.Visible?
@@ -1011,6 +1018,7 @@ namespace RadiologyAgent {
       uint command=ReadDword("LiveReviewCommand");
       if(command==lastHandledCommand)return;
       lastHandledCommand=command;
+      WriteDword("ReviewOwnerPid",unchecked((uint)Process.GetCurrentProcess().Id));
       WriteDword("LiveReviewHandled",command);
       // Rebind to the exact Word window that raised the Ribbon click.
       bool bound=ConnectWord();
@@ -1107,7 +1115,11 @@ namespace RadiologyAgent {
     }
 
     private async void StartAnalysis() {
-      if(working||currentText==null||!WebReviewForm.Approved())return;
+      if(working)return;
+      if(currentText==null||!WebReviewForm.Approved()){
+        pendingClick=false;awaitingDocument=false;CloseReviewOverlay();Notify(false);
+        CompleteReviewIfIdle();return;
+      }
       working=true;
       string report=currentText,id=documentId,cacheFile=snapshotToken;
       var token=new CancellationTokenSource();
@@ -1154,7 +1166,9 @@ namespace RadiologyAgent {
         if(ReferenceEquals(runningCancellation,token))runningCancellation=null;
         token.Dispose();
         working=false;
+        pendingClick=false;awaitingDocument=false;
         CloseReviewOverlay();
+        CompleteReviewIfIdle();
       }
     }
 
@@ -1358,7 +1372,7 @@ namespace RadiologyAgent {
     }
 
     private void ApplyReady() {
-      if(readyResponse==null||currentText==null){Notify(false);return;}
+      if(readyResponse==null||currentText==null){pendingClick=false;Notify(false);return;}
       try {
         dynamic app=word,doc=boundWordWindow!=null?((dynamic)boundWordWindow).Document:app.ActiveDocument;
         string latest=Convert.ToString(doc.Content.Text);
@@ -1367,7 +1381,7 @@ namespace RadiologyAgent {
         try {hwnd=boundWordWindow!=null?(int)((dynamic)boundWordWindow).Hwnd:(int)app.ActiveWindow.Hwnd;}
         catch{hwnd=(int)app.Hwnd;}
         if(latest!=currentText||hwnd.ToString()+"|"+name!=documentId) {
-          pendingClick=true;return;
+          throw new InvalidOperationException("Document changed during review; click Review Text again.");
         }
         string source=readyResponse;
         var parser=new JavaScriptSerializer{MaxJsonLength=2000000};

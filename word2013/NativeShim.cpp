@@ -26,6 +26,25 @@ static LONG g_locks = 0;
 static IDispatch* g_ribbonUi = nullptr;
 static UINT_PTR g_ribbonTimer = 0;
 static DWORD g_lastReviewResult = 0xFFFFFFFF;
+static bool g_lastReviewBusy = false;
+static bool ReviewBusy() {
+  HKEY h=nullptr;
+  if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,KEY_QUERY_VALUE,&h)!=ERROR_SUCCESS)return false;
+  DWORD command=0,completed=0,owner=0,n=sizeof(DWORD);
+  ULONGLONG started=0;
+  RegQueryValueExW(h,L"LiveReviewCommand",nullptr,nullptr,reinterpret_cast<BYTE*>(&command),&n);
+  n=sizeof(DWORD);RegQueryValueExW(h,L"LiveReviewCompleted",nullptr,nullptr,reinterpret_cast<BYTE*>(&completed),&n);
+  n=sizeof(DWORD);RegQueryValueExW(h,L"ReviewOwnerPid",nullptr,nullptr,reinterpret_cast<BYTE*>(&owner),&n);
+  n=sizeof(started);RegQueryValueExW(h,L"ReviewStartedTick",nullptr,nullptr,reinterpret_cast<BYTE*>(&started),&n);
+  RegCloseKey(h);
+  ULONGLONG now=GetTickCount64();
+  if(command==completed||!started||now<started||now-started>2700000ULL)return false;
+  if(!owner)return now-started<30000ULL;
+  HANDLE process=OpenProcess(SYNCHRONIZE,FALSE,owner);
+  if(!process)return GetLastError()==ERROR_ACCESS_DENIED;
+  bool active=WaitForSingleObject(process,0)==WAIT_TIMEOUT;
+  CloseHandle(process);return active;
+}
 static DWORD ReadReviewResult() {
   DWORD value=0, size=sizeof(value);
   HKEY key=nullptr;
@@ -49,8 +68,10 @@ static void RefreshRibbonButton() {
 }
 static VOID CALLBACK RibbonStateTimer(HWND,UINT,UINT_PTR,DWORD) {
   DWORD state=ReadReviewResult();
-  if(state!=g_lastReviewResult) {
+  bool busy=ReviewBusy();
+  if(state!=g_lastReviewResult||busy!=g_lastReviewBusy) {
     g_lastReviewResult=state;
+    g_lastReviewBusy=busy;
     RefreshRibbonButton();
   }
 }
@@ -260,6 +281,12 @@ static HWND ActiveWordWindowFromCom(IDispatch* application) {
   return found&&IsWindow(found)?GetAncestor(found,GA_ROOT):nullptr;
 }
 static void RequestReview(IDispatch* wordApplication) {
+  HANDLE gate=CreateMutexW(nullptr,FALSE,L"Local\\HaronexReviewCommandV1112");
+  if(!gate)return;
+  DWORD wait=WaitForSingleObject(gate,0);
+  if(wait!=WAIT_OBJECT_0&&wait!=WAIT_ABANDONED){CloseHandle(gate);return;}
+  struct GateRelease {HANDLE h;~GateRelease(){ReleaseMutex(h);CloseHandle(h);}} release={gate};
+  if(ReviewBusy())return;
   const wchar_t* key=L"Software\\Haronex";
   HKEY h=nullptr;
   if(RegCreateKeyExW(HKEY_CURRENT_USER,key,0,nullptr,REG_OPTION_NON_VOLATILE,
@@ -282,10 +309,17 @@ static void RequestReview(IDispatch* wordApplication) {
   DWORD seq=0,size=sizeof(seq),type=REG_DWORD;
   if(RegQueryValueExW(h,L"LiveReviewCommand",nullptr,&type,
                       reinterpret_cast<BYTE*>(&seq),&size)!=ERROR_SUCCESS)seq=0;
-  ++seq;
-  RegSetValueExW(h,L"LiveReviewCommand",0,REG_DWORD,
-                 reinterpret_cast<const BYTE*>(&seq),sizeof(seq));
+  if(!windowHandle){RegCloseKey(h);return;}
+  ++seq;if(!seq)++seq;
+  DWORD owner=0;
+  ULONGLONG started=GetTickCount64();
+  LONG rc=RegSetValueExW(h,L"ReviewOwnerPid",0,REG_DWORD,reinterpret_cast<const BYTE*>(&owner),sizeof(owner));
+  if(rc==ERROR_SUCCESS)rc=RegSetValueExW(h,L"ReviewStartedTick",0,REG_QWORD,reinterpret_cast<const BYTE*>(&started),sizeof(started));
+  if(rc==ERROR_SUCCESS)rc=RegSetValueExW(h,L"LiveReviewCommand",0,REG_DWORD,reinterpret_cast<const BYTE*>(&seq),sizeof(seq));
   RegCloseKey(h);
+  if(rc!=ERROR_SUCCESS)return;
+  g_lastReviewBusy=true;
+  RefreshRibbonButton();
   StartLiveMonitor();
 }
 
@@ -357,6 +391,7 @@ public:
       else if(!_wcsicmp(n,L"ClearBothIcon")) ids[i]=108;
       else if(!_wcsicmp(n,L"ToggleSidebarClick")) ids[i]=109;
       else if(!_wcsicmp(n,L"SidebarIcon")) ids[i]=110;
+      else if(!_wcsicmp(n,L"ReviewEnabled")) ids[i]=111;
       else return DISP_E_UNKNOWNNAME;
     }
     return S_OK;
@@ -372,6 +407,7 @@ public:
           if(g_ribbonUi)g_ribbonUi->Release();
           g_ribbonUi=ui;g_ribbonUi->AddRef();
           g_lastReviewResult=ReadReviewResult();
+          g_lastReviewBusy=ReviewBusy();
           if(!g_ribbonTimer)g_ribbonTimer=SetTimer(nullptr,0,500,RibbonStateTimer);
         }
       }
@@ -401,6 +437,7 @@ public:
     if(id==108)return CreateCleanupIcon(false,result);
     if(id==109){RequestSidebarToggle(wordApplication_);return S_OK;}
     if(id==110)return CreateSidebarIcon(result);
+    if(id==111){if(!result)return E_POINTER;result->vt=VT_BOOL;result->boolVal=ReviewBusy()?VARIANT_FALSE:VARIANT_TRUE;return S_OK;}
     if(id>=1&&id<=5)return S_OK;
     return DISP_E_MEMBERNOTFOUND;
   }
@@ -430,7 +467,7 @@ public:
       LR"(<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="RibbonLoaded">)"
       LR"(<ribbon><tabs><tab id="RadiologyAgentTab" label="Radiology Agent">)"
       LR"(<group id="RadiologyAgentGroup" label="Report Review">)"
-      LR"(<button id="RadiologyAgentReview" label="Review Text" size="large" getImage="ReviewIcon" onAction="ReviewTextClick"/>)"
+      LR"(<button id="RadiologyAgentReview" label="Review Text" size="large" getImage="ReviewIcon" getEnabled="ReviewEnabled" onAction="ReviewTextClick"/>)"
       LR"(<button id="HaronexSidebarToggle" label="Show / Hide Sidebar" size="large" getImage="SidebarIcon" onAction="ToggleSidebarClick" screentip="Show or hide Haronex Review Panel" supertip="Toggle the existing sidebar without starting a new AI review." />)"
       LR"(<button id="RadiologyAgentDeleteComments" label="Clear Comments" size="large" getImage="DeleteCommentsIcon" onAction="DeleteAllCommentsClick" screentip="Remove all comments" supertip="Delete every Word comment in the active document locally. No API call." />)"
       LR"(<button id="RadiologyAgentClearHighlights" label="Clear Highlights" size="large" getImage="ClearHighlightsIcon" onAction="ClearRedYellowClick" screentip="Remove red and yellow highlights" supertip="Remove red and yellow text highlighting from the active Word document, preserving other colors. Runs locally." />)"
