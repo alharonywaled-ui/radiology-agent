@@ -2022,9 +2022,9 @@ def self_test():
     female_report="Sex: Female\rFindings:\rMarkedly enlarged prostate.\rConclusion:\rNeeds clinical review.\r"
     assert patient_anatomy_consistency_groups([male_report])[0][0]["category"]=="logic"
     assert patient_anatomy_consistency_groups([female_report])[0][0]["quote"]=="prostate"
-    assert patient_anatomy_consistency_groups(["Findings:\\rNormal prostate.\\rConclusion:\\rNormal."],"sex=female;")[0][0]["quote"]=="prostate"
-    assert patient_anatomy_consistency_groups(["Findings:\\rNormal uterus.\\rConclusion:\\rNormal."],"sex=male;")[0][0]["quote"]=="uterus"
-    assert patient_anatomy_consistency_groups(["Findings:\\rMale mammography.\\rConclusion:\\rNormal."],"sex=male;")==[[]]
+    assert patient_anatomy_consistency_groups(["Findings:\rNormal prostate.\rConclusion:\rNormal."],"sex=female;")[0][0]["quote"]=="prostate"
+    assert patient_anatomy_consistency_groups(["Findings:\rNormal uterus.\rConclusion:\rNormal."],"sex=male;")[0][0]["quote"]=="uterus"
+    assert patient_anatomy_consistency_groups(["Findings:\rMale mammography.\rConclusion:\rNormal."],"sex=male;")==[[]]
     assert patient_anatomy_consistency_groups([
         "Patient Name: Maria\rFindings:\rProstate is enlarged.\rConclusion:\rFollow-up."])==[[]]
     assert patient_anatomy_consistency_groups([
