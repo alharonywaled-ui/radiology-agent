@@ -26,6 +26,25 @@ static LONG g_locks = 0;
 static IDispatch* g_ribbonUi = nullptr;
 static UINT_PTR g_ribbonTimer = 0;
 static DWORD g_lastReviewResult = 0xFFFFFFFF;
+static bool g_lastReviewBusy = false;
+static bool ReviewBusy() {
+  HKEY h=nullptr;
+  if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,KEY_QUERY_VALUE,&h)!=ERROR_SUCCESS)return false;
+  DWORD command=0,completed=0,owner=0,n=sizeof(DWORD);
+  ULONGLONG started=0;
+  RegQueryValueExW(h,L"LiveReviewCommand",nullptr,nullptr,reinterpret_cast<BYTE*>(&command),&n);
+  n=sizeof(DWORD);RegQueryValueExW(h,L"LiveReviewCompleted",nullptr,nullptr,reinterpret_cast<BYTE*>(&completed),&n);
+  n=sizeof(DWORD);RegQueryValueExW(h,L"ReviewOwnerPid",nullptr,nullptr,reinterpret_cast<BYTE*>(&owner),&n);
+  n=sizeof(started);RegQueryValueExW(h,L"ReviewStartedTick",nullptr,nullptr,reinterpret_cast<BYTE*>(&started),&n);
+  RegCloseKey(h);
+  ULONGLONG now=GetTickCount64();
+  if(command==completed||!started||now<started||now-started>2700000ULL)return false;
+  if(!owner)return now-started<30000ULL;
+  HANDLE process=OpenProcess(SYNCHRONIZE,FALSE,owner);
+  if(!process)return GetLastError()==ERROR_ACCESS_DENIED;
+  bool active=WaitForSingleObject(process,0)==WAIT_TIMEOUT;
+  CloseHandle(process);return active;
+}
 static DWORD ReadReviewResult() {
   DWORD value=0, size=sizeof(value);
   HKEY key=nullptr;
@@ -49,8 +68,10 @@ static void RefreshRibbonButton() {
 }
 static VOID CALLBACK RibbonStateTimer(HWND,UINT,UINT_PTR,DWORD) {
   DWORD state=ReadReviewResult();
-  if(state!=g_lastReviewResult) {
+  bool busy=ReviewBusy();
+  if(state!=g_lastReviewResult||busy!=g_lastReviewBusy) {
     g_lastReviewResult=state;
+    g_lastReviewBusy=busy;
     RefreshRibbonButton();
   }
 }
@@ -213,6 +234,45 @@ static HRESULT RegistryDword(HKEY root, const std::wstring& key, const wchar_t* 
   RegCloseKey(h);
   return HRESULT_FROM_WIN32(rc);
 }
+// Word 2013 has AutoRecover, not modern cloud AutoSave. The user chooses
+// whether to disable recovery during setup; manual Save remains unchanged.
+static void ConfigureWordSaveOptions(IDispatch* app) {
+  if(!app)return;
+  LocalCleanup::Obj options=LocalCleanup::PropertyObject(app,L"Options");
+  if(!options)return;
+  long current=0;
+  if(!LocalCleanup::PropertyNumber(options.p,L"SaveInterval",current))return;
+  const bool disabled=HaronexMandatory::SettingEnabled(L"DisableAutoRecover");
+  DWORD previous=0;
+  bool saved=HaronexMandatory::ReadPolicyDword(HKEY_CURRENT_USER,L"Software\\Haronex",
+    L"PreviousAutoRecoverInterval",previous);
+  if(disabled) {
+    // Preserve the user's real nonzero interval before changing it.
+    if(current>0 && SUCCEEDED(RegistryDword(HKEY_CURRENT_USER,L"Software\\Haronex",
+      L"PreviousAutoRecoverInterval",static_cast<DWORD>(current))))
+      LocalCleanup::SetNumber(options.p,L"SaveInterval",0);
+  } else if(saved) {
+    // Restore only a recorded interval, and do not override a new user setting.
+    if(current!=0 || (previous>0 && previous<=120 &&
+        SUCCEEDED(LocalCleanup::SetNumber(options.p,L"SaveInterval",static_cast<long>(previous))))) {
+      HKEY key=nullptr;
+      if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Haronex",0,KEY_SET_VALUE,&key)==ERROR_SUCCESS) {
+        RegDeleteValueW(key,L"PreviousAutoRecoverInterval");RegCloseKey(key);
+      }
+    }
+  }
+}
+static void DisableDocumentAutoSave(IDispatch* app) {
+  // AutoSaveOn is absent in Word 2013; fail harmlessly there.
+  LocalCleanup::Obj doc=LocalCleanup::ActiveDocument(app);
+  if(!doc)return;
+  if(!HaronexMandatory::SettingEnabled(L"DisableAutoRecover"))return;
+  DISPID id=0;
+  if(FAILED(LocalCleanup::Member(doc.p,L"AutoSaveOn",id)))return;
+  VARIANTARG arg;VariantInit(&arg);arg.vt=VT_BOOL;arg.boolVal=VARIANT_FALSE;
+  DISPID named=DISPID_PROPERTYPUT;DISPPARAMS params={&arg,&named,1,1};
+  doc.p->Invoke(id,IID_NULL,LOCALE_USER_DEFAULT,DISPATCH_PROPERTYPUT,&params,nullptr,nullptr,nullptr);
+}
 static std::wstring ModuleDirectory() {
   wchar_t path[MAX_PATH]={0};
   GetModuleFileNameW(g_instance,path,MAX_PATH);
@@ -220,11 +280,16 @@ static std::wstring ModuleDirectory() {
   if(slash)*(slash+1)=L'\0';
   return std::wstring(path);
 }
-static void StartLiveMonitor() {
+static bool StartLiveMonitor() {
   std::wstring exe=ModuleDirectory()+L"RadiologyAgent.ReviewHost.exe";
-  if(GetFileAttributesW(exe.c_str())==INVALID_FILE_ATTRIBUTES)return;
-  // The C# monitor enforces a per-Windows-user singleton and talks to Word on its STA.
-  ShellExecuteW(nullptr,L"open",exe.c_str(),L"--monitor",nullptr,SW_HIDE);
+  if(GetFileAttributesW(exe.c_str())==INVALID_FILE_ATTRIBUTES) {
+    HaronexMandatory::DiagnosticValue(L"HostLaunchCode",2);
+    return false;
+  }
+  // The C# monitor enforces a per-Windows-user singleton.
+  INT_PTR code=reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr,L"open",exe.c_str(),L"--monitor",ModuleDirectory().c_str(),SW_HIDE));
+  HaronexMandatory::DiagnosticValue(L"HostLaunchCode",code>32?0:static_cast<DWORD>(code));
+  return code>32;
 }
 // Prefer the Word.Application instance that owns this ribbon callback, rather
 // than the process-wide foreground window (which may be another Word instance).
@@ -259,7 +324,15 @@ static HWND ActiveWordWindowFromCom(IDispatch* application) {
   VariantClear(&window);
   return found&&IsWindow(found)?GetAncestor(found,GA_ROOT):nullptr;
 }
-static void RequestReview(IDispatch* wordApplication) {
+static void RequestReview(IDispatch* wordApplication,HaronexMandatory::Gate* approvalGate) {
+  HANDLE gate=CreateMutexW(nullptr,FALSE,L"Local\\HaronexReviewCommandV1112");
+  if(!gate)return;
+  DWORD wait=WaitForSingleObject(gate,0);
+  if(wait!=WAIT_OBJECT_0&&wait!=WAIT_ABANDONED){CloseHandle(gate);return;}
+  struct GateRelease {HANDLE h;~GateRelease(){ReleaseMutex(h);CloseHandle(h);}} release={gate};
+  if(ReviewBusy())return;
+  ConfigureWordSaveOptions(wordApplication);
+  DisableDocumentAutoSave(wordApplication);
   const wchar_t* key=L"Software\\Haronex";
   HKEY h=nullptr;
   if(RegCreateKeyExW(HKEY_CURRENT_USER,key,0,nullptr,REG_OPTION_NON_VOLATILE,
@@ -282,11 +355,29 @@ static void RequestReview(IDispatch* wordApplication) {
   DWORD seq=0,size=sizeof(seq),type=REG_DWORD;
   if(RegQueryValueExW(h,L"LiveReviewCommand",nullptr,&type,
                       reinterpret_cast<BYTE*>(&seq),&size)!=ERROR_SUCCESS)seq=0;
-  ++seq;
-  RegSetValueExW(h,L"LiveReviewCommand",0,REG_DWORD,
-                 reinterpret_cast<const BYTE*>(&seq),sizeof(seq));
+  if(!windowHandle){RegCloseKey(h);return;}
+  ++seq;if(!seq)++seq;
+  LocalCleanup::Obj doc=LocalCleanup::ActiveDocument(wordApplication);
+  if(!doc||!approvalGate||!approvalGate->BeginReview(doc.p,seq,h)) {
+    RegCloseKey(h);
+    MessageBoxW(root,L"Haronex could not bind this review to the open Word document. Reopen Word and retry.",L"Haronex",MB_OK|MB_ICONWARNING);
+    return;
+  }
+  DWORD owner=0;
+  ULONGLONG started=GetTickCount64();
+  LONG rc=RegSetValueExW(h,L"ReviewOwnerPid",0,REG_DWORD,reinterpret_cast<const BYTE*>(&owner),sizeof(owner));
+  if(rc==ERROR_SUCCESS)rc=RegSetValueExW(h,L"ReviewStartedTick",0,REG_QWORD,reinterpret_cast<const BYTE*>(&started),sizeof(started));
+  if(rc==ERROR_SUCCESS)rc=RegSetValueExW(h,L"LiveReviewCommand",0,REG_DWORD,reinterpret_cast<const BYTE*>(&seq),sizeof(seq));
   RegCloseKey(h);
-  StartLiveMonitor();
+  if(rc!=ERROR_SUCCESS)return;
+  g_lastReviewBusy=true;
+  RefreshRibbonButton();
+  if(!StartLiveMonitor()) {
+    HaronexMandatory::DiagnosticValue(L"LiveReviewCompleted",seq);
+    HaronexMandatory::DiagnosticValue(L"ReviewResult",2);
+    g_lastReviewBusy=false;RefreshRibbonButton();
+    MessageBoxW(root,L"Haronex ReviewHost is missing or cannot start. Close Word and contact IT to repair the installation.",L"Haronex",MB_OK|MB_ICONERROR);
+  }
 }
 
 // This independent Ribbon command toggles the panel without rerunning AI.
@@ -357,13 +448,14 @@ public:
       else if(!_wcsicmp(n,L"ClearBothIcon")) ids[i]=108;
       else if(!_wcsicmp(n,L"ToggleSidebarClick")) ids[i]=109;
       else if(!_wcsicmp(n,L"SidebarIcon")) ids[i]=110;
+      else if(!_wcsicmp(n,L"ReviewEnabled")) ids[i]=111;
       else return DISP_E_UNKNOWNNAME;
     }
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE Invoke(DISPID id,REFIID,LCID,WORD,DISPPARAMS* params,VARIANT* result,EXCEPINFO*,UINT*) override {
     if(result)VariantInit(result);
-    if(id==100){RequestReview(wordApplication_);return S_OK;}
+    if(id==100){RequestReview(wordApplication_,mandatoryGate_);return S_OK;}
     if(id==101) {
       if(params&&params->cArgs>=1) {
         VARIANTARG& arg=params->rgvarg[0];
@@ -372,6 +464,7 @@ public:
           if(g_ribbonUi)g_ribbonUi->Release();
           g_ribbonUi=ui;g_ribbonUi->AddRef();
           g_lastReviewResult=ReadReviewResult();
+          g_lastReviewBusy=ReviewBusy();
           if(!g_ribbonTimer)g_ribbonTimer=SetTimer(nullptr,0,500,RibbonStateTimer);
         }
       }
@@ -385,22 +478,19 @@ public:
     if(id==107){
       LocalCleanup::Obj doc=LocalCleanup::ActiveDocument(wordApplication_);
       if(!doc)return S_OK;
-      // Run local cleanup, then unlock only the Word document on which the
-      // command was invoked. No Groq response or current-text comparison.
-      LocalCleanup::ClearBoth(wordApplication_);
-      if(mandatoryGate_ && mandatoryGate_->ReleaseAfterClearBoth(doc.p)) {
-        // No popup: Save, Save As and Print work normally from now onward.
-      } else {
-        MessageBoxW(nullptr,
-          L"Could not unlock this Word document. You can still save safely "
-          L"using Yes on the Save safety prompt.",
-          L"Haronex",MB_OK|MB_ICONWARNING);
-      }
+      // Capture this document before cleanup. A successful review receipt
+      // is still required; Clear Both before review cannot unlock.
+      bool reviewedBeforeCleanup=mandatoryGate_&&!ReviewBusy()&&mandatoryGate_->HasCompletedReview(doc.p);
+      bool cleaned=LocalCleanup::ClearBoth(wordApplication_);
+      if(cleaned&&reviewedBeforeCleanup)mandatoryGate_->TryReleaseReviewedDocument(doc.p,true);
+      if(!cleaned&&HaronexMandatory::Gate::EnforcementEnabled())
+        MessageBoxW(nullptr,L"Some comments or Haronex highlights could not be cleared. Try Clear Both again or contact IT.",L"Haronex",MB_OK|MB_ICONWARNING);
       return S_OK;
     }
     if(id==108)return CreateCleanupIcon(false,result);
     if(id==109){RequestSidebarToggle(wordApplication_);return S_OK;}
     if(id==110)return CreateSidebarIcon(result);
+    if(id==111){if(!result)return E_POINTER;result->vt=VT_BOOL;result->boolVal=ReviewBusy()?VARIANT_FALSE:VARIANT_TRUE;return S_OK;}
     if(id>=1&&id<=5)return S_OK;
     return DISP_E_MEMBERNOTFOUND;
   }
@@ -409,6 +499,8 @@ public:
     if(wordApplication_)wordApplication_->Release();
     wordApplication_=app;
     if(wordApplication_)wordApplication_->AddRef();
+    ConfigureWordSaveOptions(wordApplication_);
+    DisableDocumentAutoSave(wordApplication_);
     mandatoryGate_=new(std::nothrow) HaronexMandatory::Gate();
     if(mandatoryGate_)mandatoryGate_->Attach(wordApplication_);
     StartLiveMonitor();return S_OK;
@@ -430,11 +522,11 @@ public:
       LR"(<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="RibbonLoaded">)"
       LR"(<ribbon><tabs><tab id="RadiologyAgentTab" label="Radiology Agent">)"
       LR"(<group id="RadiologyAgentGroup" label="Report Review">)"
-      LR"(<button id="RadiologyAgentReview" label="Review Text" size="large" getImage="ReviewIcon" onAction="ReviewTextClick"/>)"
+      LR"(<button id="RadiologyAgentReview" label="Review Text" size="large" getImage="ReviewIcon" getEnabled="ReviewEnabled" onAction="ReviewTextClick"/>)"
       LR"(<button id="HaronexSidebarToggle" label="Show / Hide Sidebar" size="large" getImage="SidebarIcon" onAction="ToggleSidebarClick" screentip="Show or hide Haronex Review Panel" supertip="Toggle the existing sidebar without starting a new AI review." />)"
       LR"(<button id="RadiologyAgentDeleteComments" label="Clear Comments" size="large" getImage="DeleteCommentsIcon" onAction="DeleteAllCommentsClick" screentip="Remove all comments" supertip="Delete every Word comment in the active document locally. No API call." />)"
-      LR"(<button id="RadiologyAgentClearHighlights" label="Clear Highlights" size="large" getImage="ClearHighlightsIcon" onAction="ClearRedYellowClick" screentip="Remove red and yellow highlights" supertip="Remove red and yellow text highlighting from the active Word document, preserving other colors. Runs locally." />)"
-      LR"(<button id="RadiologyAgentClearBoth" label="Clear Both" size="large" getImage="ClearBothIcon" onAction="ClearBothClick" screentip="Clear comments and red/yellow highlights" supertip="Clear comments and highlights, then unlock Save, Save As and Print for this open report. No repeated review after edits." />)"
+      LR"(<button id="RadiologyAgentClearHighlights" label="Clear Highlights" size="large" getImage="ClearHighlightsIcon" onAction="ClearRedYellowClick" screentip="Remove red, yellow and violet highlights" supertip="Remove red, yellow and violet text highlighting from the active Word document, preserving other colors. Runs locally." />)"
+      LR"(<button id="RadiologyAgentClearBoth" label="Clear Both" size="large" getImage="ClearBothIcon" onAction="ClearBothClick" screentip="Clear comments and red/yellow/violet highlights" supertip="Clear comments and Haronex highlights after a successful review. Corrections are optional." />)"
       LR"(</group></tab></tabs></ribbon></customUI>)";
     *xml=SysAllocString(ui);
     return *xml?S_OK:E_OUTOFMEMORY;

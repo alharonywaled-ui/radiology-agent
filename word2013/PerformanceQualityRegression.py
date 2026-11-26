@@ -17,7 +17,7 @@ def run():
         "Findings: Left renal calculus. Mild hepatomegaly. phleboli.\r",
         "Conclusion: No renal calculus. MRI MRCP IHBR 2026/2027.\r"
     ]
-    calls = {"general": 0, "language": 0, "unrelated": 0, "clinical": 0}
+    calls = {"general": 0, "language": 0, "unrelated": 0, "clinical": 0, "validation": 0}
     def review(piece):
         calls["general"] += 1
         time.sleep(.04)
@@ -41,15 +41,20 @@ def run():
                   "suggestion": "Verify with radiologist",
                   "section": "conclusion"}] if "No renal calculus" in p else []
                 for p in chunks]
+    def validation(report):
+        calls["validation"] += 1
+        time.sleep(.04)
+        assert "Findings:" in report and "Conclusion:" in report
+        return []
     t0=time.perf_counter()
     first=w.full_review_concurrently("gsk_offline_testing_1234",texts,
         general_review=review,conclusion_review=clinical,
-        unrelated_review=unrelated,language_review=language)
+        unrelated_review=unrelated,language_review=language,validation_review=validation)
     elapsed=time.perf_counter()-t0
     assert len(first)==4 and all(len(item)==2 for item in first)
     assert first[0][0][0]["quote"]=="phleboli"
     assert first[1][1][0]["category"]=="logic"
-    assert calls=={"general":2,"language":2,"unrelated":2,"clinical":1}
+    assert calls=={"general":2,"language":2,"unrelated":2,"clinical":1,"validation":1}
     assert elapsed < .30, ("Parallel audit unexpectedly serialized",elapsed)
 
     # Cache only SAME exact text+pass; never cache Conclusion cross-section.
@@ -76,7 +81,7 @@ def run():
         w.full_review_concurrently(key,texts,general_review=review,
             conclusion_review=lambda x: (_ for _ in ()).throw(
                 w.ReviewFailure("GROQ_NETWORK")),
-            unrelated_review=unrelated,language_review=language)
+            unrelated_review=unrelated,language_review=language,validation_review=validation)
         raise AssertionError("Failed clinical pass was accepted")
     except w.ReviewFailure as exc:
         assert exc.code=="GROQ_NETWORK"
@@ -131,7 +136,7 @@ def run():
     assert all(x.get("ok") is False for x in replies)
     assert all("texts" not in x and "api_key" not in x for x in replies)
     print(json.dumps({"ok":True,"test":"v12_evidence_first_quality_offline",
-                      "four_passes":True,"persistent_protocol":True,
+                      "four_passes":True,"intelligent_validation":True,"persistent_protocol":True,
                       "section_cache":True,"clinical_rerun":True,
                       "adaptive_scheduler":True}))
 if __name__=="__main__":

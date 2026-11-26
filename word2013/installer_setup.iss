@@ -1,5 +1,5 @@
 #define AppName "Haronex Radiology Agent for Word 2013"
-#define AppVersion "11.12.0"
+#define AppVersion "11.12.16"
 [Setup]
 AppId={{F29657A1-86DE-4565-B391-E9E4D35A8219}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={localappdata}\RadiologyAgent\Word2013Safe
 DefaultGroupName=Haronex
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_Groq_Qwen38_V11_12_Mandatory_Setup
+OutputBaseFilename=Haronex_Word2013_V11_12_16_MultiModel_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
@@ -17,11 +17,13 @@ DisableProgramGroupPage=yes
 UninstallDisplayName=Haronex (Word 2013 x86)
 
 [Files]
+Source: "bin\HaronexFiles.sha256"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\NDP48-x86-x64-AllOS-ENU.exe"; Flags: dontcopy
 Source: "bin\RadiologyAgent.NativeShim.dll"; DestDir: "{app}"; Flags: ignoreversion regserver
 Source: "bin\RadiologyAgent.ReviewHost.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\HaronexGroqWorker\HaronexGroqWorker.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "bin\HaronexGroqWorker\_HaronexRuntime\*"; DestDir: "{app}\_HaronexRuntime"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "bin\RadiologyAgent.KeySetup.exe"; Flags: dontcopy
 Source: "bin\RadiologyAgent.KeySetup.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
@@ -30,12 +32,16 @@ Root: HKCU; Subkey: "Software\Microsoft\Office\15.0\Word\Addins\RadiologyAgent.W
 Root: HKCU; Subkey: "Software\Classes\RadiologyAgent.WordAddin"; Flags: deletekey
 Root: HKCU; Subkey: "Software\Classes\CLSID\{{D1FBEFD5-3B43-4516-9B7B-CDEB47AB0FA1}"; Flags: deletekey
 
+[Icons]
+Name: "{userprograms}\Haronex\Configure my account"; Filename: "{app}\RadiologyAgent.KeySetup.exe"; Parameters: "--configure"
+
 [Code]
 var
   KeyPage: TInputQueryWizardPage;
   ConsentPage: TInputOptionWizardPage;
   MandatoryPage: TWizardPage;
   MandatoryCheck: TNewCheckBox;
+  RecoveryCheck: TNewCheckBox;
 
 // Embedded official Microsoft .NET Framework 4.8 offline redistributable.
 // No Visual Studio or VC++ redistributable required: native DLL uses /MT.
@@ -61,7 +67,12 @@ var
 begin
   Result := '';
   NeedsRestart := False;
-  if HasDotNet48 then Exit;
+  if HasDotNet48 then begin
+    ExtractTemporaryFile('RadiologyAgent.KeySetup.exe');
+    if not Exec(ExpandConstant('{tmp}\RadiologyAgent.KeySetup.exe'), '--prepare-user-install', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
+      Result := 'Close Word before installing or repairing Haronex.';
+    Exit;
+  end;
   Log('Haronex: .NET Framework 4.8 missing; extracting bundled Microsoft offline installer.');
   try
     ExtractTemporaryFile('NDP48-x86-x64-AllOS-ENU.exe');
@@ -90,25 +101,41 @@ begin
     Result := '.NET Framework 4.8 installation failed (exit code ' + IntToStr(ExitCode) + ').';
     Exit;
   end;
-  if not HasDotNet48 then
+  if not HasDotNet48 then begin
     Result := '.NET Framework 4.8 is not detected after prerequisite installation. Restart Windows and rerun setup.';
+    Exit;
+  end;
+  ExtractTemporaryFile('RadiologyAgent.KeySetup.exe');
+  if not Exec(ExpandConstant('{tmp}\RadiologyAgent.KeySetup.exe'), '--prepare-user-install', '', SW_HIDE, ewWaitUntilTerminated, ExitCode) or (ExitCode <> 0) then
+    Result := 'Close Word before installing or repairing Haronex.';
 end;
 
-function HasExistingHaronexAuthorization: Boolean;
-var
-  Allowed: Cardinal;
+function HasExistingGroqKey: Boolean;
 begin
-  Result := FileExists(ExpandConstant('{localappdata}\RadiologyAgent\groq.key.dpapi'))
-    and RegQueryDWordValue(HKCU, 'Software\Haronex', 'WebTransferAllowed', Allowed)
-    and (Allowed = 1);
+  // Even an unreadable key is never silently replaced during an upgrade.
+  // Key repair is an explicit action in Configure my account.
+  Result := FileExists(ExpandConstant('{localappdata}\RadiologyAgent\groq.key.dpapi'));
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
-  // An in-place upgrade does not request or overwrite the user's existing
-  // DPAPI-protected key and previously granted patient-data authorization.
-  Result := HasExistingHaronexAuthorization and
+  // The review options page is always shown, including upgrade and repair.
+  if PageID = MandatoryPage.ID then begin
+    Result := False;
+    Exit;
+  end;
+  // Do not change existing credentials or authorization on reinstall.
+  Result := HasExistingGroqKey and
     ((PageID = KeyPage.ID) or (PageID = ConsentPage.ID));
+end;
+
+function InitialUserOption(Name, ParamName: String): Boolean;
+var Value: Cardinal; ParamValue: String;
+begin
+  Result := RegQueryDWordValue(HKCU, 'Software\Haronex', Name, Value) and (Value = 1);
+  ParamValue := ExpandConstant('{param:' + ParamName + '|}');
+  if ParamValue = '1' then Result := True;
+  if ParamValue = '0' then Result := False;
 end;
 
 procedure InitializeWizard;
@@ -125,9 +152,9 @@ begin
   ConsentPage.Add('I am authorized to send these medical report texts to Groq for proofreading.');
   ConsentPage.Values[0] := False;
 
-  MandatoryPage := CreateCustomPage(ConsentPage.ID,
-    'Mandatory Review',
-    'Choose whether saving and printing require a completed review.');
+  MandatoryPage := CreateCustomPage(wpWelcome,
+    'Word Review Settings',
+    'Choose both options for this installation, update or repair. Existing Groq keys are preserved.');
   MandatoryCheck := TNewCheckBox.Create(MandatoryPage);
   MandatoryCheck.Parent := MandatoryPage.Surface;
   MandatoryCheck.Left := ScaleX(0);
@@ -135,8 +162,16 @@ begin
   MandatoryCheck.Width := MandatoryPage.SurfaceWidth;
   MandatoryCheck.Height := ScaleY(44);
   MandatoryCheck.Caption :=
-    'Enable Mandatory Review';
-  MandatoryCheck.Checked := False;
+    'Enable Mandatory Review (Review Text + Clear Both if findings before Save / Print)';
+  MandatoryCheck.Checked := InitialUserOption('MandatoryReviewEnabled', 'MANDATORYREVIEW');
+  RecoveryCheck := TNewCheckBox.Create(MandatoryPage);
+  RecoveryCheck.Parent := MandatoryPage.Surface;
+  RecoveryCheck.Left := ScaleX(0);
+  RecoveryCheck.Top := ScaleY(65);
+  RecoveryCheck.Width := MandatoryPage.SurfaceWidth;
+  RecoveryCheck.Height := ScaleY(30);
+  RecoveryCheck.Caption := 'Disable AutoRecover (Word 2013; unsaved work may be lost)';
+  RecoveryCheck.Checked := InitialUserOption('DisableAutoRecover', 'DISABLEAUTORECOVER');
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -163,29 +198,27 @@ var
   StagingPath: String;
   ResultCode: Integer;
 begin
-  if CurStep = ssInstall then begin
-    // Shut down the per-user persistent review monitor from an older release.
-    // Word must be closed by the user before upgrading; a new monitor is
-    // started automatically by the updated Word native COM add-in.
-    Exec(ExpandConstant('{sys}\taskkill.exe'),
-         '/F /IM RadiologyAgent.ReviewHost.exe', '', SW_HIDE,
-         ewWaitUntilTerminated, ResultCode);
-    Exit;
-  end;
   if CurStep <> ssPostInstall then Exit;
+  if not Exec(ExpandConstant('{app}\RadiologyAgent.KeySetup.exe'), '--verify-install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    RaiseException('Haronex installation integrity check failed. Re-run Setup and contact IT if files are blocked.');
+  if not Exec(ExpandConstant('{app}\RadiologyAgent.ReviewHost.exe'), '--worker-health', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    RaiseException('Haronex local worker handshake failed. Check diagnostics.log.');
   // Default OFF, including silent installs. When enabled, the native Word
-  // event sink blocks Save, Save As and Print until Review Text + Clear Both.
-  if not RegWriteDWordValue(HKCU, 'Software\\Haronex',
+  // event sink blocks Save, Save As and Print until successful Review Text and Clear Both if findings exist.
+  if not RegWriteDWordValue(HKCU, 'Software\Haronex',
        'MandatoryReviewEnabled', Ord(MandatoryCheck.Checked)) then
     RaiseException('Could not save Mandatory Review installation setting.');
-  if WizardSilent or HasExistingHaronexAuthorization then Exit;
+  if not RegWriteDWordValue(HKCU, 'Software\Haronex',
+       'DisableAutoRecover', Ord(RecoveryCheck.Checked)) then
+    RaiseException('Could not save AutoRecover preference.');
+  if WizardSilent or HasExistingGroqKey then Exit;
   StagingPath := ExpandConstant('{localappdata}\RadiologyAgent\pending-groq.key');
   ForceDirectories(ExtractFileDir(StagingPath));
   try
     if not SaveStringToFile(StagingPath, Trim(KeyPage.Values[0]), False) then
       RaiseException('Could not stage Groq configuration');
     if not Exec(ExpandConstant('{app}\RadiologyAgent.KeySetup.exe'),
-        '--import "' + StagingPath + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
+        '--import-if-missing "' + StagingPath + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
        or (ResultCode <> 0) then
       RaiseException('Could not protect Groq key. Installation incomplete.');
     RegWriteDWordValue(HKCU, 'Software\Haronex', 'WebTransferAllowed', 1);

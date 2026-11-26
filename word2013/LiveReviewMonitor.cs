@@ -29,36 +29,39 @@ namespace RadiologyAgent {
     internal static string Identity(uint processId,string fullName) {
       return Digest(processId.ToString()+"\u001f"+fullName);
     }
-    internal static bool Approve(object document, string reviewedText, uint verifiedWindow) {
+    internal static bool Approve(object document, string reviewedText, uint verifiedWindow, uint command, bool requiresCleanup) {
       try {
         dynamic doc=document;
         string fullName=Convert.ToString(doc.FullName);
-        if(verifiedWindow==0)return false;
+        if(verifiedWindow==0||command==0)return false;
         uint processId;
         if(GetWindowThreadProcessId(new IntPtr(unchecked((int)verifiedWindow)),out processId)==0
             ||processId==0)return false;
         string current=Convert.ToString(doc.Content.Text);
         if(!String.Equals(current,reviewedText,StringComparison.Ordinal))return false;
-        string id=Identity(processId,fullName),hash=Digest(current);
-        if(String.IsNullOrEmpty(id)||String.IsNullOrEmpty(hash))return false;
-        using(var key=Registry.CurrentUser.CreateSubKey(
-                  @"Software\Haronex\MandatoryReviews\"+id)) {
-          if(key==null)return false;
-          // Each new successful review needs a subsequent Clear Both action.
-          key.DeleteValue("ClearBothHash",false);
-          key.DeleteValue("ClearBothV102Hash",false);
-          key.DeleteValue("ClearBothV103Hash",false);
-          key.SetValue("ApprovedHash",hash,RegistryValueKind.String);
+        string id=Identity(processId,fullName);
+        if(String.IsNullOrEmpty(id))return false;
+        using(var request=Registry.CurrentUser.OpenSubKey(@"Software\Haronex")) {
+          if(request==null||
+             Convert.ToUInt32(request.GetValue("ReviewRequestCommand",0))!=command||
+             Convert.ToUInt32(request.GetValue("LiveReviewCommand",0))!=command||
+             !String.Equals(Convert.ToString(request.GetValue("ReviewRequestIdentity","")),id,StringComparison.Ordinal))return false;
+          string token=Convert.ToString(request.GetValue("ReviewRequestToken",""));
+          Guid parsed;
+          if(!Guid.TryParseExact(token,"B",out parsed))return false;
+          using(var receipts=Registry.CurrentUser.CreateSubKey(@"Software\Haronex\ReviewReceipts")) {
+            if(receipts==null)return false;
+            // Only a completed, validated review for the matched click writes
+            // the nonce. No report text, paths or patient identifiers.
+            receipts.SetValue(token,id+(requiresCleanup?"|clear":"|clean"),RegistryValueKind.String);
+          }
         }
         return true;
       } catch {return false;}
     }
-    // A successful review is a one-time gate for the open document. We do
-    // not revoke access on subsequent edits. Native Word COM session tracks
-    // the released document after Clear Both, even across Save As.
-    internal static void Invalidate(string oldId) {
-      // Intentional no-op: text edits must never re-lock an approved document.
-    }
+    // Once a successful review and any required cleanup are accepted, later corrections and Save As do
+    // not revoke permission for that same open COM document.
+    internal static void Invalidate(string oldId) {}
     internal static bool SelfTest() {
       return Digest("Text")==
         "71988c4d8e0803ba4519f0b2864c1331c14a1890bf8694e251379177bfedb5c3"
@@ -83,6 +86,8 @@ namespace RadiologyAgent {
     private bool polling;
     private int missingWordTicks;
     private string documentId, currentText, snapshotToken;
+    private string patientContext="";
+    private bool patientHeaderDetected,patientContextReviewed;
     private DateTime lastChangeUtc;
     private string readyResponse;
     private bool failed, working, pendingClick;
@@ -134,7 +139,13 @@ namespace RadiologyAgent {
           key.SetValue(name,unchecked((int)value),RegistryValueKind.DWord);
       } catch{}
     }
-    private static void LogFailure(string code) {
+    private void CompleteReviewIfIdle() {
+      if(working||pendingClick||awaitingDocument||lastHandledCommand==0)return;
+      if(ReadDword("LiveReviewCommand")==lastHandledCommand &&
+         ReadDword("LiveReviewCompleted")!=lastHandledCommand)
+        WriteDword("LiveReviewCompleted",lastHandledCommand);
+    }
+    internal static void LogFailure(string code) {
       try {
         // Only short reason codes; no report text, file paths, keys, prompts, or responses.
         if(String.IsNullOrWhiteSpace(code))code="UNKNOWN";
@@ -152,6 +163,14 @@ namespace RadiologyAgent {
       } catch {}
     }
 
+    private static void NotifyHostFailure(string code) {
+      WebReviewForm.SetReviewStatus(2);
+      string hint=code.StartsWith("HOST_API_KEY",StringComparison.Ordinal)||code=="KEY_OR_CONSENT_MISSING"
+        ?"Configure Haronex for this Windows account. Contact IT if the encrypted key cannot be read."
+        :"Close Word and ask IT to repair Haronex using the approved installer. No review was marked successful.";
+      MessageBox(IntPtr.Zero,"Haronex review failed.\r\n"+code+"\r\n"+hint,
+        "Haronex",0x00040000|0x00010000|0x10u);
+    }
     private static void Notify(bool success) {
       WebReviewForm.SetReviewStatus(success?1:2);
       MessageBox(IntPtr.Zero,success?"تمت المراجعة":"رجاءً أعد المحاولة",
@@ -235,6 +254,7 @@ namespace RadiologyAgent {
         lastWordProblem="WORD_POLL_FAILED";
       } finally {
         polling=false;
+        CompleteReviewIfIdle();
         if(!IsDisposed) {
           int next=(working||pendingClick||awaitingDocument)?ActivePollMilliseconds:
             (sidebar!=null&&!sidebar.IsDisposed&&sidebar.Visible?
@@ -244,6 +264,200 @@ namespace RadiologyAgent {
       }
     }
 
+    // Only send canonical age/sex, never names, accession numbers, raw header or DOB.
+    private const string ContextSeparator=@"[\s\x07:=：\-]*";
+    private const string AgeLabel=@"(?:\b(?:patient\s+)?(?:age|ega)\b|العمر|السن)";
+    private const string SexLabel=@"(?:\b(?:patient\s+)?(?:sex|gender|xes|redneg)\b|الجنس|النوع)";
+    private const string AgeUnit=@"(?:years?|yrs?|yr|y|months?|mos?|mo|m|days?|d|weeks?|wks?|wk|w|سنة|سنوات|عام|أعوام|شهر|شهور|أشهر|يوم|أيام|أسبوع|أسابيع)";
+    private static readonly RegexOptions ContextOptions=RegexOptions.IgnoreCase|RegexOptions.CultureInvariant;
+    private static string NormalizeContextText(string text) {
+      if(String.IsNullOrWhiteSpace(text))return "";
+      return text.Normalize(NormalizationForm.FormKC)
+        .Replace('\u200e',' ').Replace('\u200f',' ').Replace('\u202a',' ').Replace('\u202b',' ')
+        .Replace('\u202c',' ').Replace('\u202d',' ').Replace('\u202e',' ')
+        .Replace('٠','0').Replace('١','1').Replace('٢','2').Replace('٣','3').Replace('٤','4')
+        .Replace('٥','5').Replace('٦','6').Replace('٧','7').Replace('٨','8').Replace('٩','9');
+    }
+    private static string AgeUnitName(string unit) {
+      string u=unit.ToLowerInvariant();
+      if(u=="m"||u.StartsWith("mo")||u=="شهر"||u=="شهور"||u=="أشهر")return "months";
+      if(u.StartsWith("d")||u=="يوم"||u=="أيام")return "days";
+      if(u.StartsWith("w")||u=="أسبوع"||u=="أسابيع")return "weeks";
+      return "years";
+    }
+    internal static string CanonicalAge(string value) {
+      value=NormalizeContextText(value).Trim(' ','\r','\n','\t','\x07',':','-');
+      var tokens=Regex.Matches(value,@"(\d{1,5})[ \t-]*("+AgeUnit+@")(?![\w])",ContextOptions);
+      if(tokens.Count==0) {
+        int bare;
+        return Regex.IsMatch(value,@"^\d{1,3}$")&&Int32.TryParse(value,out bare)&&bare<=125
+          ?bare.ToString()+" years":"";
+      }
+      // Reject arbitrary suffixes, multiple repetitions or incompatible units.
+      string residue=Regex.Replace(value,@"\d{1,5}[ \t-]*"+AgeUnit+@"(?![\w])","",ContextOptions);
+      if(!Regex.IsMatch(residue,@"^[\s,\-]*$"))return "";
+      var parts=new Dictionary<string,int>();
+      foreach(Match token in tokens) {
+        int number;
+        string unit=AgeUnitName(token.Groups[2].Value);
+        if(!Int32.TryParse(token.Groups[1].Value,out number)||parts.ContainsKey(unit))return "";
+        int max=unit=="years"?125:unit=="months"?1500:unit=="weeks"?6500:46000;
+        if(number<0||number>max)return "";
+        parts.Add(unit,number);
+      }
+      if(parts.Count==1)foreach(var entry in parts)return entry.Value.ToString()+" "+entry.Key;
+      // Retain exact compound ages (e.g. 61Y 2M, 2M 5D, 0Y 0M 12D).
+      if(parts.ContainsKey("weeks")&&parts.Count>1)return "";
+      if(parts.ContainsKey("months")&&parts.ContainsKey("years")&&parts["months"]>=12)return "";
+      if(parts.ContainsKey("days")&&parts.Count>1&&parts["days"]>=32)return "";
+      var result=new List<string>();
+      foreach(string unit in new[]{"years","months","days"})if(parts.ContainsKey(unit))
+        result.Add(parts[unit].ToString()+" "+unit);
+      return String.Join(" ",result);
+    }
+    private static string CanonicalSex(string value) {
+      value=NormalizeContextText(value).Trim(' ','\r','\n','\t','\x07',':','-').ToLowerInvariant();
+      return value=="male"||value=="m"||value=="ذكر"?"male":
+        value=="female"||value=="f"||value=="أنثى"||value=="انثى"?"female":"";
+    }
+    internal static string ParsePatientContext(IEnumerable<string> sources) {
+      var sexes=new HashSet<string>(StringComparer.Ordinal);
+      var ages=new HashSet<string>(StringComparer.Ordinal);
+      // Match the full compound value before considering a plain numeric age.
+      string ageValue=@"(?:\d{1,5}[ \t-]*"+AgeUnit+@"(?![\w])(?:[ \t,]+\d{1,5}[ \t-]*"+AgeUnit+@"(?![\w])){0,2}|\d{1,3}(?![\w./]))";
+      foreach(string source in sources) {
+        string text=NormalizeContextText(source);
+        foreach(Match m in Regex.Matches(text,SexLabel+ContextSeparator+@"(female|male|[fm]|ذكر|أنثى|انثى)(?![\w])",ContextOptions)) {
+          string value=CanonicalSex(m.Groups[1].Value);if(value!="")sexes.Add(value);
+        }
+        foreach(Match m in Regex.Matches(text,AgeLabel+ContextSeparator+"("+ageValue+")",ContextOptions)) {
+          string value=CanonicalAge(m.Groups[1].Value);if(value!="")ages.Add(value);
+        }
+        foreach(Match m in Regex.Matches(text,@"\b("+ageValue+@")[ \t-]*(?:old\b|(?=[ \t]*(?:male|female)\b)|[ \t]*/[ \t]*(?=[MF]\b))",ContextOptions)) {
+          string value=CanonicalAge(m.Groups[1].Value);if(value!="")ages.Add(value);
+        }
+        foreach(Match m in Regex.Matches(text,@"\b"+ageValue+@"[ \t-]*(?:old[ \t,/-]*)?/?[ \t]*(male|female|[fm])\b",ContextOptions)) {
+          string value=CanonicalSex(m.Groups[1].Value);if(value!="")sexes.Add(value);
+        }
+      }
+      string age="",sex="";
+      if(ages.Count==1)foreach(string a in ages)age=a;
+      if(sexes.Count==1)foreach(string a in sexes)sex=a;
+      return (sex!=""?"sex="+sex+";":"")+(age!=""?"age="+age+";":"");
+    }
+    private static void AddContextSource(List<string> result,string value) {
+      if(!String.IsNullOrWhiteSpace(value)&&value.Length<=12000&&result.Count<100)result.Add(value);
+    }
+    private static void AddShapeContext(List<string> result,object shape,int depth) {
+      if(depth>3||result.Count>=100)return;
+      try {dynamic s=shape;if(Convert.ToInt32(s.Type)==6) {
+        dynamic g=s.GroupItems;int count=Math.Min(40,(int)g.Count);
+        for(int i=1;i<=count;i++)try {AddShapeContext(result,(object)g.Item(i),depth+1);}catch{}
+      }}catch{}
+      try {dynamic s=shape;if(Convert.ToInt32(s.TextFrame.HasText)!=0)
+        AddContextSource(result,Convert.ToString(s.TextFrame.TextRange.Text));}catch{}
+    }
+    internal static string FixedHeaderRow(IList<string> cells) {
+      // DSCAN table: accession pair, age pair, gender pair. Use ordinal cells
+      // (not grid columns), because the age cell spans two grid columns.
+      if(cells==null||cells.Count!=6)return "";
+      string a=NormalizeContextText(cells[2]).Trim(' ','\t','\r','\n','\x07',':','：').ToLowerInvariant();
+      string g=NormalizeContextText(cells[4]).Trim(' ','\t','\r','\n','\x07',':','：').ToLowerInvariant();
+      string key=NormalizeContextText(cells[0]).Trim(' ','\t','\r','\n','\x07',':','：').ToLowerInvariant();
+      bool ageLabel=a=="age"||a=="ega"||a=="العمر"||a=="السن";
+      bool sexLabel=g=="gender"||g=="redneg"||g=="sex"||g=="xes"||g=="الجنس"||g=="النوع";
+      bool accession=key=="accession"||key=="noissecca"||key=="accession no"||key=="accession number";
+      // Never interpret arbitrary cells of an unrelated table as demographics.
+      if(!(ageLabel&&sexLabel)&&!(accession&&(ageLabel||sexLabel)))return "";
+      string age=CanonicalAge(cells[3]),sex=CanonicalSex(cells[5]);
+      return (age!=""?"Age: "+age+"\r":"")+(sex!=""?"Gender: "+sex+"\r":"");
+    }
+    private static void AddFixedHeaderTables(List<string> sources,object headerRange) {
+      try {
+        dynamic range=headerRange,tables=range.Tables;
+        for(int t=1;t<=Math.Min(20,Convert.ToInt32(tables.Count));t++)try {
+          dynamic table=tables.Item(t);
+          var cells=new List<string>();
+          try {
+            dynamic row=table.Rows.Item(3).Cells;
+            for(int c=1;c<=Math.Min(20,Convert.ToInt32(row.Count));c++)
+              cells.Add(Convert.ToString(row.Item(c).Range.Text));
+          }catch {
+            // Rows.Item can fail on merged tables. Enumerate Range.Cells in
+            // physical order; the cell RowIndex, not ColumnIndex, is decisive.
+            cells.Clear();
+            dynamic all=table.Range.Cells;
+            for(int c=1;c<=Math.Min(150,Convert.ToInt32(all.Count));c++)try {
+              dynamic cell=all.Item(c);
+              if(Convert.ToInt32(cell.RowIndex)==3)cells.Add(Convert.ToString(cell.Range.Text));
+            }catch{}
+          }
+          AddContextSource(sources,FixedHeaderRow(cells));
+        }catch{}
+      }catch{}
+    }
+    internal static string ReadPatientContext(object document,string report) {
+      bool ignored;return ReadPatientContext(document,report,out ignored);
+    }
+    internal static string ReadPatientContext(object document,string report,out bool headerDetected) {
+      var headers=new List<string>();
+      headerDetected=false;
+      try {
+        dynamic d=document,sections=d.Sections;
+        // Word first/even/primary headers may differ. Scan every available
+        // section within a bounded limit, keeping conflicting fields unknown.
+        for(int section=1;section<=Math.Min(32,Convert.ToInt32(sections.Count));section++)try {
+          dynamic collection=sections.Item(section).Headers;
+          for(int type=1;type<=3;type++)try {
+            dynamic h=collection.Item(type);
+            if(!Convert.ToBoolean(h.Exists))continue;
+            dynamic hr=h.Range;
+            AddFixedHeaderTables(headers,(object)hr);
+            AddContextSource(headers,Convert.ToString(hr.Text));
+            try {
+              dynamic shapes=h.Shapes;int count=Math.Min(40,Convert.ToInt32(shapes.Count));
+              for(int j=1;j<=count;j++)try {AddShapeContext(headers,(object)shapes.Item(j),0);}catch{}
+            }catch{}
+          }catch{}
+        }catch{}
+      }catch{}
+      try {
+        foreach(string source in headers)if(ParsePatientContext(new[]{source})!=""){headerDetected=true;break;}
+        // A real header is authoritative. Do not let an opposing statement
+        // in the body cancel its metadata; the worker compares both sources.
+        if(headerDetected)return ParsePatientContext(headers);
+      }catch{}
+      var sources=new List<string>();
+      string top=(report??"").Substring(0,Math.Min(1800,(report??"").Length));
+      var clinical=Regex.Match(top,@"(?:^|[\r\n\x07])[ \t]*(?:findings|impression|conclusion|clinical history|clinical data|history|technique|comparison)\s*[:：\-]",RegexOptions.IgnoreCase);
+      if(clinical.Success)top=top.Substring(0,clinical.Index);
+      AddContextSource(sources,top);
+      try {
+        dynamic d=document,shapes=d.Shapes;
+        int count=Math.Min(60,(int)shapes.Count),start=(int)d.Content.Start;
+        for(int j=1;j<=count;j++)try {
+          dynamic shape=shapes.Item(j);
+          int at=(int)shape.Anchor.Start-start;
+          if(at>=0&&at<=top.Length)AddShapeContext(sources,(object)shape,0);
+        }catch{}
+      }catch{}
+      try{return ParsePatientContext(sources);}catch{return "";}
+    }
+    private void RefreshPatientContext() {
+      if(currentText==null||word==null)return;
+      try {
+        dynamic app=word;
+        dynamic doc=boundWordWindow!=null?((dynamic)boundWordWindow).Document:app.ActiveDocument;
+        string next=ReadPatientContext((object)doc,currentText,out patientHeaderDetected);
+        if(!String.Equals(next,patientContext,StringComparison.Ordinal)) {
+          patientContext=next;patientContextReviewed=false;
+          if(runningCancellation!=null)runningCancellation.Cancel();
+          snapshotToken=WebReviewForm.CachePath(currentText,false,patientContext);
+          readyResponse=ValidateResponse(WebReviewForm.ReadCached(snapshotToken),currentText);
+          failed=false;
+        }
+      }catch{}
+    }
     private void PollWord() {
       dynamic app=word;
       dynamic doc;
@@ -292,13 +506,15 @@ namespace RadiologyAgent {
       bool changedDoc=!String.Equals(documentId,id,StringComparison.Ordinal);
       bool changedText=!String.Equals(currentText,report,StringComparison.Ordinal);
       if(changedDoc||changedText) {
-        // A previously approved revision must not survive any observed edit.
+        // Cancel an obsolete in-flight review; a completed open-document approval is retained.
         if(!changedDoc&&changedText)MandatoryApproval.Invalidate(documentId);
         // Preserve the click while the document becomes available.
         if(runningCancellation!=null)runningCancellation.Cancel();
         documentId=id;
         currentText=report;
-        snapshotToken=WebReviewForm.CachePath(report,false);
+        patientContext=ReadPatientContext((object)doc,report,out patientHeaderDetected);
+        patientContextReviewed=false;
+        snapshotToken=WebReviewForm.CachePath(report,false,patientContext);
         lastChangeUtc=DateTime.UtcNow;
         failed=false;
         readyResponse=ValidateResponse(WebReviewForm.ReadCached(snapshotToken),report);
@@ -313,7 +529,8 @@ namespace RadiologyAgent {
       if(suggestionPopup!=null&&!suggestionPopup.IsDisposed)suggestionPopup.Close();
       suggestionPopup=null;lastSuggestionAnchor=null;
       if(runningCancellation!=null)runningCancellation.Cancel();
-      documentId=null;currentText=null;snapshotToken=null;
+      documentId=null;currentText=null;snapshotToken=null;patientContext="";
+      patientHeaderDetected=false;patientContextReviewed=false;
       readyResponse=null;failed=false;
       WebReviewForm.SetReviewStatus(0);
     }
@@ -443,6 +660,7 @@ namespace RadiologyAgent {
     }
     private void UpdateSidebar(object document,bool force) {
       if(sidebar==null||sidebar.IsDisposed)return;
+      sidebar.UpdatePatientContext(patientContext,patientHeaderDetected,patientContextReviewed);
       try {
         dynamic doc=document;
         dynamic comments=doc.Comments;
@@ -1011,11 +1229,16 @@ namespace RadiologyAgent {
       uint command=ReadDword("LiveReviewCommand");
       if(command==lastHandledCommand)return;
       lastHandledCommand=command;
+      WriteDword("ReviewOwnerPid",unchecked((uint)Process.GetCurrentProcess().Id));
       WriteDword("LiveReviewHandled",command);
       // Rebind to the exact Word window that raised the Ribbon click.
       bool bound=ConnectWord();
       if(bound)PollWord();
-      if(!WebReviewForm.Approved()) {LogFailure("KEY_OR_CONSENT_MISSING");Notify(false);return;}
+      string installProblem=WebReviewForm.InstallationProblem();
+      if(installProblem!=null) {
+        LogFailure(installProblem);NotifyHostFailure(installProblem);return;
+      }
+      if(!WebReviewForm.Approved()) {LogFailure("KEY_OR_CONSENT_MISSING");NotifyHostFailure("KEY_OR_CONSENT_MISSING");return;}
       // Fail closed if the captured Word window cannot be verified. In
       // particular, don't analyze a snapshot from a previously clicked window.
       if(!bound||boundWordHwnd==0||boundWordHwnd!=ReadDword("WordWindowHwnd"))
@@ -1028,6 +1251,8 @@ namespace RadiologyAgent {
         return;
       }
       if(working){StartReviewOverlay();return;}
+      RefreshPatientContext();
+      patientContextReviewed=false;
       if(readyResponse!=null){ApplyReady();return;}
       if(failed) {
         // A new click after an exhausted attempt starts a fresh analysis
@@ -1050,6 +1275,7 @@ namespace RadiologyAgent {
       if(!awaitingDocument)return;
       if(currentText!=null) {
         awaitingDocument=false;
+        RefreshPatientContext();
         if(readyResponse!=null)ApplyReady();
         else {pendingClick=true;StartReviewOverlay();if(!working)StartAnalysis();}
         return;
@@ -1107,9 +1333,13 @@ namespace RadiologyAgent {
     }
 
     private async void StartAnalysis() {
-      if(working||currentText==null||!WebReviewForm.Approved())return;
+      if(working)return;
+      if(currentText==null||!WebReviewForm.Approved()){
+        pendingClick=false;awaitingDocument=false;CloseReviewOverlay();Notify(false);
+        CompleteReviewIfIdle();return;
+      }
       working=true;
-      string report=currentText,id=documentId,cacheFile=snapshotToken;
+      string report=currentText,id=documentId,cacheFile=snapshotToken,context=patientContext;
       var token=new CancellationTokenSource();
       runningCancellation=token;
       try {
@@ -1119,7 +1349,7 @@ namespace RadiologyAgent {
           prompts.Add(WebReviewForm.BuildPrompt(chunks[i],i,chunks.Count));
         var serializer=new JavaScriptSerializer{MaxJsonLength=2000000};
         string payload=serializer.Serialize(new Dictionary<string,object> {
-          {"prompts",prompts},{"texts",chunks},
+          {"prompts",prompts},{"texts",chunks},{"patient_context",context},
           {"review_version",WebReviewForm.ReviewAlgorithmVersion},
           {"api_key",WebReviewForm.ReadGroqKey()}
         });
@@ -1145,22 +1375,42 @@ namespace RadiologyAgent {
         // Any result for an obsolete revision is discarded.
       } catch(Exception ex) {
         if(!token.IsCancellationRequested&&id==documentId&&report==currentText) {
-          if(ex.Message!="Invalid review response")LogFailure("HOST_"+ex.GetType().Name);
+          string code=ex.Message=="Invalid review response"?"INVALID_WORKER_RESPONSE":WebReviewForm.HostFailureCode(ex);
+          if(ex.Message!="Invalid review response")LogFailure(code);
           failed=true;
           WebReviewForm.SetReviewStatus(2);
-          if(pendingClick){pendingClick=false;CloseReviewOverlay();Notify(false);}
+          if(pendingClick){pendingClick=false;CloseReviewOverlay();NotifyHostFailure(code);}
         }
       } finally {
         if(ReferenceEquals(runningCancellation,token))runningCancellation=null;
         token.Dispose();
         working=false;
+        pendingClick=false;awaitingDocument=false;
         CloseReviewOverlay();
+        CompleteReviewIfIdle();
       }
     }
 
     internal static bool SelfTest() {
       try {
         string report="FINDINGS: Right kidney normal.\rIMPRESSION: Left kidney normal.\r";
+        string footer=report+"Thank You for Your reference\rPET/CT Unit\r\u0007Dr. Example, MD\rRevised by Dr /A.t\r\x07Radiology consultant\rProf. Dr. Example, MD\r";
+        if(ProtectedClinicalEnd(footer)!=report.Length)return false;
+        if(ParsePatientContext(new[]{"Patient Name: Example\rAge:\r\u000745 Years\rGender:\r\u0007Male"})!="sex=male;age=45 years;")return false;
+        if(ParsePatientContext(new[]{"Age: 6 months\rSex: F"})!="sex=female;age=6 months;")return false;
+        if(ParsePatientContext(new[]{"Patient ID: 123456\rPatient name: Example"})!="")return false;
+        if(ParsePatientContext(new[]{"Age: 45 years\rGender: Male","Age: 46 years\rGender: Female"})!="")return false;
+        if(ParsePatientContext(new[]{"Patient age: 2 years"})!="age=2 years;")return false;
+        // An anonymized structural fixture from the supplied DSCAN layout.
+        string fixture=FixedHeaderRow(new[]{"Accession:","SYNTHETIC",":egA","61Y 2M",":redneG","Male"});
+        if(ParsePatientContext(new[]{fixture})!="sex=male;age=61 years 2 months;")return false;
+        if(ParsePatientContext(new[]{":egA\r\u000761Y 2M\r\u0007:redneG\r\u0007Male"})!="sex=male;age=61 years 2 months;")return false;
+        if(ParsePatientContext(new[]{"Gender: Female\rAge: 2M 5D"})!="sex=female;age=2 months 5 days;")return false;
+        if(ParsePatientContext(new[]{"Gender: F\rAge: 12D"})!="sex=female;age=12 days;")return false;
+        if(FixedHeaderRow(new[]{"X","Y","Z","61Y 2M","Q","Male"})!="")return false;
+        if(CanonicalAge("12345678")!=""||CanonicalAge("65Y 14M")!="")return false;
+        string clinicalAfter=report+"Thanks;\rConclusion: Left renal mass.";
+        if(ProtectedClinicalEnd(clinicalAfter)!=clinicalAfter.Length)return false;
         var parser=new JavaScriptSerializer{MaxJsonLength=2000000};
         var issue=new Dictionary<string,object> {
           {"quote","Left kidney"},{"category","logic"},
@@ -1231,9 +1481,33 @@ namespace RadiologyAgent {
     // V11: detect high-confidence repeated-motif nonsense anywhere in the
     // Word document, including table cells, not only in Conclusion.
     // Employment/biography statements are intentionally Conclusion-only.
+    // Mirror the worker's narrowly scoped terminal block guard. Word ranges
+    // remain anchored to the unmodified report. Never annotate a signature.
+    internal static int ProtectedClinicalEnd(string report) {
+      if(String.IsNullOrEmpty(report))return 0;
+      var lines=Regex.Matches(report,@"[^\r\n\x07]+");
+      int boundary=report.Length,names=0;bool closing=false,role=false,credential=false;
+      for(int i=lines.Count-1;i>=0;i--) {
+        string line=lines[i].Value.Trim().Trim('*','_').Trim();
+        if(line.Length==0){boundary=lines[i].Index;continue;}
+        var opts=RegexOptions.IgnoreCase|RegexOptions.CultureInvariant;
+        if(Regex.IsMatch(line,@"^(?:thanks(?:\s+(?:and\s+)?regards)?|thank\s+you(?:\s+for\s+(?:your\s+)?(?:kind\s+)?(?:reference|referral))?|(?:kind|best)\s+regards)\s*[;:,.!]*$",opts))closing=true;
+        else if(Regex.IsMatch(line,@"\b(?:findings|impression|conclusion|diagnosis|recommendation|clinical\s+history|technique|comparison)\s*:|\b(?:lesion|mass|fracture|effusion|metastases|tumou?r|nodule|stenosis|thrombosis|measuring|measures|shows?|demonstrates?|reveals?|identified|detected|present|absent|normal|abnormal|increased|decreased|no\s+evidence)\b|\d\s*(?:mm|cm|ml)\b",opts))break;
+        else if(Regex.IsMatch(line,@"^(?:(?:radiology|radiologist|diagnostic\s+radiology|consultant\s+radiologist|radiology\s+consultant|consultant\s+of\s+radiology|radiology\s+specialist|specialist\s+radiologist|consultant|specialist|(?:pet\s*/?\s*ct|mri|ct|us|ultrasound|nuclear\s+medicine|radiology)\s+(?:unit|department|team))|(?:revised|reviewed|reported|signed|approved|verified|typed|dictated)\s+by\s*[:.]?\s*[\w .,/&()-]{0,80})[;:,.]*$",opts))role=true;
+        else if(Regex.IsMatch(line,@"^(?:(?:prof|professor|dr|doctor|assoc|asst)\.?\s+)+[\w .,/&()'-]{1,100}$",opts)) {
+          names++;
+          if(Regex.IsMatch(line,@"\b(?:MD|MSc|FRCR|FEBR|ABR|PhD|MBBS)\b",opts))credential=true;
+        }
+        else if(Regex.IsMatch(line,@"^(?:\s*(?:MD|MSc|M\.Sc|MBBS|MBChB|FRCR|FEBR|EBR|ABR|PhD|Ph\.D|DNB|FRC[RSP]|MRCP|MBBCh)\.?\s*[,;/-]?\s*)+$",opts))credential=true;
+        else break;
+        boundary=lines[i].Index;
+      }
+      return closing||(names>0&&(role||credential||names>=2))?boundary:report.Length;
+    }
     internal static List<string> ObviousOffTopicInConclusion(string report) {
       var found=new List<string>();
       if(String.IsNullOrEmpty(report))return found;
+      report=report.Substring(0,ProtectedClinicalEnd(report));
       var header=Regex.Match(report,
         @"(?:^|[\r\n\x07])[ \t]*(?:Conclusion|Impression)[ \t]*:",
         RegexOptions.IgnoreCase);
@@ -1286,8 +1560,10 @@ namespace RadiologyAgent {
         if(ending.Success)conclusionEnd=headingStart+ending.Index;
       }
       int applied=0,failed=0;
+      int clinicalEnd=ProtectedClinicalEnd(snapshot);
       for(int at=snapshot.IndexOf(quote,StringComparison.Ordinal);
           at>=0;at=snapshot.IndexOf(quote,at+quote.Length,StringComparison.Ordinal)) {
+        if(at+quote.Length>clinicalEnd)continue;
         if(!gibberish&&(at<headingStart||at>=conclusionEnd))continue;
         // Word's content snapshot is the only allowed anchor for a local
         // candidate. Do not trust Word Find's duplicate/wrap behavior.
@@ -1358,7 +1634,7 @@ namespace RadiologyAgent {
     }
 
     private void ApplyReady() {
-      if(readyResponse==null||currentText==null){Notify(false);return;}
+      if(readyResponse==null||currentText==null){pendingClick=false;Notify(false);return;}
       try {
         dynamic app=word,doc=boundWordWindow!=null?((dynamic)boundWordWindow).Document:app.ActiveDocument;
         string latest=Convert.ToString(doc.Content.Text);
@@ -1366,13 +1642,16 @@ namespace RadiologyAgent {
         int hwnd;
         try {hwnd=boundWordWindow!=null?(int)((dynamic)boundWordWindow).Hwnd:(int)app.ActiveWindow.Hwnd;}
         catch{hwnd=(int)app.Hwnd;}
-        if(latest!=currentText||hwnd.ToString()+"|"+name!=documentId) {
-          pendingClick=true;return;
+        if(latest!=currentText||hwnd.ToString()+"|"+name!=documentId||
+           ReadPatientContext((object)doc,latest)!=patientContext) {
+          throw new InvalidOperationException("Document changed during review; click Review Text again.");
         }
         string source=readyResponse;
         var parser=new JavaScriptSerializer{MaxJsonLength=2000000};
         var root=parser.DeserializeObject(source) as Dictionary<string,object>;
         var groups=root["groups"] as object[];
+        int clinicalBoundary=ProtectedClinicalEnd(currentText);
+        string clinicalText=currentText.Substring(0,clinicalBoundary);
         var unique=new Dictionary<string,Tuple<string,string,string,string,string>>(StringComparer.Ordinal);
         foreach(var group in groups) {
           var issues=group as object[];
@@ -1380,7 +1659,7 @@ namespace RadiologyAgent {
             var row=issue as Dictionary<string,object>;
             Func<string,string> get=k=>row.ContainsKey(k)&&row[k]!=null?Convert.ToString(row[k]):"";
             string quote=get("quote"),category=get("category");
-            if(quote.Length<2||!currentText.Contains(quote))continue;
+            if(quote.Length<2||!clinicalText.Contains(quote))continue;
             string section=get("section");
             // Preserve independent Logic and Language findings even when they
             // quote exactly the same phrase in the same section.
@@ -1439,7 +1718,7 @@ namespace RadiologyAgent {
             existing.Add(((int)anchor.Start).ToString()+":"+((int)anchor.End).ToString());
           }
         } catch {}
-        int start=(int)doc.Content.Start,end=(int)doc.Content.End;
+        int start=(int)doc.Content.Start,end=Math.Min((int)doc.Content.End,start+clinicalBoundary);
         // Batch Word layout repaints while inserting all comments/highlights.
         // Always restore even after an individual COM failure.
         uint purpleApplied=0,purpleSkipped=0;
@@ -1480,9 +1759,9 @@ namespace RadiologyAgent {
             find.Forward=true;find.Wrap=0;find.MatchCase=true;find.MatchWildcards=false;
             // Word Find may re-scan the same table cell and report a false
             // duplicate; unique exact positions in the Word snapshot win.
-            int snapshotAt=currentText.IndexOf(issue.Item1,StringComparison.Ordinal);
+            int snapshotAt=clinicalText.IndexOf(issue.Item1,StringComparison.Ordinal);
             bool snapshotUnique=snapshotAt>=0&&
-              currentText.IndexOf(issue.Item1,snapshotAt+issue.Item1.Length,
+              clinicalText.IndexOf(issue.Item1,snapshotAt+issue.Item1.Length,
                                   StringComparison.Ordinal)<0;
             if(!(bool)find.Execute()) {
               if(!snapshotUnique) {
@@ -1522,6 +1801,7 @@ namespace RadiologyAgent {
                 LogFailure("WORD_FIND_DUPLICATE_QUOTE");continue;
               }
             }
+            if((int)region.Start<start||(int)region.End>end||!String.Equals(Convert.ToString(region.Text),issue.Item1,StringComparison.Ordinal)){wordFailed++;continue;}
             string anchorId=((int)region.Start).ToString()+":"+((int)region.End).ToString();
             if(existing.Contains(anchorId)) {
               wordApplied++;
@@ -1571,10 +1851,21 @@ namespace RadiologyAgent {
           NotifyAnnotationResult(candidateCount,0,wordFailed+(int)purpleSkipped);
           pendingClick=false;return;
         }
-        if(!MandatoryApproval.Approve(doc,currentText,unchecked((uint)hwnd))) {
+        // Even if all suggestions are ignored/applied individually, a marked
+        // review requires explicit Clear Both acknowledgement. Include any
+        // pre-existing comments/highlights; unreadable formatting is treated
+        // conservatively as needing cleanup.
+        bool requiresCleanup=candidateCount>0||wordApplied>0||purpleApplied>0;
+        try {
+          int color=Convert.ToInt32(doc.Content.HighlightColorIndex);
+          requiresCleanup=requiresCleanup||Convert.ToInt32(doc.Comments.Count)>0||
+            color==6||color==7||color==12||color==9999999;
+        }catch {requiresCleanup=true;}
+        if(!MandatoryApproval.Approve((object)doc,currentText,unchecked((uint)hwnd),lastHandledCommand,requiresCleanup)) {
           LogFailure("MANDATORY_APPROVAL_NOT_STORED");
           pendingClick=false;CloseReviewOverlay();Notify(false);return;
         }
+        patientContextReviewed=true;
         pendingClick=false;
         CloseReviewOverlay();
         ShowSidebar();
