@@ -709,7 +709,7 @@ _NEGATED_ANATOMY=re.compile(
     r"(?i)\b(?:no|absent|without|prior\s+removal\s+of|"
     r"history\s+of|status\s+post|post[\s-]operative)\b"
 )
-def patient_anatomy_consistency_groups(chunks):
+def patient_anatomy_consistency_groups(chunks, patient_context=""):
     """Conservative *verification* flag, never an automatic sex determination.
     Avoid using names or assuming gender defines anatomy. Scan only Findings,
     not family history, patient metadata or differential context.
@@ -723,9 +723,10 @@ def patient_anatomy_consistency_groups(chunks):
     for m in _RECORDED_SEX.finditer(header):
         found=(m.group(1) or m.group(2)).lower()
         sexes.add("male" if found in ("male","m") else "female")
-    if len(sexes)!=1:
+    recorded=re.search(r"(?:^|;)sex=(male|female);",patient_context or "")
+    if not recorded and len(sexes)!=1:
         return [[] for _ in chunks]
-    sex=next(iter(sexes))
+    sex=recorded.group(1) if recorded else next(iter(sexes))
     conclusion=conclusion_section(full)
     body_end=full.find(conclusion) if conclusion else len(full)
     findings=full[start_match.end():body_end]
@@ -758,7 +759,7 @@ def patient_anatomy_consistency_groups(chunks):
                   "quote":term,
                   "category":"logic",
                   "explanation":(
-                    "The report explicitly records sex as "+sex+
+                    ("The recorded header/patient context specifies sex as " if recorded else "The report explicitly records sex as ")+sex+
                     " while Findings describe "+term+
                     ". This is a possible metadata–anatomy mismatch, "
                     "not a definitive medical impossibility. Verify "
@@ -1199,13 +1200,79 @@ PATIENT_CONTEXT_SYSTEM = (
 def valid_patient_context(value):
     if not isinstance(value, str):
         return ""
-    # Accept only canonical demographics, never arbitrary header text.
-    if not re.fullmatch(r"(?:sex=(?:male|female);)?(?:age=\d{1,3} (?:years|months|weeks|days);)?",value):
+    # Only canonical demographic fields are accepted; no raw metadata.
+    match=re.fullmatch(r"(?:sex=(male|female);)?(?:age=(\d{1,5} (?:years|months|weeks|days)(?: \d{1,5} (?:months|days)){0,2});)?",value)
+    if not match:
         return ""
-    m=re.search(r"age=(\d+) (years|months|weeks|days);",value)
-    if m and int(m.group(1)) > {"years":125,"months":1500,"weeks":6500,"days":46000}[m.group(2)]:
-        return ""
+    if match.group(2):
+        parts=re.findall(r"(\d+) (years|months|weeks|days)",match.group(2))
+        units=[unit for _,unit in parts]
+        order={"years":0,"months":1,"weeks":2,"days":3}
+        if len(set(units))!=len(units) or units!=sorted(units,key=order.get) or ("weeks" in units and len(units)>1):
+            return ""
+        values=dict((unit,int(number)) for number,unit in parts)
+        if any(n>{"years":125,"months":1500,"weeks":6500,"days":46000}[u] for u,n in values.items()):
+            return ""
+        if "years" in values and values.get("months",0)>=12:
+            return ""
+        if len(values)>1 and values.get("days",0)>=32:
+            return ""
     return value
+
+def _age_at_precision(parts, unit):
+    # Compare at the stated precision, not an invented exact birthday.
+    if unit=="years":
+        if "years" in parts:return parts["years"]
+        if "months" in parts:return parts["months"]//12
+    if unit=="months":
+        if "months" in parts:return 12*parts.get("years",0)+parts["months"]
+    if unit=="days" and set(parts)=={"days"}:return parts["days"]
+    if unit=="weeks" and set(parts)=={"weeks"}:return parts["weeks"]
+    return None
+
+def explicit_demographic_conflict_groups(chunks, context):
+    """Local check of explicit current-patient wording against recorded header.
+    Flag for human verification only, never change demographics or anatomy."""
+    groups=[[] for _ in chunks]
+    context=valid_patient_context(context)
+    if not context:return groups
+    sex_match=re.search(r"(?:^|;)sex=(male|female);",context)
+    age_match=re.search(r"(?:^|;)age=([^;]+);",context)
+    sex=sex_match.group(1) if sex_match else None
+    ages=dict((u,int(n)) for n,u in re.findall(r"(\d+) (years|months|weeks|days)",age_match.group(1))) if age_match else {}
+    patterns=[
+      ("sex",re.compile(r"\b(?:sex|gender)\s*[:=]\s*(male|female|m|f)\b|\b(male|female)\s+patient\b|\bpatient\s+(?:is|was)\s+(?:a\s+)?(male|female)\b",re.I)),
+      ("age",re.compile(r"\b(?:patient\s+)?age\s*[:=]\s*(\d{1,3})\s*(years?|yrs?|months?|mos?|weeks?|days?)?\b|\b(\d{1,3})\s*[- ]?\s*(years?|yrs?|months?|mos?|weeks?|days?)\s*[- ]?\s*old\b",re.I))]
+    for idx,chunk in enumerate(chunks):
+        used=set()
+        for kind,pattern in patterns:
+            for m in pattern.finditer(chunk):
+                # Stay conservative about a relative, fetus, prior age or historical context.
+                line_start=max(chunk.rfind("\r",0,m.start()),chunk.rfind("\n",0,m.start()))+1
+                before=chunk[line_start:m.start()]
+                after=chunk[m.end():m.end()+90].split("\r")[0].split("\n")[0]
+                if re.search(r"\b(?:mother|father|sister|brother|son|daughter|donor|fetus|family\s+history|relative|previously|at\s+age|prior|years?\s+ago|history\s+of)\b",before+" "+after,re.I):
+                    continue
+                if kind=="sex":
+                    if not sex:continue
+                    val=next((g.lower() for g in m.groups() if g),"")
+                    actual="male" if val in ("m","male") else "female"
+                    conflict=actual!=sex
+                    explanation="Recorded patient sex is "+sex+" but the report explicitly describes "+actual+". Verify patient demographics."
+                else:
+                    if not ages:continue
+                    n=int(m.group(1) or m.group(3))
+                    raw=(m.group(2) or m.group(4) or "years").lower()
+                    unit="months" if raw.startswith("mo") else "weeks" if raw.startswith("w") else "days" if raw.startswith("d") else "years"
+                    expected=_age_at_precision(ages,unit)
+                    conflict=expected is not None and expected!=n
+                    explanation="The explicit patient age in this statement differs from the recorded age at the same precision. Verify the patient details and report."
+                quote=m.group(0)
+                if conflict and quote not in used:
+                    used.add(quote)
+                    groups[idx].append({"quote":quote,"category":"logic","explanation":explanation,
+                      "suggestion":"Verify patient information with the reporting clinician; no automatic clinical replacement.","section":"body"})
+    return groups
 
 # Explicit patient-related statements trigger the fast demographic pass even
 # when Word's header has no age or sex. Anatomical cues trigger review only;
@@ -1558,7 +1625,7 @@ def main(raw_request=None):
             raise ValueError("Invalid report parts")
         if any(not isinstance(x, str) or not x or len(x) > 6000 for x in texts):
             raise ValueError("Invalid report text")
-        if version != "haronex-v11-12-multimodel-r8":
+        if version != "haronex-v11-12-multimodel-r9":
             raise ValueError("Unsupported review version")
         original_chunk_count = len(texts)
         texts = clinical_chunks(texts)
@@ -1595,10 +1662,13 @@ def main(raw_request=None):
                              if (x["quote"], x["category"]) not in existing)
         # Patient data vs anatomy: independent deterministic safety check,
         # only using an explicit recorded sex, never a patient name.
-        for i, added in enumerate(patient_anatomy_consistency_groups(texts)):
+        for i, added in enumerate(patient_anatomy_consistency_groups(texts,patient_context)):
             existing = {(x["quote"], x["category"]) for x in groups[i]}
             groups[i].extend(x for x in added
                              if (x["quote"], x["category"]) not in existing)
+        for i, added in enumerate(explicit_demographic_conflict_groups(texts,patient_context)):
+            existing = {(x["quote"], x["category"]) for x in groups[i]}
+            groups[i].extend(x for x in added if (x["quote"], x["category"]) not in existing)
         # Independent deterministic positive-vs-negative safety net.
         for i, added in enumerate(independent_direct_contradiction_groups(texts)):
             existing = {(x["quote"], x["category"]) for x in groups[i]}
@@ -1707,6 +1777,14 @@ def self_test():
     assert valid_patient_context("sex=female;")=="sex=female;"
     assert valid_patient_context("Patient Name: Example")==""
     assert valid_patient_context("age=999 years;")==""
+    assert valid_patient_context("sex=male;age=61 years 2 months;")=="sex=male;age=61 years 2 months;"
+    assert valid_patient_context("sex=female;age=2 months 5 days;")=="sex=female;age=2 months 5 days;"
+    assert valid_patient_context("age=61 years 14 months;")==""
+    assert explicit_demographic_conflict_groups(["History: 65-year-old male patient."],"sex=female;age=61 years 2 months;")[0]
+    assert explicit_demographic_conflict_groups(["History: 61-year-old male patient."],"sex=male;age=61 years 2 months;")==[[]]
+    assert explicit_demographic_conflict_groups(["History: mother is 65 years old."],"age=5 years;")==[[]]
+    assert explicit_demographic_conflict_groups(["Patient age: 4 years."],"age=61 years 2 months;")[0]
+    assert explicit_demographic_conflict_groups(["Patient age: 6 months."],"age=6 months;")==[[]]
     assert model_for_prompt(PATIENT_CONTEXT_SYSTEM)==LANGUAGE_MODEL
     assert model_for_prompt(INTELLIGENT_VALIDATION_SYSTEM)==LANGUAGE_MODEL
     validation_parts=["Findings: Left renal lesion measures 10 mm.\r",
@@ -1944,6 +2022,9 @@ def self_test():
     female_report="Sex: Female\rFindings:\rMarkedly enlarged prostate.\rConclusion:\rNeeds clinical review.\r"
     assert patient_anatomy_consistency_groups([male_report])[0][0]["category"]=="logic"
     assert patient_anatomy_consistency_groups([female_report])[0][0]["quote"]=="prostate"
+    assert patient_anatomy_consistency_groups(["Findings:\\rNormal prostate.\\rConclusion:\\rNormal."],"sex=female;")[0][0]["quote"]=="prostate"
+    assert patient_anatomy_consistency_groups(["Findings:\\rNormal uterus.\\rConclusion:\\rNormal."],"sex=male;")[0][0]["quote"]=="uterus"
+    assert patient_anatomy_consistency_groups(["Findings:\\rMale mammography.\\rConclusion:\\rNormal."],"sex=male;")==[[]]
     assert patient_anatomy_consistency_groups([
         "Patient Name: Maria\rFindings:\rProstate is enlarged.\rConclusion:\rFollow-up."])==[[]]
     assert patient_anatomy_consistency_groups([
@@ -2343,7 +2424,7 @@ def serve():
         # Local host/worker handshake; no key, report or network operation.
         if line.strip() == '{"operation":"health"}':
             print(json.dumps({"ok":True,"operation":"health",
-                "review_version":"haronex-v11-12-multimodel-r8"}),flush=True)
+                "review_version":"haronex-v11-12-multimodel-r9"}),flush=True)
             continue
         main(line)
         sys.stdout.flush()

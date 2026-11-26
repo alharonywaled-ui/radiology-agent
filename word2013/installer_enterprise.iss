@@ -1,5 +1,5 @@
 #define AppName "Haronex Enterprise for Word 2013"
-#define AppVersion "11.12.15"
+#define AppVersion "11.12.16"
 [Setup]
 AppId={{56B8B1AF-99B7-4580-821E-276FF00C79B6}
 AppName={#AppName}
@@ -7,7 +7,7 @@ AppVersion={#AppVersion}
 DefaultDirName={pf32}\Haronex
 DefaultGroupName=Haronex Enterprise
 OutputDir=output
-OutputBaseFilename=Haronex_Word2013_V11_12_15_Enterprise_Setup
+OutputBaseFilename=Haronex_Word2013_V11_12_16_Enterprise_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=admin

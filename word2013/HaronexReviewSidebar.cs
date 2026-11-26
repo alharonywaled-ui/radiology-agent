@@ -17,6 +17,7 @@ namespace RadiologyAgent {
     private readonly FlowLayoutPanel cards;
     private readonly Label summary;
     private readonly Label status;
+    private readonly Label demographics;
     private readonly Dictionary<string,string> issueFeedback=new Dictionary<string,string>(StringComparer.Ordinal);
     private readonly Dictionary<string,Button> filters=
       new Dictionary<string,Button>(StringComparer.Ordinal);
@@ -67,7 +68,7 @@ namespace RadiologyAgent {
       header.Controls.Add(brand);header.Controls.Add(close);
       Controls.Add(header);
 
-      var top=new Panel{Dock=DockStyle.Top,Height=87,BackColor=Color.White,
+      var top=new Panel{Dock=DockStyle.Top,Height=130,BackColor=Color.White,
           Padding=new Padding(8,8,8,4)};
       var tabs=new FlowLayoutPanel{Dock=DockStyle.Top,Height=38,
          FlowDirection=FlowDirection.LeftToRight,WrapContents=false,AutoScroll=false};
@@ -84,7 +85,10 @@ namespace RadiologyAgent {
       summary=new Label{Dock=DockStyle.Fill,Text="Review Text to load suggestions",
         ForeColor=Ink,Font=new Font("Segoe UI",9,FontStyle.Bold),
         Padding=new Padding(8,8,0,0)};
-      top.Controls.Add(summary);top.Controls.Add(tabs);
+      demographics=new Label{Dock=DockStyle.Top,Height=43,
+        Text="Patient context: not reviewed",ForeColor=Muted,Font=new Font("Segoe UI",8.5f),
+        Padding=new Padding(8,3,0,0)};
+      top.Controls.Add(summary);top.Controls.Add(demographics);top.Controls.Add(tabs);
       Controls.Add(top);
 
       var footer=new Panel{Dock=DockStyle.Bottom,Height=31,
@@ -102,6 +106,17 @@ namespace RadiologyAgent {
       Controls.Add(cards);cards.BringToFront();
     }
 
+    internal void UpdatePatientContext(string context,bool headerDetected,bool reviewed) {
+      string sex="Not detected",age="Not detected";
+      foreach(string part in (context??"").Split(';')) {
+        if(part.StartsWith("sex="))sex=part.Substring(4)=="male"?"Male":"Female";
+        if(part.StartsWith("age="))age=part.Substring(4);
+      }
+      string source=headerDetected?"Header":String.IsNullOrEmpty(context)?"No readable demographics":"Report";
+      string state=String.IsNullOrEmpty(context)?"Unavailable":reviewed?"Checked":"Detected; review pending";
+      demographics.Text="Patient context — "+source+" | "+state+"\nGender: "+sex+"   Age: "+age;
+      demographics.ForeColor=String.IsNullOrEmpty(context)?Muted:Ink;
+    }
     internal void UpdateIssues(IList<Issue> updates) {
       issues=updates==null?new List<Issue>():new List<Issue>(updates);
       RefreshCards();

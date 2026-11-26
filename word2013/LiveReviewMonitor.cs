@@ -87,6 +87,7 @@ namespace RadiologyAgent {
     private int missingWordTicks;
     private string documentId, currentText, snapshotToken;
     private string patientContext="";
+    private bool patientHeaderDetected,patientContextReviewed;
     private DateTime lastChangeUtc;
     private string readyResponse;
     private bool failed, working, pendingClick;
@@ -263,57 +264,92 @@ namespace RadiologyAgent {
       }
     }
 
-    // Extract only explicit demographic values; never send names, patient IDs,
-    // accession numbers, DOB or raw header text. Conflicting fields are unknown.
+    // Only send canonical age/sex, never names, accession numbers, raw header or DOB.
+    private const string ContextSeparator=@"[\s\x07:=：\-]*";
+    private const string AgeLabel=@"(?:\b(?:patient\s+)?(?:age|ega)\b|العمر|السن)";
+    private const string SexLabel=@"(?:\b(?:patient\s+)?(?:sex|gender|xes|redneg)\b|الجنس|النوع)";
+    private const string AgeUnit=@"(?:years?|yrs?|yr|y|months?|mos?|mo|m|days?|d|weeks?|wks?|wk|w|سنة|سنوات|عام|أعوام|شهر|شهور|أشهر|يوم|أيام|أسبوع|أسابيع)";
+    private static readonly RegexOptions ContextOptions=RegexOptions.IgnoreCase|RegexOptions.CultureInvariant;
+    private static string NormalizeContextText(string text) {
+      if(String.IsNullOrWhiteSpace(text))return "";
+      return text.Normalize(NormalizationForm.FormKC)
+        .Replace('\u200e',' ').Replace('\u200f',' ').Replace('\u202a',' ').Replace('\u202b',' ')
+        .Replace('\u202c',' ').Replace('\u202d',' ').Replace('\u202e',' ')
+        .Replace('٠','0').Replace('١','1').Replace('٢','2').Replace('٣','3').Replace('٤','4')
+        .Replace('٥','5').Replace('٦','6').Replace('٧','7').Replace('٨','8').Replace('٩','9');
+    }
+    private static string AgeUnitName(string unit) {
+      string u=unit.ToLowerInvariant();
+      if(u=="m"||u.StartsWith("mo")||u=="شهر"||u=="شهور"||u=="أشهر")return "months";
+      if(u.StartsWith("d")||u=="يوم"||u=="أيام")return "days";
+      if(u.StartsWith("w")||u=="أسبوع"||u=="أسابيع")return "weeks";
+      return "years";
+    }
+    internal static string CanonicalAge(string value) {
+      value=NormalizeContextText(value).Trim(' ','\r','\n','\t','\x07',':','-');
+      var tokens=Regex.Matches(value,@"(\d{1,5})[ \t-]*("+AgeUnit+@")(?![\w])",ContextOptions);
+      if(tokens.Count==0) {
+        int bare;
+        return Regex.IsMatch(value,@"^\d{1,3}$")&&Int32.TryParse(value,out bare)&&bare<=125
+          ?bare.ToString()+" years":"";
+      }
+      // Reject arbitrary suffixes, multiple repetitions or incompatible units.
+      string residue=Regex.Replace(value,@"\d{1,5}[ \t-]*"+AgeUnit+@"(?![\w])","",ContextOptions);
+      if(!Regex.IsMatch(residue,@"^[\s,\-]*$"))return "";
+      var parts=new Dictionary<string,int>();
+      foreach(Match token in tokens) {
+        int number;
+        string unit=AgeUnitName(token.Groups[2].Value);
+        if(!Int32.TryParse(token.Groups[1].Value,out number)||parts.ContainsKey(unit))return "";
+        int max=unit=="years"?125:unit=="months"?1500:unit=="weeks"?6500:46000;
+        if(number<0||number>max)return "";
+        parts.Add(unit,number);
+      }
+      if(parts.Count==1)foreach(var entry in parts)return entry.Value.ToString()+" "+entry.Key;
+      // Retain exact compound ages (e.g. 61Y 2M, 2M 5D, 0Y 0M 12D).
+      if(parts.ContainsKey("weeks")&&parts.Count>1)return "";
+      if(parts.ContainsKey("months")&&parts.ContainsKey("years")&&parts["months"]>=12)return "";
+      if(parts.ContainsKey("days")&&parts.Count>1&&parts["days"]>=32)return "";
+      var result=new List<string>();
+      foreach(string unit in new[]{"years","months","days"})if(parts.ContainsKey(unit))
+        result.Add(parts[unit].ToString()+" "+unit);
+      return String.Join(" ",result);
+    }
+    private static string CanonicalSex(string value) {
+      value=NormalizeContextText(value).Trim(' ','\r','\n','\t','\x07',':','-').ToLowerInvariant();
+      return value=="male"||value=="m"||value=="ذكر"?"male":
+        value=="female"||value=="f"||value=="أنثى"||value=="انثى"?"female":"";
+    }
     internal static string ParsePatientContext(IEnumerable<string> sources) {
       var sexes=new HashSet<string>(StringComparer.Ordinal);
       var ages=new HashSet<string>(StringComparer.Ordinal);
-      var opts=RegexOptions.IgnoreCase|RegexOptions.CultureInvariant;
-      const string sep=@"[\s\x07:=：\-]*";
+      // Match the full compound value before considering a plain numeric age.
+      string ageValue=@"(?:\d{1,5}[ \t-]*"+AgeUnit+@"(?![\w])(?:[ \t,]+\d{1,5}[ \t-]*"+AgeUnit+@"(?![\w])){0,2}|\d{1,3}(?![\w./]))";
       foreach(string source in sources) {
-        if(String.IsNullOrWhiteSpace(source))continue;
-        string text=source.Normalize(NormalizationForm.FormKC);
-        // Each source is a bounded header or the initial administrative block.
-        text=text.Replace('٠','0').Replace('١','1').Replace('٢','2').Replace('٣','3').Replace('٤','4').Replace('٥','5').Replace('٦','6').Replace('٧','7').Replace('٨','8').Replace('٩','9');
-        foreach(Match m in Regex.Matches(text,@"(?:\b(?:patient\s+)?(?:sex|gender)\b|(?:الجنس|النوع))"+sep+@"(female|male|[fm]|ذكر|أنثى|انثى)(?![\w])",opts)) {
-          string v=m.Groups[1].Value.ToLowerInvariant();
-          sexes.Add(v=="m"||v=="male"||v=="ذكر"?"male":"female");
+        string text=NormalizeContextText(source);
+        foreach(Match m in Regex.Matches(text,SexLabel+ContextSeparator+@"(female|male|[fm]|ذكر|أنثى|انثى)(?![\w])",ContextOptions)) {
+          string value=CanonicalSex(m.Groups[1].Value);if(value!="")sexes.Add(value);
         }
-        // Explicit age label, or an age expression directly associated with
-        // the patient; no inference from identifiers or examination names.
-        string unit=@"(years?|yrs?|y|months?|mos?|mo|days?|d|weeks?|wks?|wk|سنة|سنوات|عام|أعوام|شهر|شهور|أشهر|يوم|أيام|أسبوع|أسابيع)";
-        var patterns=new[]{
-          @"(?:\b(?:patient\s+)?age\b|(?:العمر|السن))"+sep+@"(\d{1,3})(?:[ \t-]*"+unit+@")?(?![\d./])",
-          @"\b(\d{1,3})[ \t-]*"+unit+@"[ \t-]*(?:old\b|(?=(?:male|female)\b))",
-          @"\b(\d{1,3})[ \t-]*"+unit+@"[ \t]*/[ \t]*(?=[MF]\b)"
-        };
-        foreach(string pattern in patterns)
-          foreach(Match m in Regex.Matches(text,pattern,opts)) {
-            int n;if(!Int32.TryParse(m.Groups[1].Value,out n))continue;
-            string u=m.Groups[2].Value.ToLowerInvariant();
-            string canonical=u.StartsWith("mo")||u=="شهر"||u=="شهور"||u=="أشهر"?"months":
-              u.StartsWith("d")||u=="يوم"||u=="أيام"?"days":
-              u.StartsWith("w")||u=="أسبوع"||u=="أسابيع"?"weeks":"years";
-            int max=canonical=="years"?125:canonical=="months"?1500:canonical=="weeks"?6500:46000;
-            if(n>=0&&n<=max)ages.Add(n.ToString(System.Globalization.CultureInfo.InvariantCulture)+" "+canonical);
-          }
-        foreach(Match m in Regex.Matches(text,@"\b\d{1,3}[ \t-]*"+unit+@"[ \t-]*(?:old[ \t,/-]*)?(male|female|[fm])\b",opts)) {
-          string v=m.Groups[2].Value.ToLowerInvariant();
-          sexes.Add(v=="m"||v=="male"?"male":"female");
+        foreach(Match m in Regex.Matches(text,AgeLabel+ContextSeparator+"("+ageValue+")",ContextOptions)) {
+          string value=CanonicalAge(m.Groups[1].Value);if(value!="")ages.Add(value);
         }
-        foreach(Match m in Regex.Matches(text,@"\b\d{1,3}[ \t-]*"+unit+@"[ \t]*/[ \t]*([mf])\b",opts))
-          sexes.Add(m.Groups[2].Value.ToLowerInvariant()=="m"?"male":"female");
+        foreach(Match m in Regex.Matches(text,@"\b("+ageValue+@")[ \t-]*(?:old\b|(?=[ \t]*(?:male|female)\b)|[ \t]*/[ \t]*(?=[MF]\b))",ContextOptions)) {
+          string value=CanonicalAge(m.Groups[1].Value);if(value!="")ages.Add(value);
+        }
+        foreach(Match m in Regex.Matches(text,@"\b"+ageValue+@"[ \t-]*(?:old[ \t,/-]*)?/?[ \t]*(male|female|[fm])\b",ContextOptions)) {
+          string value=CanonicalSex(m.Groups[1].Value);if(value!="")sexes.Add(value);
+        }
       }
       string age="",sex="";
       if(ages.Count==1)foreach(string a in ages)age=a;
       if(sexes.Count==1)foreach(string a in sexes)sex=a;
-      return (sex.Length>0?"sex="+sex+";":"")+(age.Length>0?"age="+age+";":"");
+      return (sex!=""?"sex="+sex+";":"")+(age!=""?"age="+age+";":"");
     }
     private static void AddContextSource(List<string> result,string value) {
-      if(!String.IsNullOrWhiteSpace(value)&&value.Length<=12000&&result.Count<50)result.Add(value);
+      if(!String.IsNullOrWhiteSpace(value)&&value.Length<=12000&&result.Count<100)result.Add(value);
     }
     private static void AddShapeContext(List<string> result,object shape,int depth) {
-      if(depth>3||result.Count>=50)return;
+      if(depth>3||result.Count>=100)return;
       try {dynamic s=shape;if(Convert.ToInt32(s.Type)==6) {
         dynamic g=s.GroupItems;int count=Math.Min(40,(int)g.Count);
         for(int i=1;i<=count;i++)try {AddShapeContext(result,(object)g.Item(i),depth+1);}catch{}
@@ -321,35 +357,88 @@ namespace RadiologyAgent {
       try {dynamic s=shape;if(Convert.ToInt32(s.TextFrame.HasText)!=0)
         AddContextSource(result,Convert.ToString(s.TextFrame.TextRange.Text));}catch{}
     }
+    internal static string FixedHeaderRow(IList<string> cells) {
+      // DSCAN table: accession pair, age pair, gender pair. Use ordinal cells
+      // (not grid columns), because the age cell spans two grid columns.
+      if(cells==null||cells.Count!=6)return "";
+      string a=NormalizeContextText(cells[2]).Trim(' ','\t','\r','\n','\x07',':','：').ToLowerInvariant();
+      string g=NormalizeContextText(cells[4]).Trim(' ','\t','\r','\n','\x07',':','：').ToLowerInvariant();
+      string key=NormalizeContextText(cells[0]).Trim(' ','\t','\r','\n','\x07',':','：').ToLowerInvariant();
+      bool ageLabel=a=="age"||a=="ega"||a=="العمر"||a=="السن";
+      bool sexLabel=g=="gender"||g=="redneg"||g=="sex"||g=="xes"||g=="الجنس"||g=="النوع";
+      bool accession=key=="accession"||key=="noissecca"||key=="accession no"||key=="accession number";
+      // Never interpret arbitrary cells of an unrelated table as demographics.
+      if(!(ageLabel&&sexLabel)&&!(accession&&(ageLabel||sexLabel)))return "";
+      string age=CanonicalAge(cells[3]),sex=CanonicalSex(cells[5]);
+      return (age!=""?"Age: "+age+"\r":"")+(sex!=""?"Gender: "+sex+"\r":"");
+    }
+    private static void AddFixedHeaderTables(List<string> sources,object headerRange) {
+      try {
+        dynamic range=headerRange,tables=range.Tables;
+        for(int t=1;t<=Math.Min(20,Convert.ToInt32(tables.Count));t++)try {
+          dynamic table=tables.Item(t);
+          var cells=new List<string>();
+          try {
+            dynamic row=table.Rows.Item(3).Cells;
+            for(int c=1;c<=Math.Min(20,Convert.ToInt32(row.Count));c++)
+              cells.Add(Convert.ToString(row.Item(c).Range.Text));
+          }catch {
+            // Rows.Item can fail on merged tables. Enumerate Range.Cells in
+            // physical order; the cell RowIndex, not ColumnIndex, is decisive.
+            cells.Clear();
+            dynamic all=table.Range.Cells;
+            for(int c=1;c<=Math.Min(150,Convert.ToInt32(all.Count));c++)try {
+              dynamic cell=all.Item(c);
+              if(Convert.ToInt32(cell.RowIndex)==3)cells.Add(Convert.ToString(cell.Range.Text));
+            }catch{}
+          }
+          AddContextSource(sources,FixedHeaderRow(cells));
+        }catch{}
+      }catch{}
+    }
     internal static string ReadPatientContext(object document,string report) {
+      bool ignored;return ReadPatientContext(document,report,out ignored);
+    }
+    internal static string ReadPatientContext(object document,string report,out bool headerDetected) {
+      var headers=new List<string>();
+      headerDetected=false;
+      try {
+        dynamic d=document,sections=d.Sections;
+        // Word first/even/primary headers may differ. Scan every available
+        // section within a bounded limit, keeping conflicting fields unknown.
+        for(int section=1;section<=Math.Min(32,Convert.ToInt32(sections.Count));section++)try {
+          dynamic collection=sections.Item(section).Headers;
+          for(int type=1;type<=3;type++)try {
+            dynamic h=collection.Item(type);
+            if(!Convert.ToBoolean(h.Exists))continue;
+            dynamic hr=h.Range;
+            AddFixedHeaderTables(headers,(object)hr);
+            AddContextSource(headers,Convert.ToString(hr.Text));
+            try {
+              dynamic shapes=h.Shapes;int count=Math.Min(40,Convert.ToInt32(shapes.Count));
+              for(int j=1;j<=count;j++)try {AddShapeContext(headers,(object)shapes.Item(j),0);}catch{}
+            }catch{}
+          }catch{}
+        }catch{}
+      }catch{}
+      try {
+        foreach(string source in headers)if(ParsePatientContext(new[]{source})!=""){headerDetected=true;break;}
+        // A real header is authoritative. Do not let an opposing statement
+        // in the body cancel its metadata; the worker compares both sources.
+        if(headerDetected)return ParsePatientContext(headers);
+      }catch{}
       var sources=new List<string>();
-      // Main-story top tables are often used instead of a real Word header.
       string top=(report??"").Substring(0,Math.Min(1800,(report??"").Length));
       var clinical=Regex.Match(top,@"(?:^|[\r\n\x07])[ \t]*(?:findings|impression|conclusion|clinical history|clinical data|history|technique|comparison)\s*[:：\-]",RegexOptions.IgnoreCase);
       if(clinical.Success)top=top.Substring(0,clinical.Index);
       AddContextSource(sources,top);
-      int topEnd=top.Length;
-      try {
-        dynamic d=document;
-        // Only first-section headers, including first/even/primary variants.
-        // Disagreement between variants suppresses that demographic field.
-        dynamic headers=d.Sections.Item(1).Headers;
-        for(int i=1;i<=3;i++)try {
-          dynamic h=headers.Item(i);
-          if(!(bool)h.Exists)continue;
-          AddContextSource(sources,Convert.ToString(h.Range.Text));
-          dynamic shapes=h.Shapes;int count=Math.Min(40,(int)shapes.Count);
-          for(int j=1;j<=count;j++)try {AddShapeContext(sources,(object)shapes.Item(j),0);}catch{}
-        }catch{}
-      }catch{}
       try {
         dynamic d=document,shapes=d.Shapes;
-        int count=Math.Min(60,(int)shapes.Count);
-        int start=(int)d.Content.Start;
+        int count=Math.Min(60,(int)shapes.Count),start=(int)d.Content.Start;
         for(int j=1;j<=count;j++)try {
-          dynamic s=shapes.Item(j);
-          int at=(int)s.Anchor.Start-start;
-          if(at>=0&&at<=topEnd)AddShapeContext(sources,(object)s,0);
+          dynamic shape=shapes.Item(j);
+          int at=(int)shape.Anchor.Start-start;
+          if(at>=0&&at<=top.Length)AddShapeContext(sources,(object)shape,0);
         }catch{}
       }catch{}
       try{return ParsePatientContext(sources);}catch{return "";}
@@ -359,9 +448,10 @@ namespace RadiologyAgent {
       try {
         dynamic app=word;
         dynamic doc=boundWordWindow!=null?((dynamic)boundWordWindow).Document:app.ActiveDocument;
-        string next=ReadPatientContext((object)doc,currentText);
+        string next=ReadPatientContext((object)doc,currentText,out patientHeaderDetected);
         if(!String.Equals(next,patientContext,StringComparison.Ordinal)) {
-          patientContext=next;
+          patientContext=next;patientContextReviewed=false;
+          if(runningCancellation!=null)runningCancellation.Cancel();
           snapshotToken=WebReviewForm.CachePath(currentText,false,patientContext);
           readyResponse=ValidateResponse(WebReviewForm.ReadCached(snapshotToken),currentText);
           failed=false;
@@ -422,7 +512,8 @@ namespace RadiologyAgent {
         if(runningCancellation!=null)runningCancellation.Cancel();
         documentId=id;
         currentText=report;
-        patientContext=ReadPatientContext((object)doc,report);
+        patientContext=ReadPatientContext((object)doc,report,out patientHeaderDetected);
+        patientContextReviewed=false;
         snapshotToken=WebReviewForm.CachePath(report,false,patientContext);
         lastChangeUtc=DateTime.UtcNow;
         failed=false;
@@ -439,6 +530,7 @@ namespace RadiologyAgent {
       suggestionPopup=null;lastSuggestionAnchor=null;
       if(runningCancellation!=null)runningCancellation.Cancel();
       documentId=null;currentText=null;snapshotToken=null;patientContext="";
+      patientHeaderDetected=false;patientContextReviewed=false;
       readyResponse=null;failed=false;
       WebReviewForm.SetReviewStatus(0);
     }
@@ -568,6 +660,7 @@ namespace RadiologyAgent {
     }
     private void UpdateSidebar(object document,bool force) {
       if(sidebar==null||sidebar.IsDisposed)return;
+      sidebar.UpdatePatientContext(patientContext,patientHeaderDetected,patientContextReviewed);
       try {
         dynamic doc=document;
         dynamic comments=doc.Comments;
@@ -1159,6 +1252,7 @@ namespace RadiologyAgent {
       }
       if(working){StartReviewOverlay();return;}
       RefreshPatientContext();
+      patientContextReviewed=false;
       if(readyResponse!=null){ApplyReady();return;}
       if(failed) {
         // A new click after an exhausted attempt starts a fresh analysis
@@ -1307,6 +1401,14 @@ namespace RadiologyAgent {
         if(ParsePatientContext(new[]{"Patient ID: 123456\rPatient name: Example"})!="")return false;
         if(ParsePatientContext(new[]{"Age: 45 years\rGender: Male","Age: 46 years\rGender: Female"})!="")return false;
         if(ParsePatientContext(new[]{"Patient age: 2 years"})!="age=2 years;")return false;
+        // An anonymized structural fixture from the supplied DSCAN layout.
+        string fixture=FixedHeaderRow(new[]{"Accession:","SYNTHETIC",":egA","61Y 2M",":redneG","Male"});
+        if(ParsePatientContext(new[]{fixture})!="sex=male;age=61 years 2 months;")return false;
+        if(ParsePatientContext(new[]{":egA\r\u000761Y 2M\r\u0007:redneG\r\u0007Male"})!="sex=male;age=61 years 2 months;")return false;
+        if(ParsePatientContext(new[]{"Gender: Female\rAge: 2M 5D"})!="sex=female;age=2 months 5 days;")return false;
+        if(ParsePatientContext(new[]{"Gender: F\rAge: 12D"})!="sex=female;age=12 days;")return false;
+        if(FixedHeaderRow(new[]{"X","Y","Z","61Y 2M","Q","Male"})!="")return false;
+        if(CanonicalAge("12345678")!=""||CanonicalAge("65Y 14M")!="")return false;
         string clinicalAfter=report+"Thanks;\rConclusion: Left renal mass.";
         if(ProtectedClinicalEnd(clinicalAfter)!=clinicalAfter.Length)return false;
         var parser=new JavaScriptSerializer{MaxJsonLength=2000000};
@@ -1763,6 +1865,7 @@ namespace RadiologyAgent {
           LogFailure("MANDATORY_APPROVAL_NOT_STORED");
           pendingClick=false;CloseReviewOverlay();Notify(false);return;
         }
+        patientContextReviewed=true;
         pendingClick=false;
         CloseReviewOverlay();
         ShowSidebar();

@@ -1,4 +1,4 @@
-# Haronex Enterprise 11.12.15 (DSCAN)
+# Haronex Enterprise 11.12.16 (DSCAN)
 
 This is a separate machine-wide Word 2013 x86 package. Keep the existing personal installer for recovery/testing only. Install the enterprise EXE from an elevated administrator session on a computer joined to dscan.corp. Close Word and Haronex before upgrading. Files inherit Program Files ACLs. Do not grant standard users Modify or Full Control there.
 
@@ -25,3 +25,6 @@ Both interactive installers show Word Review Settings before credential pages on
 
 ## Mandatory review (successful review + cleanup when needed)
 When enabled, Save, Save As and Print require successful Review Text for the same open document. Clean reviews unlock directly. A review with findings, existing comments or possible Haronex highlights requires a subsequent successful Clear Both; applying corrections is optional. Clear Both before a successful review cannot unlock. A new explicit review re-locks the document. Edits after successful release remain allowed for that open document. Clear Both removes comments and red/yellow/violet highlights; other colors are retained. Cleanup failures do not acknowledge a marked review. Existing Groq keys, setup checkboxes and uninstall policy are retained. Test with real Word 2013 before rollout.
+
+## Patient context
+Word header demographics take priority over body statements. The DSCAN third-row six-cell layout is validated by its field labels, including reversed Age/Gender labels; row ordinals are used to accommodate merged columns. All available section headers and text boxes are scanned; conflicts are not guessed. Only canonical age/sex are supplied to the existing demographic audit, with compound ages retained. Explicit age/sex conflicts and potential sex/anatomy mismatches have an independent local verification-only check. The sidebar shows source, detected values and review status. No raw header, patient name, DOB or accession is sent by this feature. Previous cached review results are invalidated by protocol r9. Test the real Word template with synthetic demographics before rollout. Mandatory review, cleanup gate, model assignments and installer credentials are unchanged.
